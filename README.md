@@ -52,3 +52,4 @@ Auto-scanning runs every 5 minutes during market hours (Mon-Fri 8:30AM-3PM CT).
 ## Disclaimer
 
 Educational and research purposes only. Not financial advice. Options involve significant risk of loss.
+
