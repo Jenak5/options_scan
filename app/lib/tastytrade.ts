@@ -11,12 +11,17 @@ function getBaseUrl(): string {
   return BASE_URLS[env as keyof typeof BASE_URLS] || BASE_URLS.sandbox;
 }
 
+const HEADERS = {
+  "Content-Type": "application/json",
+  "User-Agent": "OptionsEdgeScanner/1.0",
+};
+
 export async function authenticate(): Promise<string> {
   if (sessionToken && Date.now() < tokenExpiry) return sessionToken;
 
   const res = await fetch(`${getBaseUrl()}/sessions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: HEADERS,
     body: JSON.stringify({
       login: process.env.TASTYTRADE_USERNAME,
       password: process.env.TASTYTRADE_PASSWORD,
@@ -37,7 +42,7 @@ export async function authenticate(): Promise<string> {
 async function ttFetch(path: string) {
   const token = await authenticate();
   const res = await fetch(`${getBaseUrl()}${path}`, {
-    headers: { Authorization: token, "Content-Type": "application/json" },
+    headers: { ...HEADERS, Authorization: token },
   });
   if (!res.ok) {
     const err = await res.text();
