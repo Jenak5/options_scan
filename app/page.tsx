@@ -103,23 +103,30 @@ function FlowTab() {
             {["Ticker", "Type", "Strike", "Exp", "Premium", "Vol", "OI", "IV", "Flags", "Time"].map(h => <th key={h}>{h}</th>)}
           </tr></thead><tbody>
             {flows.map((f: any, i: number) => {
-              const volOi = f.open_interest > 0 ? f.volume / f.open_interest : 0;
+              const prem = parseFloat(f.total_premium) || 0;
+              const iv = parseFloat(f.iv_start) || 0;
+              const volOi = parseFloat(f.volume_oi_ratio) || 0;
+              const price = parseFloat(f.underlying_price) || 0;
+              const strike = parseFloat(f.strike) || 0;
+              const isOtm = f.type === "call" ? strike > price : strike < price;
               return (
                 <tr key={i}>
                   <td style={{ fontWeight: 600, color: "#e2e8f0" }}>{f.ticker}</td>
-                  <td><Badge color={f.option_type === "C" ? "green" : "red"}>{f.option_type === "C" ? "CALL" : "PUT"}</Badge></td>
-                  <td>${f.strike_price}</td>
-                  <td>{f.expiration_date}</td>
-                  <td style={{ fontWeight: 600, color: f.premium >= 500000 ? "#f59e0b" : "#e2e8f0" }}>${(f.premium / 1000).toFixed(0)}K</td>
+                  <td><Badge color={f.type === "call" ? "green" : "red"}>{f.type === "call" ? "CALL" : "PUT"}</Badge></td>
+                  <td>${f.strike}</td>
+                  <td>{f.expiry}</td>
+                  <td style={{ fontWeight: 600, color: prem >= 500000 ? "#f59e0b" : "#e2e8f0" }}>${(prem / 1000).toFixed(0)}K</td>
                   <td>{f.volume?.toLocaleString()}</td>
                   <td>{f.open_interest?.toLocaleString()}</td>
-                  <td>{(f.implied_volatility * 100)?.toFixed(1)}%</td>
+                  <td>{(iv * 100).toFixed(1)}%</td>
                   <td><div style={{ display: "flex", gap: 4 }}>
-                    {f.is_sweep && <Badge color="amber">SWEEP</Badge>}
-                    {f.is_otm && <Badge color="purple">OTM</Badge>}
+                    {f.has_sweep && <Badge color="amber">SWEEP</Badge>}
+                    {f.has_floor && <Badge color="purple">FLOOR</Badge>}
+                    {f.has_multileg && <Badge color="blue">MULTI</Badge>}
+                    {isOtm && <Badge color="purple">OTM</Badge>}
                     {volOi > 1 && <Badge color="cyan">NEW</Badge>}
                   </div></td>
-                  <td style={{ fontSize: 11, color: "#64748b" }}>{new Date(f.executed_at).toLocaleTimeString()}</td>
+                  <td style={{ fontSize: 11, color: "#64748b" }}>{new Date(f.created_at).toLocaleTimeString()}</td>
                 </tr>
               );
             })}
@@ -149,7 +156,11 @@ function DarkPoolTab() {
 
   useEffect(() => { load(); }, [load]);
 
-  const totalNotional = useMemo(() => prints.reduce((s, p) => s + (p.price * p.size || p.notional || 0), 0), [prints]);
+  const totalNotional = useMemo(() => prints.reduce((s, p) => {
+    const px = parseFloat(p.price) || 0;
+    const sz = parseFloat(p.size) || parseFloat(p.volume) || 0;
+    return s + (px * sz || parseFloat(p.notional) || 0);
+  }, 0), [prints]);
 
   return (
     <div>
@@ -164,15 +175,17 @@ function DarkPoolTab() {
         <div style={{ overflowX: "auto" }}>
           <table><thead><tr>{["Ticker", "Price", "Size", "Notional", "Type", "Time"].map(h => <th key={h}>{h}</th>)}</tr></thead>
           <tbody>{prints.slice(0, 100).map((p: any, i: number) => {
-            const notional = p.price * p.size || p.notional || 0;
+            const px = parseFloat(p.price) || 0;
+            const sz = parseFloat(p.size) || parseFloat(p.volume) || 0;
+            const notional = px * sz || parseFloat(p.notional) || 0;
             return (
               <tr key={i}>
                 <td style={{ fontWeight: 600, color: "#e2e8f0" }}>{p.ticker}</td>
-                <td>${p.price?.toFixed(2)}</td>
-                <td>{p.size?.toLocaleString()}</td>
+                <td>${px.toFixed(2)}</td>
+                <td>{sz.toLocaleString()}</td>
                 <td style={{ fontWeight: 600, color: notional >= 1_000_000 ? "#f59e0b" : "#e2e8f0" }}>${(notional / 1000).toFixed(0)}K</td>
-                <td><Badge color="blue">{p.tracking_type || "BLOCK"}</Badge></td>
-                <td style={{ fontSize: 11, color: "#64748b" }}>{new Date(p.executed_at).toLocaleTimeString()}</td>
+                <td><Badge color="blue">{p.tracking_type || p.trade_type || "BLOCK"}</Badge></td>
+                <td style={{ fontSize: 11, color: "#64748b" }}>{new Date(p.executed_at || p.created_at).toLocaleTimeString()}</td>
               </tr>
             );
           })}</tbody></table>
