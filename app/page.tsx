@@ -274,7 +274,13 @@ function VolArbTab() {
 
   return (
     <div>
-      <p style={{ color: "#94a3b8", fontSize: 13, marginBottom: 16 }}>IV vs Realized Vol (30-day) — overpriced = sell premium, underpriced = buy premium.</p>
+      <div style={{ background: "rgba(16,185,129,0.06)", border: "1px solid rgba(16,185,129,0.15)", borderRadius: 8, padding: 12, marginBottom: 16 }}>
+        <div style={{ fontSize: 12, color: "#10b981", fontWeight: 600, marginBottom: 4 }}>Cash Account Mode — Long Calls & Puts Only</div>
+        <div style={{ fontSize: 12, color: "#94a3b8" }}>
+          Look for <span style={{ color: "#10b981", fontWeight: 600 }}>BUY FRIENDLY</span> tickers — low IV Rank means options are historically cheap.
+          Avoid <span style={{ color: "#ef4444", fontWeight: 600 }}>EXPENSIVE</span> tickers — you're overpaying for premium.
+        </div>
+      </div>
       <div style={{ display: "flex", gap: 10, marginBottom: 16, alignItems: "center" }}>
         <input placeholder="Add ticker..." value={extraTicker} onChange={(e) => setExtraTicker(e.target.value.toUpperCase())} onKeyDown={(e) => e.key === "Enter" && addTicker()} style={{ background: "rgba(255,255,255,0.06)", color: "#e2e8f0", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: "6px 12px", fontSize: 13, outline: "none", width: 140 }} />
         <button onClick={addTicker} style={{ background: "#06b6d4", color: "#0f172a", border: "none", borderRadius: 6, padding: "6px 16px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Add</button>
@@ -284,18 +290,37 @@ function VolArbTab() {
       {error && <ErrorMsg message={error} onRetry={load} />}
       {!loading && !error && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12 }}>
-          {metrics.sort((a: any, b: any) => Math.abs(parseFloat(b["iv-hv-30-day-difference"]) || 0) - Math.abs(parseFloat(a["iv-hv-30-day-difference"]) || 0)).map((m: any, i: number) => {
+          {metrics.sort((a: any, b: any) => {
+            const aRank = parseFloat(a["implied-volatility-index-rank"]) || 0;
+            const bRank = parseFloat(b["implied-volatility-index-rank"]) || 0;
+            return aRank - bRank;
+          }).map((m: any, i: number) => {
             const iv30 = parseFloat(m["implied-volatility-30-day"]) || 0;
             const hv30 = parseFloat(m["historical-volatility-30-day"]) || 0;
             const spread = parseFloat(m["iv-hv-30-day-difference"]) || (iv30 - hv30);
             const ivRank = parseFloat(m["implied-volatility-index-rank"]) || 0;
             const ivPct = parseFloat(m["implied-volatility-percentile"]) || 0;
-            const signal = spread > 5 ? "SELL VOL" : spread < -5 ? "BUY VOL" : "NEUTRAL";
+
+            let signal = "";
+            let signalColor = "";
+            let borderColor = "";
+            if (spread < -5) {
+              signal = "BUY VOL"; signalColor = "green"; borderColor = "rgba(16,185,129,0.3)";
+            } else if (ivRank < 0.25 && spread < 10) {
+              signal = "BUY FRIENDLY"; signalColor = "green"; borderColor = "rgba(16,185,129,0.2)";
+            } else if (ivRank < 0.25 && spread >= 10) {
+              signal = "CAUTION"; signalColor = "amber"; borderColor = "rgba(245,158,11,0.2)";
+            } else if (spread >= 10) {
+              signal = "EXPENSIVE"; signalColor = "red"; borderColor = "rgba(239,68,68,0.2)";
+            } else {
+              signal = "NEUTRAL"; signalColor = "blue"; borderColor = "rgba(255,255,255,0.06)";
+            }
+
             return (
-              <div key={i} style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 8, padding: 16 }}>
+              <div key={i} style={{ background: "rgba(255,255,255,0.03)", border: `1px solid ${borderColor}`, borderRadius: 8, padding: 16 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
                   <span style={{ fontWeight: 700, fontSize: 16 }}>{m.symbol}</span>
-                  <Badge color={signal === "SELL VOL" ? "red" : signal === "BUY VOL" ? "green" : "blue"}>{signal}</Badge>
+                  <Badge color={signalColor}>{signal}</Badge>
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
                   <div><div style={{ color: "#64748b", fontSize: 10, textTransform: "uppercase" }}>IV 30d</div><div style={{ fontSize: 18, fontWeight: 600, fontFamily: "'JetBrains Mono', monospace" }}>{iv30.toFixed(1)}%</div></div>
@@ -305,13 +330,28 @@ function VolArbTab() {
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 }}>
                   <div>
                     <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#64748b", marginBottom: 3 }}><span>IV Rank</span><span>{(ivRank * 100).toFixed(0)}%</span></div>
-                    <div style={{ height: 4, background: "rgba(255,255,255,0.08)", borderRadius: 2 }}><div style={{ width: `${ivRank * 100}%`, height: "100%", background: ivRank > 0.5 ? "#f59e0b" : "#3b82f6", borderRadius: 2 }} /></div>
+                    <div style={{ height: 4, background: "rgba(255,255,255,0.08)", borderRadius: 2 }}><div style={{ width: `${ivRank * 100}%`, height: "100%", background: ivRank > 0.5 ? "#f59e0b" : ivRank < 0.25 ? "#10b981" : "#3b82f6", borderRadius: 2 }} /></div>
                   </div>
                   <div>
                     <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#64748b", marginBottom: 3 }}><span>IV %ile</span><span>{(ivPct * 100).toFixed(0)}%</span></div>
                     <div style={{ height: 4, background: "rgba(255,255,255,0.08)", borderRadius: 2 }}><div style={{ width: `${ivPct * 100}%`, height: "100%", background: ivPct > 0.5 ? "#f59e0b" : "#3b82f6", borderRadius: 2 }} /></div>
                   </div>
                 </div>
+                {(signal === "BUY FRIENDLY" || signal === "BUY VOL") && (
+                  <div style={{ marginTop: 10, padding: 8, background: "rgba(16,185,129,0.06)", borderRadius: 6, fontSize: 11, color: "#10b981" }}>
+                    Good for long calls/puts — options are cheap relative to history
+                  </div>
+                )}
+                {signal === "CAUTION" && (
+                  <div style={{ marginTop: 10, padding: 8, background: "rgba(245,158,11,0.06)", borderRadius: 6, fontSize: 11, color: "#f59e0b" }}>
+                    IV Rank is low but spread is wide — proceed with caution, go ATM + 45 DTE
+                  </div>
+                )}
+                {signal === "EXPENSIVE" && (
+                  <div style={{ marginTop: 10, padding: 8, background: "rgba(239,68,68,0.06)", borderRadius: 6, fontSize: 11, color: "#ef4444" }}>
+                    Avoid buying options here — you're overpaying. Wait for IV to drop.
+                  </div>
+                )}
               </div>
             );
           })}
@@ -542,7 +582,7 @@ export default function OptionsEdgeScanner() {
         {tab === "alerts" && <AlertsTab />}
       </div>
       <div style={{ padding: "16px 24px", borderTop: "1px solid rgba(255,255,255,0.06)", display: "flex", justifyContent: "space-between", color: "#334155", fontSize: 10 }}>
-        <span>Options Edge Scanner v1.0 · Not financial advice · Read-only</span>
+        <span>Options Edge Scanner v1.0 · Cash Account Mode · Not financial advice</span>
         <span>Tastytrade + Unusual Whales + Telegram</span>
       </div>
     </div>
