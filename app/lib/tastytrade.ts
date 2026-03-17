@@ -35,14 +35,8 @@ export async function authenticate(): Promise<string> {
   }
 
   const data = await res.json();
-  const token = data.data?.["access-token"] || data.access_token || data.data?.["session-token"];
-  const tokenType = data.data?.["token-type"] || data.token_type || "";
-
-  accessToken = token;
+  accessToken = data.data?.["access-token"] || data.access_token || data.data?.["session-token"];
   tokenExpiry = Date.now() + 23 * 60 * 60 * 1000;
-
-  console.log("TT auth response keys:", JSON.stringify(Object.keys(data.data || data)));
-
   return accessToken!;
 }
 
@@ -79,8 +73,8 @@ export async function getOptionChain(symbol: string) {
 }
 
 export async function getMarketMetrics(symbols: string[]) {
-  const query = symbols.map((s) => `symbols[]=${encodeURIComponent(s)}`).join("&");
-  const data = await ttFetch(`/market-metrics?${query}`);
+  const query = symbols.join(",");
+  const data = await ttFetch(`/market-metrics?symbols=${encodeURIComponent(query)}`);
   return data.data?.items || [];
 }
 
