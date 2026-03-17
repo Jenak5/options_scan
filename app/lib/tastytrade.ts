@@ -35,15 +35,24 @@ export async function authenticate(): Promise<string> {
   }
 
   const data = await res.json();
-  accessToken = data.data?.["access-token"] || data.access_token;
+  const token = data.data?.["access-token"] || data.access_token || data.data?.["session-token"];
+  const tokenType = data.data?.["token-type"] || data.token_type || "";
+
+  accessToken = token;
   tokenExpiry = Date.now() + 23 * 60 * 60 * 1000;
+
+  console.log("TT auth response keys:", JSON.stringify(Object.keys(data.data || data)));
+
   return accessToken!;
 }
 
 async function ttFetch(path: string) {
   const token = await authenticate();
   const res = await fetch(`${getBaseUrl()}${path}`, {
-    headers: { ...HEADERS, Authorization: token },
+    headers: {
+      ...HEADERS,
+      Authorization: `Bearer ${token}`,
+    },
   });
   if (!res.ok) {
     const err = await res.text();
