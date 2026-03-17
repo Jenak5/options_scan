@@ -26,14 +26,6 @@ function Badge({ children, color }: { children: React.ReactNode; color: string }
   return <span style={{ background: s.bg, color: s.text, border: `1px solid ${s.border}`, padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 600, letterSpacing: "0.03em", whiteSpace: "nowrap" }}>{children}</span>;
 }
 
-function MiniBar({ value, max, color = "#06b6d4" }: { value: number; max: number; color?: string }) {
-  return (
-    <div style={{ width: 60, height: 6, background: "rgba(255,255,255,0.06)", borderRadius: 3, overflow: "hidden" }}>
-      <div style={{ width: `${Math.min(Math.abs(value) / max * 100, 100)}%`, height: "100%", background: color, borderRadius: 3 }} />
-    </div>
-  );
-}
-
 function StatCard({ label, value, color = "#e2e8f0" }: { label: string; value: string; color?: string }) {
   return (
     <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 8, padding: "12px 16px" }}>
@@ -261,27 +253,43 @@ function VolArbTab() {
   const [metrics, setMetrics] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [extraTicker, setExtraTicker] = useState("");
+  const [tickers, setTickers] = useState("SPY,QQQ,AAPL,TSLA,NVDA,AMZN,META,MSFT,GOOG,AMD,NFLX,BA,JPM,GS,XOM");
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
-    try { setMetrics(await tt({ action: "metrics", symbols: "SPY,QQQ,AAPL,TSLA,NVDA,AMZN,META" })); }
+    try { setMetrics(await tt({ action: "metrics", symbols: tickers })); }
     catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
-  }, []);
+  }, [tickers]);
 
   useEffect(() => { load(); }, [load]);
 
+  const addTicker = () => {
+    if (extraTicker && !tickers.includes(extraTicker)) {
+      setTickers(tickers + "," + extraTicker);
+      setExtraTicker("");
+    }
+  };
+
   return (
     <div>
-      <p style={{ color: "#94a3b8", fontSize: 13, marginBottom: 16 }}>IV vs Realized Vol — overpriced = sell premium, underpriced = buy premium.</p>
+      <p style={{ color: "#94a3b8", fontSize: 13, marginBottom: 16 }}>IV vs Realized Vol (30-day) — overpriced = sell premium, underpriced = buy premium.</p>
+      <div style={{ display: "flex", gap: 10, marginBottom: 16, alignItems: "center" }}>
+        <input placeholder="Add ticker..." value={extraTicker} onChange={(e) => setExtraTicker(e.target.value.toUpperCase())} onKeyDown={(e) => e.key === "Enter" && addTicker()} style={{ background: "rgba(255,255,255,0.06)", color: "#e2e8f0", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: "6px 12px", fontSize: 13, outline: "none", width: 140 }} />
+        <button onClick={addTicker} style={{ background: "#06b6d4", color: "#0f172a", border: "none", borderRadius: 6, padding: "6px 16px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Add</button>
+        <button onClick={load} style={{ background: "rgba(255,255,255,0.06)", color: "#e2e8f0", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: "6px 16px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Refresh</button>
+      </div>
       {loading && <LoadingSpinner />}
       {error && <ErrorMsg message={error} onRetry={load} />}
       {!loading && !error && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12 }}>
-          {metrics.map((m: any, i: number) => {
-            const iv = (m["implied-volatility-index"] || m["implied-volatility"] || 0) * 100;
-            const hv = (m["historical-volatility-index"] || m["historical-volatility"] || 0) * 100;
-            const spread = iv - hv;
+          {metrics.sort((a: any, b: any) => Math.abs(parseFloat(b["iv-hv-30-day-difference"]) || 0) - Math.abs(parseFloat(a["iv-hv-30-day-difference"]) || 0)).map((m: any, i: number) => {
+            const iv30 = parseFloat(m["implied-volatility-30-day"]) || 0;
+            const hv30 = parseFloat(m["historical-volatility-30-day"]) || 0;
+            const spread = parseFloat(m["iv-hv-30-day-difference"]) || (iv30 - hv30);
+            const ivRank = parseFloat(m["implied-volatility-index-rank"]) || 0;
+            const ivPct = parseFloat(m["implied-volatility-percentile"]) || 0;
             const signal = spread > 5 ? "SELL VOL" : spread < -5 ? "BUY VOL" : "NEUTRAL";
             return (
               <div key={i} style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 8, padding: 16 }}>
@@ -290,16 +298,20 @@ function VolArbTab() {
                   <Badge color={signal === "SELL VOL" ? "red" : signal === "BUY VOL" ? "green" : "blue"}>{signal}</Badge>
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                  <div><div style={{ color: "#64748b", fontSize: 10, textTransform: "uppercase" }}>IV</div><div style={{ fontSize: 18, fontWeight: 600, fontFamily: "'JetBrains Mono', monospace" }}>{iv.toFixed(1)}%</div></div>
-                  <div><div style={{ color: "#64748b", fontSize: 10, textTransform: "uppercase" }}>HV</div><div style={{ fontSize: 18, fontWeight: 600, fontFamily: "'JetBrains Mono', monospace" }}>{hv.toFixed(1)}%</div></div>
+                  <div><div style={{ color: "#64748b", fontSize: 10, textTransform: "uppercase" }}>IV 30d</div><div style={{ fontSize: 18, fontWeight: 600, fontFamily: "'JetBrains Mono', monospace" }}>{iv30.toFixed(1)}%</div></div>
+                  <div><div style={{ color: "#64748b", fontSize: 10, textTransform: "uppercase" }}>HV 30d</div><div style={{ fontSize: 18, fontWeight: 600, fontFamily: "'JetBrains Mono', monospace" }}>{hv30.toFixed(1)}%</div></div>
                   <div><div style={{ color: "#64748b", fontSize: 10, textTransform: "uppercase" }}>Spread</div><div style={{ color: spread > 5 ? "#ef4444" : spread < -5 ? "#10b981" : "#94a3b8", fontSize: 18, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" }}>{spread > 0 ? "+" : ""}{spread.toFixed(1)}</div></div>
                 </div>
-                {m["iv-rank"] !== undefined && (
-                  <div style={{ marginTop: 10 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#64748b", marginBottom: 3 }}><span>IV Rank</span><span>{(m["iv-rank"] * 100).toFixed(0)}%</span></div>
-                    <div style={{ height: 4, background: "rgba(255,255,255,0.08)", borderRadius: 2 }}><div style={{ width: `${m["iv-rank"] * 100}%`, height: "100%", background: m["iv-rank"] > 0.5 ? "#f59e0b" : "#3b82f6", borderRadius: 2 }} /></div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 }}>
+                  <div>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#64748b", marginBottom: 3 }}><span>IV Rank</span><span>{(ivRank * 100).toFixed(0)}%</span></div>
+                    <div style={{ height: 4, background: "rgba(255,255,255,0.08)", borderRadius: 2 }}><div style={{ width: `${ivRank * 100}%`, height: "100%", background: ivRank > 0.5 ? "#f59e0b" : "#3b82f6", borderRadius: 2 }} /></div>
                   </div>
-                )}
+                  <div>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#64748b", marginBottom: 3 }}><span>IV %ile</span><span>{(ivPct * 100).toFixed(0)}%</span></div>
+                    <div style={{ height: 4, background: "rgba(255,255,255,0.08)", borderRadius: 2 }}><div style={{ width: `${ivPct * 100}%`, height: "100%", background: ivPct > 0.5 ? "#f59e0b" : "#3b82f6", borderRadius: 2 }} /></div>
+                  </div>
+                </div>
               </div>
             );
           })}
