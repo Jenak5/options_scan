@@ -3,7 +3,7 @@ const BASE_URLS = {
   production: "https://api.tastyworks.com",
 } as const;
 
-let sessionToken: string | null = null;
+let accessToken: string | null = null;
 let tokenExpiry: number = 0;
 
 function getBaseUrl(): string {
@@ -17,26 +17,27 @@ const HEADERS = {
 };
 
 export async function authenticate(): Promise<string> {
-  if (sessionToken && Date.now() < tokenExpiry) return sessionToken;
+  if (accessToken && Date.now() < tokenExpiry) return accessToken;
 
-  const res = await fetch(`${getBaseUrl()}/sessions`, {
+  const res = await fetch(`${getBaseUrl()}/oauth/token`, {
     method: "POST",
     headers: HEADERS,
     body: JSON.stringify({
-      login: process.env.TASTYTRADE_USERNAME,
-      password: process.env.TASTYTRADE_PASSWORD,
+      grant_type: "refresh_token",
+      client_secret: process.env.TASTYTRADE_CLIENT_SECRET,
+      refresh_token: process.env.TASTYTRADE_REFRESH_TOKEN,
     }),
   });
 
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Tastytrade auth failed (${res.status}): ${err}`);
+    throw new Error(`Tastytrade OAuth failed (${res.status}): ${err}`);
   }
 
   const data = await res.json();
-  sessionToken = data.data["session-token"];
+  accessToken = data.data?.["access-token"] || data.access_token;
   tokenExpiry = Date.now() + 23 * 60 * 60 * 1000;
-  return sessionToken!;
+  return accessToken!;
 }
 
 async function ttFetch(path: string) {
