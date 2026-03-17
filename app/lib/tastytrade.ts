@@ -36,7 +36,7 @@ export async function authenticate(): Promise<string> {
 
   const data = await res.json();
   accessToken = data.data?.["access-token"] || data.access_token || data.data?.["session-token"];
-  tokenExpiry = Date.now() + 23 * 60 * 60 * 1000;
+  tokenExpiry = Date.now() + 14 * 60 * 1000;
   return accessToken!;
 }
 
