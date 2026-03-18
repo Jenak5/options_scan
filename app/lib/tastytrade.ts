@@ -11,21 +11,33 @@ function getBaseUrl(): string {
   return BASE_URLS[env as keyof typeof BASE_URLS] || BASE_URLS.sandbox;
 }
 
-const HEADERS = {
+const HEADERS: Record<string, string> = {
   "Content-Type": "application/json",
   "User-Agent": "OptionsEdgeScanner/1.0",
 };
 
 export async function authenticate(): Promise<string> {
-  if (accessToken && Date.now() < tokenExpiry) return accessToken;
+  if (accessToken && Date.now() < tokenExpiry - 60000) {
+    return accessToken;
+  }
+
+  const clientSecret = process.env.TASTYTRADE_CLIENT_SECRET;
+  const refreshToken = process.env.TASTYTRADE_REFRESH_TOKEN;
+
+  if (!clientSecret || !refreshToken) {
+    throw new Error(
+      "Missing TASTYTRADE_CLIENT_SECRET or TASTYTRADE_REFRESH_TOKEN. " +
+      "Go to developer.tastytrade.com → OAuth Applications → Manage to get these."
+    );
+  }
 
   const res = await fetch(`${getBaseUrl()}/oauth/token`, {
     method: "POST",
     headers: HEADERS,
     body: JSON.stringify({
       grant_type: "refresh_token",
-      client_secret: process.env.TASTYTRADE_CLIENT_SECRET,
-      refresh_token: process.env.TASTYTRADE_REFRESH_TOKEN,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
     }),
   });
 
@@ -37,7 +49,12 @@ export async function authenticate(): Promise<string> {
   const data = await res.json();
   accessToken = data.data?.["access-token"] || data.access_token || data.data?.["session-token"];
   tokenExpiry = Date.now() + 14 * 60 * 1000;
-  return accessToken!;
+
+  if (!accessToken) {
+    throw new Error(`Tastytrade OAuth: no token in response: ${JSON.stringify(data)}`);
+  }
+
+  return accessToken;
 }
 
 async function ttFetch(path: string) {
@@ -49,6 +66,19 @@ async function ttFetch(path: string) {
     },
   });
   if (!res.ok) {
+    if (res.status === 401) {
+      accessToken = null;
+      tokenExpiry = 0;
+      const retryToken = await authenticate();
+      const retry = await fetch(`${getBaseUrl()}${path}`, {
+        headers: { ...HEADERS, Authorization: `Bearer ${retryToken}` },
+      });
+      if (!retry.ok) {
+        const err = await retry.text();
+        throw new Error(`Tastytrade API error (${retry.status}): ${err}`);
+      }
+      return retry.json();
+    }
     const err = await res.text();
     throw new Error(`Tastytrade API error (${res.status}): ${err}`);
   }
@@ -73,8 +103,8 @@ export async function getOptionChain(symbol: string) {
 }
 
 export async function getMarketMetrics(symbols: string[]) {
-  const query = symbols.join(",");
-  const data = await ttFetch(`/market-metrics?symbols=${encodeURIComponent(query)}`);
+  const query = symbols.map((s) => `symbols[]=${encodeURIComponent(s)}`).join("&");
+  const data = await ttFetch(`/market-metrics?${query}`);
   return data.data?.items || [];
 }
 
