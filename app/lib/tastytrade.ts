@@ -103,8 +103,8 @@ export async function getOptionChain(symbol: string) {
 }
 
 export async function getMarketMetrics(symbols: string[]) {
-  const query = symbols.map((s) => `symbols[]=${encodeURIComponent(s)}`).join("&");
-  const data = await ttFetch(`/market-metrics?${query}`);
+  const query = symbols.join(",");
+  const data = await ttFetch(`/market-metrics?symbols=${encodeURIComponent(query)}`);
   return data.data?.items || [];
 }
 
