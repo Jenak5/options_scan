@@ -266,7 +266,8 @@ function VolArbTab() {
   useEffect(() => { load(); }, [load]);
 
   const addTicker = () => {
-    if (extraTicker && !tickers.includes(extraTicker)) {
+    const tickerList = tickers.split(",");
+    if (extraTicker && !tickerList.includes(extraTicker)) {
       setTickers(tickers + "," + extraTicker);
       setExtraTicker("");
     }
@@ -445,13 +446,39 @@ function ChainTab() {
   const [chain, setChain] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [debugInfo, setDebugInfo] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    setLoading(true); setError(null);
-    try { setChain(await tt({ action: "chain", symbol: ticker })); }
+    setLoading(true); setError(null); setDebugInfo(null);
+    try {
+      const raw = await tt({ action: "chain", symbol: ticker });
+      setDebugInfo(`Keys: ${Object.keys(raw || {}).join(", ")} | Type: ${typeof raw} | IsArray: ${Array.isArray(raw)}`);
+      setChain(raw);
+    }
     catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
   }, [ticker]);
+
+  /* Tastytrade nested chain can come back in several shapes:
+     1. { expirations: [...] }                          — direct
+     2. { items: [{ expirations: [...] }, ...] }        — wrapped in items array
+     3. [{ expirations: [...] }]                        — top-level array
+     We normalise to a flat expirations array. */
+  const expirations = useMemo(() => {
+    if (!chain) return [];
+    if (Array.isArray(chain?.expirations)) return chain.expirations;
+    if (Array.isArray(chain?.items)) {
+      const first = chain.items[0];
+      if (first?.expirations) return first.expirations;
+      return chain.items;
+    }
+    if (Array.isArray(chain)) {
+      const first = chain[0];
+      if (first?.expirations) return first.expirations;
+      return chain;
+    }
+    return [];
+  }, [chain]);
 
   return (
     <div>
@@ -461,21 +488,34 @@ function ChainTab() {
       </div>
       {loading && <LoadingSpinner />}
       {error && <ErrorMsg message={error} onRetry={load} />}
-      {!loading && !error && chain && chain.expirations?.slice(0, 4).map((exp: any, ei: number) => (
+      {debugInfo && !loading && (
+        <div style={{ background: "rgba(6,182,212,0.06)", border: "1px solid rgba(6,182,212,0.15)", borderRadius: 6, padding: 10, marginBottom: 12, fontSize: 11, color: "#06b6d4", fontFamily: "'JetBrains Mono', monospace", wordBreak: "break-all" }}>
+          Debug: {debugInfo} | Expirations found: {expirations.length}
+        </div>
+      )}
+      {!loading && !error && expirations.length > 0 && expirations.slice(0, 6).map((exp: any, ei: number) => (
         <div key={ei} style={{ marginBottom: 20 }}>
-          <h4 style={{ color: "#06b6d4", fontSize: 13, marginBottom: 8, fontWeight: 600 }}>{exp["expiration-date"]} · {exp["days-to-expiration"]} DTE <Badge color="blue">{exp["expiration-type"]}</Badge></h4>
+          <h4 style={{ color: "#06b6d4", fontSize: 13, marginBottom: 8, fontWeight: 600 }}>
+            {exp["expiration-date"] || exp["expiration_date"] || exp.date || "Unknown"} · {exp["days-to-expiration"] || exp["dte"] || "?"} DTE{" "}
+            <Badge color="blue">{exp["expiration-type"] || exp["expiration_type"] || exp.type || "Standard"}</Badge>
+          </h4>
           <div style={{ overflowX: "auto" }}>
             <table><thead><tr><th>Strike</th><th>Call</th><th>Put</th></tr></thead>
-            <tbody>{exp.strikes?.slice(0, 15).map((s: any, si: number) => (
+            <tbody>{(exp.strikes || []).slice(0, 20).map((s: any, si: number) => (
               <tr key={si}>
-                <td style={{ fontWeight: 600 }}>${s["strike-price"]}</td>
-                <td style={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}>{s["call-streamer-symbol"] || s.call}</td>
-                <td style={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}>{s["put-streamer-symbol"] || s.put}</td>
+                <td style={{ fontWeight: 600 }}>${s["strike-price"] || s["strike_price"] || s.strike || "?"}</td>
+                <td style={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}>{s["call-streamer-symbol"] || s["call_streamer_symbol"] || s.call || "—"}</td>
+                <td style={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}>{s["put-streamer-symbol"] || s["put_streamer_symbol"] || s.put || "—"}</td>
               </tr>
             ))}</tbody></table>
           </div>
         </div>
       ))}
+      {!loading && !error && chain && expirations.length === 0 && (
+        <div style={{ textAlign: "center", padding: 40, color: "#64748b" }}>
+          Chain data loaded but no expirations found. Raw keys: {Object.keys(chain || {}).join(", ")}
+        </div>
+      )}
       {!loading && !error && !chain && <div style={{ textAlign: "center", padding: 60, color: "#64748b" }}>Enter a ticker and click Load Chain</div>}
     </div>
   );
