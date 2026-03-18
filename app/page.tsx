@@ -254,23 +254,27 @@ function VolArbTab() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [extraTicker, setExtraTicker] = useState("");
-  const [tickers, setTickers] = useState("SPY,QQQ,AAPL,TSLA,NVDA,AMZN,META,MSFT,GOOG,AMD,NFLX,BA,JPM,GS,XOM");
+  const [tickerList, setTickerList] = useState(["SPY","QQQ","AAPL","TSLA","NVDA","AMZN","META","MSFT","GOOG","AMD","NFLX","BA","JPM","GS","XOM"]);
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
-    try { setMetrics(await tt({ action: "metrics", symbols: tickers })); }
+    try { setMetrics(await tt({ action: "metrics", symbols: tickerList.join(",") })); }
     catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
-  }, [tickers]);
+  }, [tickerList]);
 
   useEffect(() => { load(); }, [load]);
 
   const addTicker = () => {
-    const tickerList = tickers.split(",");
-    if (extraTicker && !tickerList.includes(extraTicker)) {
-      setTickers(tickers + "," + extraTicker);
+    const cleaned = extraTicker.trim().toUpperCase();
+    if (cleaned && !tickerList.includes(cleaned)) {
+      setTickerList([...tickerList, cleaned]);
       setExtraTicker("");
     }
+  };
+
+  const removeTicker = (t: string) => {
+    setTickerList(tickerList.filter(x => x !== t));
   };
 
   return (
@@ -282,10 +286,18 @@ function VolArbTab() {
           Avoid <span style={{ color: "#ef4444", fontWeight: 600 }}>EXPENSIVE</span> tickers — you're overpaying for premium.
         </div>
       </div>
-      <div style={{ display: "flex", gap: 10, marginBottom: 16, alignItems: "center" }}>
-        <input placeholder="Add ticker..." value={extraTicker} onChange={(e) => setExtraTicker(e.target.value.toUpperCase())} onKeyDown={(e) => e.key === "Enter" && addTicker()} style={{ background: "rgba(255,255,255,0.06)", color: "#e2e8f0", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: "6px 12px", fontSize: 13, outline: "none", width: 140 }} />
+      <div style={{ display: "flex", gap: 10, marginBottom: 12, alignItems: "center" }}>
+        <input placeholder="Add ticker..." value={extraTicker} onChange={(e) => setExtraTicker(e.target.value.toUpperCase().trim())} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addTicker(); } }} style={{ background: "rgba(255,255,255,0.06)", color: "#e2e8f0", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: "6px 12px", fontSize: 13, outline: "none", width: 140 }} />
         <button onClick={addTicker} style={{ background: "#06b6d4", color: "#0f172a", border: "none", borderRadius: 6, padding: "6px 16px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Add</button>
         <button onClick={load} style={{ background: "rgba(255,255,255,0.06)", color: "#e2e8f0", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: "6px 16px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Refresh</button>
+      </div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
+        {tickerList.map(t => (
+          <span key={t} style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, padding: "3px 10px", fontSize: 11, color: "#94a3b8", display: "inline-flex", alignItems: "center", gap: 6 }}>
+            {t}
+            <span onClick={() => removeTicker(t)} style={{ cursor: "pointer", color: "#64748b", fontSize: 13, lineHeight: 1 }}>×</span>
+          </span>
+        ))}
       </div>
       {loading && <LoadingSpinner />}
       {error && <ErrorMsg message={error} onRetry={load} />}
@@ -446,14 +458,10 @@ function ChainTab() {
   const [chain, setChain] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [debugInfo, setDebugInfo] = useState<string | null>(null);
-
   const load = useCallback(async () => {
-    setLoading(true); setError(null); setDebugInfo(null);
+    setLoading(true); setError(null);
     try {
-      const raw = await tt({ action: "chain", symbol: ticker });
-      setDebugInfo(`Keys: ${Object.keys(raw || {}).join(", ")} | Type: ${typeof raw} | IsArray: ${Array.isArray(raw)}`);
-      setChain(raw);
+      setChain(await tt({ action: "chain", symbol: ticker }));
     }
     catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
@@ -488,11 +496,6 @@ function ChainTab() {
       </div>
       {loading && <LoadingSpinner />}
       {error && <ErrorMsg message={error} onRetry={load} />}
-      {debugInfo && !loading && (
-        <div style={{ background: "rgba(6,182,212,0.06)", border: "1px solid rgba(6,182,212,0.15)", borderRadius: 6, padding: 10, marginBottom: 12, fontSize: 11, color: "#06b6d4", fontFamily: "'JetBrains Mono', monospace", wordBreak: "break-all" }}>
-          Debug: {debugInfo} | Expirations found: {expirations.length}
-        </div>
-      )}
       {!loading && !error && expirations.length > 0 && expirations.slice(0, 6).map((exp: any, ei: number) => (
         <div key={ei} style={{ marginBottom: 20 }}>
           <h4 style={{ color: "#06b6d4", fontSize: 13, marginBottom: 8, fontWeight: 600 }}>
@@ -513,7 +516,7 @@ function ChainTab() {
       ))}
       {!loading && !error && chain && expirations.length === 0 && (
         <div style={{ textAlign: "center", padding: 40, color: "#64748b" }}>
-          Chain data loaded but no expirations found. Raw keys: {Object.keys(chain || {}).join(", ")}
+          No expirations found for {ticker}. Try a different ticker.
         </div>
       )}
       {!loading && !error && !chain && <div style={{ textAlign: "center", padding: 60, color: "#64748b" }}>Enter a ticker and click Load Chain</div>}
