@@ -287,7 +287,7 @@ function VolArbTab() {
         </div>
       </div>
       <div style={{ display: "flex", gap: 10, marginBottom: 12, alignItems: "center" }}>
-        <input placeholder="Add ticker..." value={extraTicker} onChange={(e) => setExtraTicker(e.target.value.toUpperCase().trim())} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addTicker(); } }} style={{ background: "rgba(255,255,255,0.06)", color: "#e2e8f0", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: "6px 12px", fontSize: 13, outline: "none", width: 140 }} />
+        <input placeholder="Add ticker..." value={extraTicker} onChange={(e) => setExtraTicker(e.target.value.toUpperCase())} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addTicker(); } }} style={{ background: "rgba(255,255,255,0.06)", color: "#e2e8f0", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: "6px 12px", fontSize: 13, outline: "none", width: 140 }} />
         <button onClick={addTicker} style={{ background: "#06b6d4", color: "#0f172a", border: "none", borderRadius: 6, padding: "6px 16px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Add</button>
         <button onClick={load} style={{ background: "rgba(255,255,255,0.06)", color: "#e2e8f0", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: "6px 16px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Refresh</button>
       </div>
