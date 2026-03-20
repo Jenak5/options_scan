@@ -191,26 +191,26 @@ function FlowTab() {
           <option value="500000">$500K+ prem</option>
           <option value="1000000">$1M+ prem</option>
         </select>
-        <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#94a3b8", cursor: "pointer" }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 13, color: "#94a3b8", cursor: "pointer" }}>
           <input type="checkbox" checked={filters.sweepsOnly} onChange={(e) => setFilters({ ...filters, sweepsOnly: e.target.checked })} />
           Sweeps only
         </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#94a3b8", cursor: "pointer" }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 13, color: "#94a3b8", cursor: "pointer" }}>
           <input type="checkbox" checked={filters.otmOnly} onChange={(e) => setFilters({ ...filters, otmOnly: e.target.checked })} />
           OTM only
         </label>
-        <button onClick={load} style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.3)", borderRadius: 6, padding: "6px 14px", fontSize: 12, cursor: "pointer" }}>↻ Refresh</button>
+        <button onClick={load} style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.3)", borderRadius: 6, padding: "7px 14px", fontSize: 13, cursor: "pointer" }}>↻ Refresh</button>
       </div>
 
       {/* Legend */}
       <div style={{ display: "flex", gap: 16, marginBottom: 12, padding: "7px 12px", background: "rgba(255,255,255,0.025)", borderRadius: 6, flexWrap: "wrap" }}>
-        <span style={{ color: "#64748b", fontSize: 10, fontWeight: 700 }}>SIDE</span>
-        <span style={{ color: "#10b981", fontSize: 10 }}>▲ AT ASK — buyer-initiated (bullish)</span>
-        <span style={{ color: "#ef4444", fontSize: 10 }}>▼ AT BID — seller-initiated (bearish)</span>
-        <span style={{ color: "#f59e0b", fontSize: 10 }}>↔ MID — split fills</span>
-        <span style={{ color: "#64748b", fontSize: 10, fontWeight: 700, marginLeft: 8 }}>POSITION</span>
-        <span style={{ color: "#06b6d4", fontSize: 10 }}>OPENING — new contracts</span>
-        <span style={{ color: "#64748b", fontSize: 10 }}>CLOSING — exiting</span>
+        <span style={{ color: "#64748b", fontSize: 12, fontWeight: 700 }}>SIDE</span>
+        <span style={{ color: "#10b981", fontSize: 12 }}>▲ AT ASK — buyer-initiated (bullish)</span>
+        <span style={{ color: "#ef4444", fontSize: 12 }}>▼ AT BID — seller-initiated (bearish)</span>
+        <span style={{ color: "#f59e0b", fontSize: 12 }}>↔ MID — split fills</span>
+        <span style={{ color: "#64748b", fontSize: 12, fontWeight: 700, marginLeft: 8 }}>POSITION</span>
+        <span style={{ color: "#06b6d4", fontSize: 12 }}>OPENING — new contracts</span>
+        <span style={{ color: "#64748b", fontSize: 12 }}>CLOSING — exiting</span>
       </div>
 
       {loading && <Spinner />}
@@ -218,11 +218,11 @@ function FlowTab() {
 
       {!loading && !error && (
         <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 15 }}>
             <thead>
               <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
                 {["Ticker","Type","Strike","Expiry","Premium / Split","Size","OI","Vol/OI","IV","Side","Position","Flags"].map((h) => (
-                  <th key={h} style={{ padding: "8px 10px", textAlign: "left", color: "#475569", fontWeight: 700, fontSize: 11, whiteSpace: "nowrap" }}>{h}</th>
+                  <th key={h} style={{ padding: "8px 10px", textAlign: "left", color: "#475569", fontWeight: 700, fontSize: 12, whiteSpace: "nowrap" }}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -326,17 +326,17 @@ function DarkPoolTab() {
     <div>
       <div style={{ display: "flex", gap: 10, marginBottom: 16, alignItems: "center" }}>
         <input placeholder="Filter ticker…" value={ticker} onChange={(e) => setTicker(e.target.value.toUpperCase())} style={{ ...INPUT, width: 120 }} />
-        <button onClick={load} style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.3)", borderRadius: 6, padding: "6px 14px", fontSize: 12, cursor: "pointer" }}>↻ Refresh</button>
+        <button onClick={load} style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.3)", borderRadius: 6, padding: "7px 14px", fontSize: 13, cursor: "pointer" }}>↻ Refresh</button>
       </div>
       {loading && <Spinner />}
       {error   && <ErrorBox message={error} onRetry={load} />}
       {!loading && !error && (
         <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 15 }}>
             <thead>
               <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
                 {["Ticker","Price","Size","Notional","Exchange","Time"].map((h) => (
-                  <th key={h} style={{ padding: "7px 10px", textAlign: "left", color: "#475569", fontWeight: 700, fontSize: 10 }}>{h}</th>
+                  <th key={h} style={{ padding: "7px 10px", textAlign: "left", color: "#475569", fontWeight: 700, fontSize: 12 }}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -459,14 +459,14 @@ function VolArbTab() {
         {/* Ticker chips */}
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {watchlist.map((t) => (
-            <div key={t} style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 20, padding: "3px 10px 3px 12px", fontSize: 12 }}>
+            <div key={t} style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 20, padding: "3px 10px 3px 12px", fontSize: 13 }}>
               <span style={{ color: "#e2e8f0", fontFamily: "monospace", fontWeight: 600 }}>{t}</span>
               <button onClick={() => removeTicker(t)} style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: "0 0 0 4px" }}>×</button>
             </div>
           ))}
         </div>
       </div>
-      <div style={{ background: "rgba(16,185,129,0.06)", border: "1px solid rgba(16,185,129,0.15)", borderRadius: 8, padding: "10px 16px", marginBottom: 16, fontSize: 12, color: "#6ee7b7" }}>
+      <div style={{ background: "rgba(16,185,129,0.06)", border: "1px solid rgba(16,185,129,0.15)", borderRadius: 8, padding: "10px 16px", marginBottom: 16, fontSize: 13, color: "#6ee7b7" }}>
         ✓ Cash Account Mode — long calls &amp; puts only. Sorted by IV Rank (lowest = best buying opportunity first).
       </div>
       {loading && <Spinner />}
@@ -481,7 +481,7 @@ function VolArbTab() {
                   <span style={{ fontWeight: 700, fontSize: 16, color: "#e2e8f0", fontFamily: "monospace" }}>{r.ticker}</span>
                   <Badge color={sig.color}>{sig.label}</Badge>
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, fontSize: 11 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, fontSize: 13 }}>
                   {[
                     { label: "IV 30d",  val: `${fmt(r.iv, 1)}%`,     color: "#a855f7" },
                     { label: "HV 30d",  val: `${fmt(r.hv, 1)}%`,     color: "#3b82f6" },
@@ -494,14 +494,14 @@ function VolArbTab() {
                   ))}
                 </div>
                 <div>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#475569", marginBottom: 3 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#475569", marginBottom: 3 }}>
                     <span>IV Rank</span><span>{fmt(r.ivRank, 0)}%</span>
                   </div>
                   <div style={{ height: 5, background: "rgba(255,255,255,0.06)", borderRadius: 3, overflow: "hidden" }}>
                     <div style={{ width: `${Math.min(r.ivRank, 100)}%`, height: "100%", borderRadius: 3, background: r.ivRank < 25 ? "#10b981" : r.ivRank > 75 ? "#ef4444" : "#f59e0b" }} />
                   </div>
                 </div>
-                <div style={{ color: "#64748b", fontSize: 10, borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 8 }}>{sig.tip}</div>
+                <div style={{ color: "#64748b", fontSize: 12, borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 8 }}>{sig.tip}</div>
               </div>
             );
           })}
@@ -557,11 +557,11 @@ function AccountTab() {
               </div>
             ))}
           </div>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
             <thead>
               <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
                 {["Symbol","Qty","Avg Open","Last","Unrealized P&L"].map((h) => (
-                  <th key={h} style={{ padding: "7px 10px", textAlign: "left", color: "#475569", fontWeight: 700, fontSize: 10 }}>{h}</th>
+                  <th key={h} style={{ padding: "7px 10px", textAlign: "left", color: "#475569", fontWeight: 700, fontSize: 12 }}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -731,7 +731,7 @@ function ChainTab() {
         <input value={input} onChange={(e) => setInput(e.target.value.toUpperCase())}
           onKeyDown={(e) => e.key === "Enter" && setTicker(input)}
           placeholder="Ticker…" style={{ ...INPUT, width: 110 }} />
-        <button onClick={() => setTicker(input)} style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.3)", borderRadius: 6, padding: "6px 14px", fontSize: 12, cursor: "pointer" }}>Load Chain</button>
+        <button onClick={() => setTicker(input)} style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.3)", borderRadius: 6, padding: "7px 14px", fontSize: 13, cursor: "pointer" }}>Load Chain</button>
         {expiries.length > 0 && (
           <select value={selExp} onChange={(e) => setSelExp(e.target.value)} style={{ ...INPUT, cursor: "pointer" }}>
             {expiries.map((ex, i) => {
@@ -745,11 +745,11 @@ function ChainTab() {
       {error   && <ErrorBox message={error} />}
       {!loading && !error && strikes.length > 0 && (
         <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
             <thead>
               <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
                 {["Call Bid","Call Ask","Call IV","Call Δ","Strike","Put Δ","Put IV","Put Bid","Put Ask"].map((h) => (
-                  <th key={h} style={{ padding: "8px 10px", textAlign: "center", color: "#475569", fontWeight: 700, fontSize: 11 }}>{h}</th>
+                  <th key={h} style={{ padding: "8px 10px", textAlign: "center", color: "#475569", fontWeight: 700, fontSize: 13 }}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -830,7 +830,7 @@ export default function OptionsEdgeScanner() {
             <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, letterSpacing: "-0.02em", fontFamily: "monospace" }}>
               <span style={{ color: "#06b6d4" }}>◆</span> OPTIONS EDGE SCANNER
             </h1>
-            <p style={{ margin: "3px 0 0", color: "#475569", fontSize: 11 }}>
+            <p style={{ margin: "3px 0 0", color: "#475569", fontSize: 13 }}>
               Unusual Whales Flow · Dark Pool · Vol Arb · Tastytrade Account · Kelly Sizing · Option Chain
             </p>
           </div>
