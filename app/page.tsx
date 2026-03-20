@@ -84,7 +84,7 @@ function ErrorBox({ message, onRetry }: { message: string; onRetry?: () => void 
 const INPUT: React.CSSProperties = {
   background: "rgba(255,255,255,0.06)", color: "#e2e8f0",
   border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6,
-  padding: "6px 11px", fontSize: 12, outline: "none", fontFamily: "inherit",
+  padding: "7px 12px", fontSize: 13, outline: "none", fontFamily: "inherit",
 };
 
 // ─── Side badge ────────────────────────────────────────────────────────────
@@ -218,11 +218,11 @@ function FlowTab() {
 
       {!loading && !error && (
         <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead>
               <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
                 {["Ticker","Type","Strike","Expiry","Premium / Split","Size","OI","Vol/OI","IV","Side","Position","Flags"].map((h) => (
-                  <th key={h} style={{ padding: "7px 10px", textAlign: "left", color: "#475569", fontWeight: 700, fontSize: 10, whiteSpace: "nowrap" }}>{h}</th>
+                  <th key={h} style={{ padding: "8px 10px", textAlign: "left", color: "#475569", fontWeight: 700, fontSize: 11, whiteSpace: "nowrap" }}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -368,7 +368,7 @@ function DarkPoolTab() {
 // ═══════════════════════════════════════════════════════════════════════════
 interface VolRow { ticker: string; iv: number; hv: number; ivRank: number; spread: number; }
 
-const WATCHLIST = ["SPY","QQQ","AAPL","MSFT","NVDA","TSLA","AMZN","META","GOOGL","AMD","SMCI","COIN","MSTR","PLTR","ARM"];
+const DEFAULT_WATCHLIST = ["SPY","QQQ","AAPL","MSFT","NVDA","TSLA","AMZN","META","GOOGL","AMD","SMCI","COIN","MSTR","PLTR","ARM"];
 
 function volSignal(ivRank: number, spread: number) {
   if (ivRank < 25 && spread < 10)  return { label: "BUY FRIENDLY", color: "green"  as BadgeColor, bc: "#10b981", tip: "Low IV Rank + tight spread — best risk/reward for long calls/puts." };
@@ -379,15 +379,27 @@ function volSignal(ivRank: number, spread: number) {
 }
 
 function VolArbTab() {
-  const [rows, setRows]       = useState<VolRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError]     = useState<string | null>(null);
+  const [rows, setRows]           = useState<VolRow[]>([]);
+  const [loading, setLoading]     = useState(true);
+  const [error, setError]         = useState<string | null>(null);
+  const [watchlist, setWatchlist] = useState<string[]>(DEFAULT_WATCHLIST);
+  const [newTicker, setNewTicker] = useState("");
+
+  const addTicker = () => {
+    const t = newTicker.trim().toUpperCase();
+    if (t && !watchlist.includes(t)) {
+      setWatchlist((prev) => [...prev, t]);
+    }
+    setNewTicker("");
+  };
+
+  const removeTicker = (t: string) => setWatchlist((prev) => prev.filter((x) => x !== t));
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
       const results: VolRow[] = [];
-      for (const ticker of WATCHLIST) {
+      for (const ticker of watchlist) {
         try {
           const d = await tt({ action: "volatility", symbol: ticker });
 
@@ -424,12 +436,36 @@ function VolArbTab() {
       setRows(results);
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
-  }, []);
+  }, [watchlist]);
 
   useEffect(() => { load(); }, [load]);
 
   return (
     <div>
+      {/* ── Ticker management ── */}
+      <div style={{ marginBottom: 14 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+          <input
+            placeholder="Add ticker… (e.g. HOOD)"
+            value={newTicker}
+            onChange={(e) => setNewTicker(e.target.value.toUpperCase())}
+            onKeyDown={(e) => e.key === "Enter" && addTicker()}
+            style={{ ...INPUT, width: 160 }}
+          />
+          <button onClick={addTicker} style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.3)", borderRadius: 6, padding: "7px 14px", fontSize: 13, cursor: "pointer" }}>+ Add</button>
+          <button onClick={load} style={{ background: "rgba(255,255,255,0.06)", color: "#94a3b8", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: "7px 14px", fontSize: 13, cursor: "pointer" }}>↻ Refresh</button>
+          <button onClick={() => setWatchlist(DEFAULT_WATCHLIST)} style={{ background: "transparent", color: "#475569", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 6, padding: "7px 14px", fontSize: 13, cursor: "pointer" }}>Reset</button>
+        </div>
+        {/* Ticker chips */}
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {watchlist.map((t) => (
+            <div key={t} style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 20, padding: "3px 10px 3px 12px", fontSize: 12 }}>
+              <span style={{ color: "#e2e8f0", fontFamily: "monospace", fontWeight: 600 }}>{t}</span>
+              <button onClick={() => removeTicker(t)} style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: "0 0 0 4px" }}>×</button>
+            </div>
+          ))}
+        </div>
+      </div>
       <div style={{ background: "rgba(16,185,129,0.06)", border: "1px solid rgba(16,185,129,0.15)", borderRadius: 8, padding: "10px 16px", marginBottom: 16, fontSize: 12, color: "#6ee7b7" }}>
         ✓ Cash Account Mode — long calls &amp; puts only. Sorted by IV Rank (lowest = best buying opportunity first).
       </div>
@@ -636,9 +672,18 @@ function KellyTab() {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // OPTION CHAIN
+// ★ Compact endpoint field names:
+//   strike: "strike-price"
+//   leg fields: "bid", "ask", "delta", "gamma", "theta", "vega", "implied-volatility"
+//   IV is a decimal (0–1), bid/ask are dollar strings
 // ═══════════════════════════════════════════════════════════════════════════
 interface Expiry    { expiration_date?: string; "expiration-date"?: string; }
-interface ChainLeg  { delta?: string; bid?: string; ask?: string; iv?: string; }
+interface ChainLeg  {
+  delta?: string; gamma?: string; theta?: string; vega?: string;
+  bid?: string; ask?: string;
+  "implied-volatility"?: string;
+  iv?: string; // fallback
+}
 interface StrikeRow { "strike-price"?: string; strike_price?: string; call?: ChainLeg; put?: ChainLeg; }
 
 function ChainTab() {
@@ -656,7 +701,13 @@ function ChainTab() {
       const data = await tt({ action: "expirations", symbol: sym });
       const list: Expiry[] = Array.isArray(data) ? data : data?.items ?? [];
       setExpiries(list);
-      setSelExp(list[0]?.["expiration-date"] ?? list[0]?.expiration_date ?? "");
+      // ★ Default to first FUTURE expiration (skip today or earlier)
+      const today = new Date().toISOString().slice(0, 10);
+      const first = list.find((ex) => {
+        const d = ex["expiration-date"] ?? ex.expiration_date ?? "";
+        return d > today;
+      });
+      setSelExp(first?.["expiration-date"] ?? first?.expiration_date ?? list[0]?.["expiration-date"] ?? "");
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
   }, []);
@@ -694,11 +745,11 @@ function ChainTab() {
       {error   && <ErrorBox message={error} />}
       {!loading && !error && strikes.length > 0 && (
         <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
             <thead>
               <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
                 {["Call Bid","Call Ask","Call IV","Call Δ","Strike","Put Δ","Put IV","Put Bid","Put Ask"].map((h) => (
-                  <th key={h} style={{ padding: "7px 8px", textAlign: "center", color: "#475569", fontWeight: 700, fontSize: 9 }}>{h}</th>
+                  <th key={h} style={{ padding: "8px 10px", textAlign: "center", color: "#475569", fontWeight: 700, fontSize: 11 }}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -707,16 +758,26 @@ function ChainTab() {
                 const strike = s["strike-price"] ?? s.strike_price ?? "—";
                 const call   = s.call ?? {};
                 const put    = s.put  ?? {};
-                const fmtIV  = (v?: string) => v ? `${fmt(safeNum(v) * 100, 0)}%` : "—";
+                // ★ compact endpoint: IV is decimal (0-1), multiply by 100 for display
+                const fmtIV  = (leg: ChainLeg) => {
+                  const raw = leg["implied-volatility"] ?? leg.iv;
+                  return raw ? `${fmt(safeNum(raw) * 100, 0)}%` : "—";
+                };
+                const fmtDelta = (leg: ChainLeg) => {
+                  return leg.delta ? fmt(safeNum(leg.delta), 2) : "—";
+                };
+                const fmtPrice = (v?: string) => v ? `$${fmt(safeNum(v), 2)}` : "—";
                 return (
                   <tr key={i} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)", background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.015)" }}>
-                    {[call.bid, call.ask, fmtIV(call.iv), call.delta].map((v, j) => (
-                      <td key={j} style={{ padding: "7px 8px", textAlign: "center", color: "#10b981", fontFamily: "monospace" }}>{v ?? "—"}</td>
-                    ))}
-                    <td style={{ padding: "7px 8px", textAlign: "center", fontWeight: 700, color: "#e2e8f0", fontFamily: "monospace", background: "rgba(255,255,255,0.04)" }}>${strike}</td>
-                    {[put.delta, fmtIV(put.iv), put.bid, put.ask].map((v, j) => (
-                      <td key={j} style={{ padding: "7px 8px", textAlign: "center", color: "#ef4444", fontFamily: "monospace" }}>{v ?? "—"}</td>
-                    ))}
+                    <td style={{ padding: "8px 10px", textAlign: "center", color: "#10b981", fontFamily: "monospace" }}>{fmtPrice(call.bid)}</td>
+                    <td style={{ padding: "8px 10px", textAlign: "center", color: "#10b981", fontFamily: "monospace" }}>{fmtPrice(call.ask)}</td>
+                    <td style={{ padding: "8px 10px", textAlign: "center", color: "#10b981", fontFamily: "monospace" }}>{fmtIV(call)}</td>
+                    <td style={{ padding: "8px 10px", textAlign: "center", color: "#10b981", fontFamily: "monospace" }}>{fmtDelta(call)}</td>
+                    <td style={{ padding: "8px 10px", textAlign: "center", fontWeight: 700, color: "#e2e8f0", fontFamily: "monospace", background: "rgba(255,255,255,0.04)" }}>${strike}</td>
+                    <td style={{ padding: "8px 10px", textAlign: "center", color: "#ef4444", fontFamily: "monospace" }}>{fmtDelta(put)}</td>
+                    <td style={{ padding: "8px 10px", textAlign: "center", color: "#ef4444", fontFamily: "monospace" }}>{fmtIV(put)}</td>
+                    <td style={{ padding: "8px 10px", textAlign: "center", color: "#ef4444", fontFamily: "monospace" }}>{fmtPrice(put.bid)}</td>
+                    <td style={{ padding: "8px 10px", textAlign: "center", color: "#ef4444", fontFamily: "monospace" }}>{fmtPrice(put.ask)}</td>
                   </tr>
                 );
               })}
