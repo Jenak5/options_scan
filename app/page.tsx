@@ -722,7 +722,9 @@ function ChainTab() {
       // UW expirations — returns array of date strings or objects with expiration_date
       const data: any[] = await uw({ action: "expirations", ticker: sym });
       const dates: string[] = data.map((d) =>
-        typeof d === "string" ? d : (d.expiration_date ?? d.date ?? "")
+        // expiry-breakdown returns { expiry: "2026-03-21", ... }
+        // option-contracts/expirations would return strings or { expiration_date }
+        typeof d === "string" ? d : (d.expiry ?? d.expiration_date ?? d.date ?? "")
       ).filter(Boolean).sort();
 
       setExpiries(dates);
