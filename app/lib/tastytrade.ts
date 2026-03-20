@@ -142,24 +142,21 @@ export async function getExpirations(symbol: string) {
 }
 
 /**
- * Returns strikes for a specific symbol + expiration date.
- * Each strike has call and put legs with greeks and bid/ask.
- * Used by Chain tab after user selects an expiration.
+ * Returns strikes for a symbol + expiration WITH live bid/ask/greeks.
+ * ★ Uses /compact endpoint — /nested only returns OCC symbols, no quotes.
+ * Compact response shape: data.data.items[] each with call/put legs containing
+ * bid, ask, delta, gamma, theta, vega, implied-volatility.
  */
 export async function getOptionChain(symbol: string, expiration?: string) {
-  const data = await ttFetch(`/option-chains/${encodeURIComponent(symbol)}/nested`);
-  const expirations: any[] = data.data?.items?.[0]?.expirations ?? [];
-
   if (!expiration) {
-    // No expiration specified — return first expiration's strikes
-    return expirations[0]?.strikes ?? [];
+    const exps = await getExpirations(symbol);
+    const today = new Date().toISOString().slice(0, 10);
+    const first = exps.find((e: any) => (e["expiration-date"] ?? "") > today);
+    expiration = first?.["expiration-date"] ?? exps[0]?.["expiration-date"];
+    if (!expiration) return [];
   }
-
-  // Find the matching expiration
-  const match = expirations.find(
-    (ex: any) =>
-      (ex["expiration-date"] ?? ex.expiration_date ?? "") === expiration
+  const data = await ttFetch(
+    `/option-chains/${encodeURIComponent(symbol)}/compact?expiration-date=${expiration}`
   );
-
-  return match?.strikes ?? [];
+  return data.data?.items ?? [];
 }
