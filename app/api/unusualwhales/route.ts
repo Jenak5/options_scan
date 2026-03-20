@@ -5,6 +5,8 @@ const UW_BASE = "https://api.unusualwhales.com/api";
 function headers() {
   return {
     Authorization: `Bearer ${process.env.UNUSUAL_WHALES_API_TOKEN}`,
+    // ★ Required by UW API — requests without this get 404
+    "UW-CLIENT-API-ID": "100001",
     Accept: "application/json",
   };
 }
@@ -47,17 +49,20 @@ export async function GET(request: NextRequest) {
       }
 
       // ── Dark Pool ───────────────────────────────────────────────────────
+      // ★ Correct paths (confirmed from UW docs):
+      //   Market-wide: /darkpool/recent
+      //   Ticker:      /darkpool/{ticker}   (NOT /darkpool/{ticker}/recent)
       case "darkpool": {
         const limit = searchParams.get("limit") || "50";
-        const path  = ticker ? `/darkpool/${ticker}/recent` : "/darkpool/recent";
+        const path  = ticker ? `/darkpool/${ticker}` : "/darkpool/recent";
         const data  = await uwFetch(path, { limit });
         return NextResponse.json({ data: data.data ?? [] });
       }
 
-      // ── Option Chain (live quotes) ─────────────────────────────────────
+      // ── Option Chain (live bid/ask/IV/greeks per strike) ───────────────
       // Endpoint: GET /stock/{ticker}/option-contracts
-      // Query:    expiration_date=YYYY-MM-DD  (optional filter)
-      // Returns:  flat list of option contracts with bid/ask/iv/greeks
+      // ★ Requires expiration_date param to filter to one expiry
+      //   Without it returns all contracts (thousands for SPY)
       case "option-chain": {
         if (!ticker) return NextResponse.json({ error: "ticker required" }, { status: 400 });
         const expiration = searchParams.get("expiration") || "";
@@ -67,12 +72,13 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({ data: data.data ?? [] });
       }
 
-      // ── Option Expirations ─────────────────────────────────────────────
-      // Endpoint: GET /stock/{ticker}/option-contracts/expirations
-      // Returns:  list of available expiration dates
+      // ── Expiry Breakdown ───────────────────────────────────────────────
+      // Endpoint: GET /stock/{ticker}/expiry-breakdown
+      // Returns list of expiration dates with call/put volume/OI per expiry
+      // ★ This is the correct endpoint for getting available expirations
       case "expirations": {
         if (!ticker) return NextResponse.json({ error: "ticker required" }, { status: 400 });
-        const data = await uwFetch(`/stock/${ticker}/option-contracts/expirations`);
+        const data = await uwFetch(`/stock/${ticker}/expiry-breakdown`);
         return NextResponse.json({ data: data.data ?? [] });
       }
 
