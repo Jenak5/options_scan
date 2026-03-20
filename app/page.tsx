@@ -642,47 +642,88 @@ function KellyTab() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// OPTION CHAIN  — powered by Unusual Whales (Option C)
-// ★ UW returns flat list of contracts; we pair by strike into call/put rows.
-// ★ Field names confirmed from UW API patterns:
-//   option_type: "C" | "P"
-//   strike: number or string
-//   bid / ask: number
-//   iv / implied_volatility: decimal (0-1) — multiply × 100 for display
-//   delta / gamma / theta / vega: decimal
-//   open_interest / volume: number
+// OPTION CHAIN  — powered by Unusual Whales
+// ★ Single-endpoint approach: fetch option-contracts, extract dates from
+//   the returned contracts themselves so we never guess schema field names.
+// ★ Step 1: Load Chain → fetch without expiration filter (limit=200)
+//           → extract unique expiration dates from contract objects
+//           → auto-select nearest future expiry
+// ★ Step 2: User picks expiry OR it auto-selects → fetch with expiration_date
+//           → build strike grid
 // ═══════════════════════════════════════════════════════════════════════════
 interface UWContract {
-  option_type?: string;   // "C" or "P"
-  type?: string;          // fallback
+  // Option type — UW uses various names, we try all
+  option_type?: string; // "C" or "P"
+  type?: string;        // "call" or "put"
+  side?: string;
+  // Strike
   strike?: number | string;
   strike_price?: number | string;
+  // Prices
   bid?: number | string;
+  bid_price?: number | string;
   ask?: number | string;
+  ask_price?: number | string;
+  // IV — decimal (0-1) multiply × 100 for display
   iv?: number | string;
   implied_volatility?: number | string;
+  // Greeks
   delta?: number | string;
   gamma?: number | string;
   theta?: number | string;
   vega?: number | string;
-  open_interest?: number;
-  volume?: number;
+  // Volume / OI
+  open_interest?: number | string;
+  oi?: number | string;
+  volume?: number | string;
+  // Expiration — try all common field names
   expiration_date?: string;
+  expiry?: string;
+  exp_date?: string;
+  expires_at?: string;
+  // Option symbol — date embedded e.g. "SPY260327C00660000"
+  option_symbol?: string;
+  symbol?: string;
 }
 
-interface ChainRow {
-  strike: number;
-  call: UWContract | null;
-  put:  UWContract | null;
+// Extract expiration date from a contract — try every known field name,
+// then fall back to parsing the OCC option symbol (YYMMDD at chars 3-8)
+function extractExpiry(c: any): string {
+  const direct =
+    c.expiration_date ?? c.expiry ?? c.exp_date ?? c.expires_at ??
+    c.expiration ?? c.expire_date ?? c.expirationDate ?? "";
+  if (direct) return direct.slice(0, 10); // normalize to YYYY-MM-DD
+
+  // Parse from OCC symbol e.g. "SPY260327C00660000" → 260327 → 2026-03-27
+  const sym: string = c.option_symbol ?? c.symbol ?? c.contract ?? "";
+  const m = sym.match(/[A-Z]+(\d{2})(\d{2})(\d{2})[CP]/i);
+  if (m) return `20${m[1]}-${m[2]}-${m[3]}`;
+
+  return "";
 }
+
+// Extract option type: "C" or "P"
+function extractOptionType(c: any): "C" | "P" | null {
+  const raw = (c.option_type ?? c.type ?? c.side ?? c.call_put ?? "").toUpperCase();
+  if (raw === "C" || raw === "CALL") return "C";
+  if (raw === "P" || raw === "PUT")  return "P";
+  // Try parsing from option symbol
+  const sym: string = c.option_symbol ?? c.symbol ?? "";
+  if (/[A-Z]\d{6}C/i.test(sym)) return "C";
+  if (/[A-Z]\d{6}P/i.test(sym)) return "P";
+  return null;
+}
+
+interface ChainRow { strike: number; call: UWContract | null; put: UWContract | null; }
 
 function buildChainRows(contracts: UWContract[]): ChainRow[] {
   const map = new Map<number, ChainRow>();
   for (const c of contracts) {
-    const strike = safeNum(c.strike ?? c.strike_price, 0);
+    const strike = safeNum((c as any).strike ?? (c as any).strike_price, 0);
+    if (strike === 0) continue;
     if (!map.has(strike)) map.set(strike, { strike, call: null, put: null });
     const row = map.get(strike)!;
-    const ot = (c.option_type ?? c.type ?? "").toUpperCase();
+    const ot = extractOptionType(c);
     if (ot === "C") row.call = c;
     else if (ot === "P") row.put = c;
   }
@@ -691,63 +732,103 @@ function buildChainRows(contracts: UWContract[]): ChainRow[] {
 
 function fmtChainIV(c: UWContract | null): string {
   if (!c) return "—";
-  const raw = safeNum(c.iv ?? c.implied_volatility, NaN);
-  if (isNaN(raw)) return "—";
-  // UW returns IV as decimal (0-1); multiply × 100
-  return `${(raw * 100).toFixed(0)}%`;
+  const raw = safeNum((c as any).iv ?? (c as any).implied_volatility ?? (c as any).impliedVolatility, NaN);
+  if (isNaN(raw) || raw === 0) return "—";
+  // UW returns IV as decimal (0-1) — multiply × 100
+  const pct = raw > 5 ? raw : raw * 100; // guard against already-% values
+  return `${pct.toFixed(0)}%`;
 }
 function fmtChainPrice(c: UWContract | null, field: "bid" | "ask"): string {
   if (!c) return "—";
-  const v = safeNum(c[field], NaN);
+  const v = safeNum(
+    field === "bid" ? ((c as any).bid ?? (c as any).bid_price) : ((c as any).ask ?? (c as any).ask_price),
+    NaN
+  );
   return isNaN(v) ? "—" : `$${v.toFixed(2)}`;
 }
 function fmtChainDelta(c: UWContract | null): string {
   if (!c) return "—";
-  const v = safeNum(c.delta, NaN);
+  const v = safeNum((c as any).delta, NaN);
   return isNaN(v) ? "—" : v.toFixed(2);
 }
 
 function ChainTab() {
-  const [ticker,   setTicker]   = useState("SPY");
-  const [input,    setInput]    = useState("SPY");
-  const [expiries, setExpiries] = useState<string[]>([]);
-  const [selExp,   setSelExp]   = useState("");
-  const [rows,     setRows]     = useState<ChainRow[]>([]);
-  const [loading,  setLoading]  = useState(false);
-  const [error,    setError]    = useState<string | null>(null);
+  const [ticker,      setTicker]      = useState("SPY");
+  const [input,       setInput]       = useState("SPY");
+  const [expiries,    setExpiries]    = useState<string[]>([]);
+  const [selExp,      setSelExp]      = useState("");
+  const [rows,        setRows]        = useState<ChainRow[]>([]);
+  const [allContracts,setAllContracts]= useState<UWContract[]>([]);
+  const [loading,     setLoading]     = useState(false);
+  const [error,       setError]       = useState<string | null>(null);
+  const [rawSample,   setRawSample]   = useState<string>(""); // debug: first contract keys
 
-  const loadExpiries = useCallback(async (sym: string) => {
-    setLoading(true); setError(null); setExpiries([]); setRows([]);
+  // ── Step 1: Load all contracts (no expiration filter) to discover dates ──
+  const loadAll = useCallback(async (sym: string) => {
+    setLoading(true); setError(null); setExpiries([]); setRows([]); setAllContracts([]);
     try {
-      // UW expirations — returns array of date strings or objects with expiration_date
-      const data: any[] = await uw({ action: "expirations", ticker: sym });
-      const dates: string[] = data.map((d) =>
-        // expiry-breakdown returns { expiry: "2026-03-21", ... }
-        // option-contracts/expirations would return strings or { expiration_date }
-        typeof d === "string" ? d : (d.expiry ?? d.expiration_date ?? d.date ?? "")
-      ).filter(Boolean).sort();
+      const contracts: any[] = await uw({ action: "option-chain", ticker: sym });
 
+      // Debug: capture field names of first contract
+      if (contracts.length > 0) {
+        setRawSample(Object.keys(contracts[0]).join(", "));
+      }
+
+      // Extract unique expiration dates
+      const dateSet = new Set<string>();
+      for (const c of contracts) {
+        const d = extractExpiry(c);
+        if (d) dateSet.add(d);
+      }
+      const dates = Array.from(dateSet).sort();
+
+      setAllContracts(contracts);
       setExpiries(dates);
-      // Default to first future expiration
+
       const today = new Date().toISOString().slice(0, 10);
       const first = dates.find((d) => d > today) ?? dates[0] ?? "";
       setSelExp(first);
+
+      // Build rows for the auto-selected expiry
+      if (first) {
+        const filtered = contracts.filter((c) => extractExpiry(c) === first);
+        setRows(buildChainRows(filtered));
+      }
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
   }, []);
 
-  const loadChain = useCallback(async () => {
-    if (!ticker || !selExp) return;
+  // ── Step 2: User changes expiry → fetch filtered from API ──────────────
+  const loadByExpiry = useCallback(async (exp: string) => {
+    if (!ticker || !exp) return;
     setLoading(true); setError(null);
     try {
-      const contracts: UWContract[] = await uw({ action: "option-chain", ticker, expiration: selExp });
+      const contracts: any[] = await uw({ action: "option-chain", ticker, expiration: exp });
       setRows(buildChainRows(contracts));
+      // Also update allContracts & expiry list from this call
+      if (expiries.length === 0) {
+        const dateSet = new Set<string>();
+        for (const c of contracts) { const d = extractExpiry(c); if (d) dateSet.add(d); }
+        setExpiries(Array.from(dateSet).sort());
+      }
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
-  }, [ticker, selExp]);
+  }, [ticker, expiries]);
 
-  useEffect(() => { if (ticker) loadExpiries(ticker); }, [ticker]);
-  useEffect(() => { if (selExp) loadChain(); }, [selExp]);
+  // When ticker changes → load all
+  useEffect(() => { if (ticker) loadAll(ticker); }, [ticker]);
+
+  // When user manually changes expiry dropdown
+  const handleExpChange = (exp: string) => {
+    setSelExp(exp);
+    // Try filtering from cached contracts first
+    const filtered = allContracts.filter((c) => extractExpiry(c) === exp);
+    if (filtered.length > 0) {
+      setRows(buildChainRows(filtered));
+    } else {
+      loadByExpiry(exp);
+    }
+  };
 
   return (
     <div>
@@ -757,44 +838,45 @@ function ChainTab() {
           placeholder="Ticker…" style={{ ...INPUT, width: 120 }} />
         <button onClick={() => setTicker(input)} style={BTN("cyan")}>Load Chain</button>
         {expiries.length > 0 && (
-          <select value={selExp} onChange={(e) => setSelExp(e.target.value)} style={{ ...INPUT, cursor: "pointer" }}>
+          <select value={selExp} onChange={(e) => handleExpChange(e.target.value)} style={{ ...INPUT, cursor: "pointer" }}>
             {expiries.map((ex) => (
               <option key={ex} value={ex}>{fmtDate(ex)}</option>
             ))}
           </select>
         )}
-        {selExp && (
-          <button onClick={loadChain} style={BTN("gray")}>↻ Refresh</button>
-        )}
+        {selExp && <button onClick={() => loadByExpiry(selExp)} style={BTN("gray")}>↻ Refresh</button>}
       </div>
 
       <div style={{ background: "rgba(6,182,212,0.06)", border: "1px solid rgba(6,182,212,0.15)", borderRadius: 8, padding: "8px 16px", marginBottom: 14, fontSize: 13, color: "#67e8f9" }}>
         Powered by Unusual Whales · Live bid/ask/IV/delta per strike
       </div>
 
+      {/* Debug banner — shows actual field names from API so we can fix mapping if needed */}
+      {rawSample && rows.length === 0 && !loading && (
+        <div style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.2)", borderRadius: 6, padding: "8px 14px", marginBottom: 12, fontSize: 12, color: "#f59e0b", wordBreak: "break-all" }}>
+          ⚠ Contracts received but no rows rendered. API fields: {rawSample}
+        </div>
+      )}
+
       {loading && <Spinner />}
       {error   && <ErrorBox message={error} />}
 
-      {!loading && !error && rows.length === 0 && ticker && (
+      {!loading && !error && rows.length === 0 && !rawSample && (
         <div style={{ textAlign: "center", padding: 48, color: "#475569", fontSize: 15 }}>
-          {expiries.length === 0 ? "Enter a ticker and click Load Chain." : "No contracts found for this expiration."}
+          Enter a ticker and click Load Chain.
         </div>
       )}
 
       {!loading && !error && rows.length > 0 && (
         <div style={{ overflowX: "auto" }}>
-          {/* ITM indicator — show current price context */}
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ borderBottom: "2px solid rgba(255,255,255,0.1)" }}>
-                {/* CALLS side */}
                 <th style={{ ...TH_C, color: "#10b981" }}>Call Bid</th>
                 <th style={{ ...TH_C, color: "#10b981" }}>Call Ask</th>
                 <th style={{ ...TH_C, color: "#10b981" }}>Call IV</th>
                 <th style={{ ...TH_C, color: "#10b981" }}>Call Δ</th>
-                {/* STRIKE center */}
                 <th style={{ ...TH_C, background: "rgba(255,255,255,0.04)", color: "#e2e8f0", fontSize: 15 }}>STRIKE</th>
-                {/* PUTS side */}
                 <th style={{ ...TH_C, color: "#ef4444" }}>Put Δ</th>
                 <th style={{ ...TH_C, color: "#ef4444" }}>Put IV</th>
                 <th style={{ ...TH_C, color: "#ef4444" }}>Put Bid</th>
@@ -805,10 +887,7 @@ function ChainTab() {
             </thead>
             <tbody>
               {rows.map((r, i) => (
-                <tr key={r.strike} style={{
-                  borderBottom: "1px solid rgba(255,255,255,0.05)",
-                  background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.015)",
-                }}>
+                <tr key={r.strike} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)", background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.015)" }}>
                   <td style={{ ...TD_MONO_C, color: "#10b981" }}>{fmtChainPrice(r.call, "bid")}</td>
                   <td style={{ ...TD_MONO_C, color: "#10b981" }}>{fmtChainPrice(r.call, "ask")}</td>
                   <td style={{ ...TD_MONO_C, color: "#10b981" }}>{fmtChainIV(r.call)}</td>
@@ -818,8 +897,8 @@ function ChainTab() {
                   <td style={{ ...TD_MONO_C, color: "#ef4444" }}>{fmtChainIV(r.put)}</td>
                   <td style={{ ...TD_MONO_C, color: "#ef4444" }}>{fmtChainPrice(r.put, "bid")}</td>
                   <td style={{ ...TD_MONO_C, color: "#ef4444" }}>{fmtChainPrice(r.put, "ask")}</td>
-                  <td style={{ ...TD_MONO_C, color: "#64748b" }}>{(r.call?.open_interest ?? r.put?.open_interest)?.toLocaleString() ?? "—"}</td>
-                  <td style={{ ...TD_MONO_C, color: "#64748b" }}>{(r.call?.volume ?? r.put?.volume)?.toLocaleString() ?? "—"}</td>
+                  <td style={{ ...TD_MONO_C, color: "#64748b" }}>{safeNum((r.call as any)?.open_interest ?? (r.call as any)?.oi ?? (r.put as any)?.open_interest ?? (r.put as any)?.oi, 0) || "—"}</td>
+                  <td style={{ ...TD_MONO_C, color: "#64748b" }}>{safeNum((r.call as any)?.volume ?? (r.put as any)?.volume, 0) || "—"}</td>
                 </tr>
               ))}
             </tbody>
