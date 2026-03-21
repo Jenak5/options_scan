@@ -221,8 +221,9 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // Skip outside market hours
-  if (!isMarketHours()) {
+  // Skip outside market hours — unless this is a manual test
+  const isManual = request.nextUrl.searchParams.get("manual") === "true";
+  if (!isMarketHours() && !isManual) {
     return NextResponse.json({ skipped: true, reason: "Outside market hours" });
   }
 
