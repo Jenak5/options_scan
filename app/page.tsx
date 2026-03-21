@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 
 // ─── API helpers ───────────────────────────────────────────────────────────
 async function fetchApi(base: string, params: Record<string, string>) {
@@ -855,6 +855,188 @@ function AlertsTab() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// RESEARCH TAB  — Claude-powered chat with live scanner context
+// Requires ANTHROPIC_API_KEY in Vercel environment variables
+// ═══════════════════════════════════════════════════════════════════════════
+interface ChatMessage { role: "user" | "assistant"; content: string; }
+
+function ResearchTab() {
+  const [messages,   setMessages]   = useState<ChatMessage[]>([]);
+  const [input,      setInput]      = useState("");
+  const [loading,    setLoading]    = useState(false);
+  const [error,      setError]      = useState<string | null>(null);
+  // Live scanner context loaded on mount
+  const [volRows,    setVolRows]    = useState<any[]>([]);
+  const [flows,      setFlows]      = useState<any[]>([]);
+  const [ctxLoaded,  setCtxLoaded]  = useState(false);
+  const bottomRef = React.useRef<HTMLDivElement>(null);
+
+  // ── Load live context once on mount ───────────────────────────────────
+  useEffect(() => {
+    (async () => {
+      try {
+        const [flowData, ...volData] = await Promise.allSettled([
+          uw({ action: "flow", limit: "20", min_premium: "50000" }),
+          ...["SPY","QQQ","AAPL","MSFT","NVDA","TSLA"].map((t) =>
+            tt({ action: "volatility", symbol: t })
+              .then((d: any) => ({
+                ticker: t,
+                iv:     safeNum(d["implied-volatility-30-day"], 0),
+                hv:     safeNum(d["historical-volatility-30-day"], 0),
+                ivRank: safeNum(d["implied-volatility-index-rank"], 0.5) * 100,
+                spread: safeNum(d["iv-hv-30-day-difference"], 0),
+              }))
+              .catch(() => null)
+          ),
+        ]);
+        if (flowData.status === "fulfilled") setFlows(flowData.value ?? []);
+        setVolRows(volData.filter((r) => r.status === "fulfilled" && (r as any).value).map((r) => (r as any).value));
+      } catch { /* silent */ }
+      finally { setCtxLoaded(true); }
+    })();
+  }, []);
+
+  // Scroll to bottom on new messages
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
+
+  const send = async () => {
+    const text = input.trim();
+    if (!text || loading) return;
+    setInput("");
+    setError(null);
+
+    const newMessages: ChatMessage[] = [...messages, { role: "user", content: text }];
+    setMessages(newMessages);
+    setLoading(true);
+
+    try {
+      const res = await fetch("/api/research", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          // Only send last 10 messages to keep token usage reasonable
+          messages: newMessages.slice(-10),
+          // Inject live scanner context only on first message
+          context: messages.length === 0 ? { flows, volRows } : undefined,
+        }),
+      });
+      const json = await res.json();
+      if (json.error) throw new Error(json.error);
+      setMessages([...newMessages, { role: "assistant", content: json.text }]);
+    } catch (e: any) {
+      setError(e.message);
+      // Remove the user message we just added if the call failed
+      setMessages(messages);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const SUGGESTIONS = [
+    "What's the most notable flow in the scanner right now?",
+    "Which watchlist ticker has the best options buying setup?",
+    "Explain the vol arb signals I'm seeing today",
+    "What does a call sweep mean vs a regular block trade?",
+  ];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 180px)", maxWidth: 860 }}>
+
+      {/* Context badge */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+        <span style={{ background: "rgba(168,85,247,0.1)", border: "1px solid rgba(168,85,247,0.25)", color: "#a855f7", padding: "3px 10px", borderRadius: 4, fontSize: 12, fontWeight: 700 }}>
+          ◆ Grok {ctxLoaded ? "3 fast" : "loading…"}
+        </span>
+        {ctxLoaded && (
+          <>
+            <span style={{ background: "rgba(6,182,212,0.08)", border: "1px solid rgba(6,182,212,0.2)", color: "#06b6d4", padding: "3px 10px", borderRadius: 4, fontSize: 12 }}>
+              {flows.length} flow alerts loaded
+            </span>
+            <span style={{ background: "rgba(16,185,129,0.08)", border: "1px solid rgba(16,185,129,0.2)", color: "#10b981", padding: "3px 10px", borderRadius: 4, fontSize: 12 }}>
+              {volRows.length} vol arb rows loaded
+            </span>
+          </>
+        )}
+      </div>
+
+      {/* Chat history */}
+      <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 16, paddingBottom: 8 }}>
+
+        {/* Empty state with suggestions */}
+        {messages.length === 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "24px 0" }}>
+            <div style={{ fontSize: 15, color: "#475569", marginBottom: 4 }}>Ask anything about your scanner data or options concepts:</div>
+            {SUGGESTIONS.map((s) => (
+              <button key={s} onClick={() => { setInput(s); }}
+                style={{ textAlign: "left", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: "10px 14px", color: "#94a3b8", fontSize: 14, cursor: "pointer" }}>
+                {s}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {messages.map((m, i) => (
+          <div key={i} style={{
+            display: "flex",
+            justifyContent: m.role === "user" ? "flex-end" : "flex-start",
+          }}>
+            <div style={{
+              maxWidth: "82%",
+              background: m.role === "user"
+                ? "rgba(6,182,212,0.12)"
+                : "rgba(255,255,255,0.04)",
+              border: `1px solid ${m.role === "user" ? "rgba(6,182,212,0.25)" : "rgba(255,255,255,0.08)"}`,
+              borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px",
+              padding: "12px 16px",
+              fontSize: 15,
+              color: m.role === "user" ? "#e2e8f0" : "#cbd5e1",
+              whiteSpace: "pre-wrap",
+              lineHeight: 1.6,
+            }}>
+              {m.content}
+            </div>
+          </div>
+        ))}
+
+        {loading && (
+          <div style={{ display: "flex", justifyContent: "flex-start" }}>
+            <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "16px 16px 16px 4px", padding: "12px 18px" }}>
+              <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
+                {[0, 1, 2].map((i) => (
+                  <div key={i} style={{ width: 6, height: 6, borderRadius: "50%", background: "#a855f7", animation: `oes-pulse 1.2s ease-in-out ${i * 0.2}s infinite` }} />
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {error && <ErrorBox message={error} />}
+
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Input row */}
+      <div style={{ display: "flex", gap: 8, paddingTop: 12, borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+        <textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+          placeholder="Ask about flow, vol arb signals, a ticker… (Enter to send, Shift+Enter for newline)"
+          rows={2}
+          style={{ ...INPUT, flex: 1, resize: "none", lineHeight: 1.5 }}
+        />
+        <button onClick={send} disabled={loading || !input.trim()}
+          style={{ ...BTN("cyan"), alignSelf: "stretch", padding: "0 20px", opacity: loading || !input.trim() ? 0.4 : 1 }}>
+          ↑ Send
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ROOT
 // ═══════════════════════════════════════════════════════════════════════════
 const TABS = [
@@ -864,6 +1046,7 @@ const TABS = [
   { id: "account",  label: "⊞ Account"      },
   { id: "kelly",    label: "△ Kelly Lab"     },
   { id: "chain",    label: "≡ Chain"         },
+  { id: "research", label: "◆ Research"      },
   { id: "alerts",   label: "⏰ Alerts"       },
 ];
 
@@ -885,7 +1068,7 @@ export default function OptionsEdgeScanner() {
               <span style={{ color: "#06b6d4" }}>◆</span> OPTIONS EDGE SCANNER
             </h1>
             <p style={{ margin: "3px 0 0", color: "#475569", fontSize: 14 }}>
-              Unusual Whales Flow · Dark Pool · Vol Arb · Tastytrade Account · Kelly Sizing · Option Chain
+              Unusual Whales Flow · Dark Pool · Vol Arb · Tastytrade Account · Kelly Sizing · Option Chain · AI Research
             </p>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -914,6 +1097,7 @@ export default function OptionsEdgeScanner() {
         {tab === "account"  && <AccountTab  />}
         {tab === "kelly"    && <KellyTab    />}
         {tab === "chain"    && <ChainTab    />}
+        {tab === "research" && <ResearchTab />}
         {tab === "alerts"   && <AlertsTab   />}
       </div>
 
