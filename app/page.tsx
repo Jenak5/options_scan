@@ -845,11 +845,91 @@ function ChainTab() {
 // ALERTS
 // ═══════════════════════════════════════════════════════════════════════════
 function AlertsTab() {
+  const [testing,    setTesting]    = useState(false);
+  const [testResult, setTestResult] = useState<string | null>(null);
+
+  const testAlert = async () => {
+    setTesting(true); setTestResult(null);
+    try {
+      const secret = prompt("Enter your CRON_SECRET to test:");
+      if (!secret) { setTesting(false); return; }
+      const res  = await fetch(`/api/cron?secret=${encodeURIComponent(secret)}`);
+      const json = await res.json();
+      if (json.error) throw new Error(json.error);
+      setTestResult(`✅ Scan complete — ${json.alertsSent} alert(s) sent\n\nLog:\n${json.log?.join("\n") ?? ""}`);
+    } catch (e: any) {
+      setTestResult(`❌ ${e.message}`);
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const ENV_VARS = [
+    { name: "UNUSUAL_WHALES_API_TOKEN", note: "Already set ✓"       },
+    { name: "TASTYTRADE_CLIENT_SECRET", note: "Already set ✓"       },
+    { name: "TASTYTRADE_REFRESH_TOKEN", note: "Already set ✓"       },
+    { name: "XAI_API_KEY",             note: "Your Grok API key"    },
+    { name: "TELEGRAM_BOT_TOKEN",      note: "From @BotFather"      },
+    { name: "TELEGRAM_CHAT_ID",        note: "Your chat ID"         },
+    { name: "CRON_SECRET",             note: "Any random string"    },
+  ];
+
   return (
-    <div style={{ textAlign: "center", padding: 48 }}>
-      <div style={{ fontSize: 32, marginBottom: 12 }}>🔔</div>
-      <div style={{ fontSize: 16, color: "#64748b" }}>Telegram alerts configured via Vercel cron.</div>
-      <div style={{ fontSize: 14, marginTop: 8, color: "#475569" }}>Alerts fire when Vol Arb signals BUY FRIENDLY or BUY VOL and flow confirms.</div>
+    <div style={{ maxWidth: 640 }}>
+      <div style={{ fontSize: 17, fontWeight: 700, color: "#e2e8f0", marginBottom: 4 }}>🔔 Automated Alert System</div>
+      <div style={{ fontSize: 14, color: "#64748b", marginBottom: 24 }}>
+        Scans every 15 min during market hours · Alerts when sweep + opening + ask-side + BUY FRIENDLY all align · Grok screens for red flags before sending
+      </div>
+
+      {/* How it works */}
+      <div style={{ background: "rgba(6,182,212,0.06)", border: "1px solid rgba(6,182,212,0.15)", borderRadius: 8, padding: "14px 18px", marginBottom: 20 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "#06b6d4", marginBottom: 10 }}>How it works</div>
+        {[
+          "Every 15 min (9:30–4pm ET, weekdays), the scanner fetches fresh flow alerts",
+          "Filters to sweeps ≥ $100K that are opening + ask-side (≥ 65%)",
+          "Cross-checks each ticker's vol arb signal — only proceeds on BUY FRIENDLY or BUY VOL",
+          "Sends the setup to Grok to screen for red flags (earnings, FDA, news)",
+          "If clean → fires a Telegram alert to @PeachClawbot with full setup details",
+        ].map((step, i) => (
+          <div key={i} style={{ display: "flex", gap: 10, marginBottom: 6, fontSize: 14, color: "#94a3b8" }}>
+            <span style={{ color: "#06b6d4", fontWeight: 700, minWidth: 20 }}>{i + 1}.</span>
+            <span>{step}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Required env vars */}
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "#e2e8f0", marginBottom: 10 }}>
+          Required Vercel Environment Variables
+        </div>
+        <div style={{ fontSize: 13, color: "#475569", marginBottom: 10 }}>
+          Vercel dashboard → your project → Settings → Environment Variables
+        </div>
+        {ENV_VARS.map((v) => (
+          <div key={v.name} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 6, marginBottom: 6 }}>
+            <span style={{ fontFamily: "monospace", fontSize: 13, color: "#e2e8f0" }}>{v.name}</span>
+            <span style={{ fontSize: 12, color: v.note.includes("✓") ? "#10b981" : "#f59e0b" }}>{v.note}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* vercel.json reminder */}
+      <div style={{ background: "rgba(168,85,247,0.06)", border: "1px solid rgba(168,85,247,0.2)", borderRadius: 8, padding: "12px 16px", marginBottom: 20, fontSize: 13, color: "#c4b5fd" }}>
+        <span style={{ fontWeight: 700 }}>Also deploy:</span> add <code style={{ background: "rgba(255,255,255,0.08)", padding: "1px 5px", borderRadius: 3 }}>vercel.json</code> to root of your repo to activate the cron schedule.
+      </div>
+
+      {/* Test button */}
+      <button onClick={testAlert} disabled={testing}
+        style={{ ...BTN("cyan"), opacity: testing ? 0.5 : 1, marginBottom: 16 }}>
+        {testing ? "Scanning…" : "▶ Run Manual Scan Now"}
+      </button>
+
+      {testResult && (
+        <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: "12px 16px", fontSize: 13, color: "#94a3b8", whiteSpace: "pre-wrap", fontFamily: "monospace" }}>
+          {testResult}
+        </div>
+      )}
     </div>
   );
 }
