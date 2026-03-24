@@ -198,14 +198,23 @@ function formatAlert(alert: any, volSignal: string, grokNote: string): string {
     : "";
 
   const typeEmoji = (alert.type ?? "").toLowerCase() === "call" ? "🟢" : "🔴";
-  const volEmoji  = volSignal === "BUY FRIENDLY" ? "✅" : volSignal === "BUY VOL" ? "⚡" : "⚠️";
+
+  // Conviction tier based on vol arb signal
+  const conviction =
+    volSignal === "BUY FRIENDLY" ? { emoji: "✅", tier: "HIGH CONVICTION",  note: "Sweep + cheap vol — best setup" } :
+    volSignal === "BUY VOL"      ? { emoji: "⚡", tier: "HIGH CONVICTION",  note: "Sweep + underpriced vol — rare edge" } :
+    volSignal === "CAUTION"      ? { emoji: "⚠️", tier: "MEDIUM",           note: "Good sweep but vol not cheap — size smaller" } :
+    volSignal === "NEUTRAL"      ? { emoji: "🔵", tier: "MEDIUM",           note: "Good sweep, neutral vol — use flow as primary signal" } :
+    volSignal === "EXPENSIVE"    ? { emoji: "🔴", tier: "LOW — SKIP",       note: "Overpaying for vol — flow looks good but options are pricey" } :
+                                   { emoji: "❓", tier: "UNSCORED",          note: "Vol data unavailable" };
 
   return `${typeEmoji} <b>${alert.ticker} ${(alert.type ?? "").toUpperCase()} SWEEP</b>
+${conviction.emoji} <b>${conviction.tier}</b>
 
 💰 <b>${premStr}</b> premium
 🎯 Strike <b>$${alert.strike}</b> · Exp <b>${alert.expiry ?? "?"}</b>
 📊 ${ratio}
-${volEmoji} Vol Arb: <b>${volSignal}</b>
+📈 Vol Arb: <b>${volSignal}</b> — ${conviction.note}
 
 🤖 <i>${grokNote}</i>
 
@@ -234,7 +243,7 @@ export async function GET(request: NextRequest) {
     // ── 1. Fetch recent flow alerts ───────────────────────────────────────
     const flowData = await uwFetch("/option-trades/flow-alerts", {
       limit: "50",
-      min_premium: "100000",
+      min_premium: "50000",
     });
     const allAlerts: any[] = flowData.data ?? [];
     log.push(`Fetched ${allAlerts.length} flow alerts`);
@@ -276,13 +285,9 @@ export async function GET(request: NextRequest) {
     for (const alert of candidates.slice(0, 5)) { // cap at 5 per run
       const id = alert.id ?? `${alert.ticker}-${alert.strike}-${alert.expiry}-${alert.total_premium}`;
 
-      // Vol arb check
-      const volSignal = await getVolSignal(alert.ticker);
-      if (!volSignal || (volSignal !== "BUY FRIENDLY" && volSignal !== "BUY VOL")) {
-        log.push(`${alert.ticker}: skipped — vol signal is ${volSignal ?? "unavailable"}`);
-        continue;
-      }
-      log.push(`${alert.ticker}: vol signal ✅ ${volSignal}`);
+      // Vol arb — fetch for context but never block the alert
+      const volSignal = await getVolSignal(alert.ticker) ?? "UNKNOWN";
+      log.push(`${alert.ticker}: vol signal ${volSignal}`);
 
       // Grok red flag screen
       const { clean, reason } = await screenWithGrok(alert, volSignal);
