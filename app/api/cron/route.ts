@@ -230,37 +230,41 @@ export async function GET(request: NextRequest) {
     log.push(`Fetched ${allAlerts.length} flow alerts`);
 
     // ── 2. Filter: sweep + opening + ask-side ─────────────────────────────
-    // ★ FIX: removed hard freshness cutoff — UW doesn't reliably return
-    //   created_at on all alerts so the cutoff was silently dropping everything.
-    //   Dedup via alertedIds handles repeat alerts instead.
-    // ★ FIX: ask-side filter now passes through if premium split is missing
-    //   (sum === 0) rather than incorrectly blocking the alert.
-    const candidates = allAlerts.filter((f) => {
-      // Dedup
-      const id = f.id ?? `${f.ticker}-${f.strike}-${f.expiry}-${f.total_premium}`;
-      if (alertedIds.has(id)) return false;
+    // Debug mode: pass ?debug=true to see why each alert was filtered
+    const isDebug = request.nextUrl.searchParams.get("debug") === "true";
+    let notSweep = 0, isClosing = 0, bidSide = 0, duped = 0;
 
-      // Must be a sweep
+    const candidates = allAlerts.filter((f) => {
+      const id = f.id ?? `${f.ticker}-${f.strike}-${f.expiry}-${f.total_premium}`;
+      if (alertedIds.has(id)) { duped++; return false; }
+
       const isSweep = f.has_sweep || f.is_sweep ||
                       (f.alert_rule ?? "").toLowerCase().includes("sweep");
-      if (!isSweep) return false;
+      if (!isSweep) { notSweep++; return false; }
 
-      // Must be opening (skip only if explicitly marked closing)
-      if (f.all_opening_trades === false) return false;
+      if (f.all_opening_trades === false) { isClosing++; return false; }
 
-      // Ask-side ≥ 65% — only apply if we actually have the split data
       const askP = parseFloat(f.total_ask_side_prem ?? "0");
       const bidP = parseFloat(f.total_bid_side_prem ?? "0");
       const sum  = askP + bidP;
-      if (sum > 0 && (askP / sum) < 0.65) return false;
-      // If sum === 0 (no split data), let it through — don't block on missing data
+      if (sum > 0 && (askP / sum) < 0.65) { bidSide++; return false; }
 
       return true;
     });
 
-    log.push(`${candidates.length} candidates after sweep/opening/ask-side filter`);
-    if (candidates.length === 0) {
-      log.push("No qualifying sweeps in this scan window — this is normal outside busy market periods");
+    log.push(`Filter breakdown — not a sweep: ${notSweep} | closing: ${isClosing} | bid-side: ${bidSide} | duped: ${duped} | passed: ${candidates.length}`);
+
+    if (isDebug && candidates.length === 0) {
+      // Show sample of raw alerts so we can see actual field values
+      const sample = allAlerts.slice(0, 3).map(f => {
+        const askP = parseFloat(f.total_ask_side_prem ?? "0");
+        const bidP = parseFloat(f.total_bid_side_prem ?? "0");
+        const sum  = askP + bidP;
+        const ratio = sum > 0 ? ((askP/sum)*100).toFixed(0)+"%" : "no split data";
+        const isSweep = f.has_sweep || f.is_sweep || (f.alert_rule ?? "").toLowerCase().includes("sweep");
+        return `${f.ticker} ${(f.type??"")} $${f.strike} | sweep:${isSweep} opening:${f.all_opening_trades} ask-side:${ratio} rule:${f.alert_rule??"-"}`;
+      });
+      log.push("Sample alerts: " + sample.join(" || "));
     }
 
     // ── 3. Vol arb + Grok screen + alert ─────────────────────────────────
