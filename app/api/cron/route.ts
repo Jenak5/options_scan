@@ -49,14 +49,13 @@ async function uwFetch(path: string, params?: Record<string, string>) {
   return res.json();
 }
 
-// ── Tastytrade vol arb helper ─────────────────────────────────────────────
-async function getVolSignal(ticker: string): Promise<string> {
+// ── Tastytrade token (fetched once per cron run) ──────────────────────────
+async function getTTToken(): Promise<string | null> {
   try {
     const ttBase = process.env.TASTYTRADE_ENV === "production"
       ? "https://api.tastyworks.com"
       : "https://api.cert.tastyworks.com";
-
-    const tokenRes = await fetch(`${ttBase}/oauth/token`, {
+    const res = await fetch(`${ttBase}/oauth/token`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -66,11 +65,20 @@ async function getVolSignal(ticker: string): Promise<string> {
         client_secret: process.env.TASTYTRADE_CLIENT_SECRET ?? "",
       }),
     });
-    if (!tokenRes.ok) return "UNKNOWN";
-    const tokenData = await tokenRes.json();
-    const token = tokenData["access-token"] ?? tokenData.access_token;
-    if (!token) return "UNKNOWN";
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data["access-token"] ?? data.access_token ?? null;
+  } catch {
+    return null;
+  }
+}
 
+// ── Tastytrade vol arb helper ─────────────────────────────────────────────
+async function getVolSignal(ticker: string, token: string): Promise<string> {
+  try {
+    const ttBase = process.env.TASTYTRADE_ENV === "production"
+      ? "https://api.tastyworks.com"
+      : "https://api.cert.tastyworks.com";
     const metricsRes = await fetch(`${ttBase}/market-metrics?symbols=${ticker}`, {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -163,7 +171,11 @@ function formatAlert(alert: any, volSignal: string, grokNote: string): string {
 
   const typeEmoji = (alert.type ?? "").toLowerCase() === "call" ? "🟢" : "🔴";
 
+  // Index ETFs (SPY, QQQ, IWM) may be hedges — flag them
+  const isIndexETF = ["SPY","QQQ","IWM","DIA","XSP"].includes((alert.ticker ?? "").toUpperCase());
+
   const conviction =
+    isIndexETF               ? { emoji: "⚠️",  tier: "POSSIBLE HEDGE",   note: "Index ETF — could be portfolio hedge, not directional. Verify before trading." } :
     volSignal === "BUY FRIENDLY" ? { emoji: "✅", tier: "HIGH CONVICTION",  note: "Sweep + cheap vol — best setup" } :
     volSignal === "BUY VOL"      ? { emoji: "⚡", tier: "HIGH CONVICTION",  note: "Sweep + underpriced vol — rare edge" } :
     volSignal === "CAUTION"      ? { emoji: "⚠️",  tier: "MEDIUM",           note: "Good sweep but vol not cheap — size smaller" } :
@@ -238,6 +250,10 @@ export async function GET(request: NextRequest) {
       const id = f.id ?? `${f.ticker}-${f.strike}-${f.expiry}-${f.total_premium}`;
       if (alertedIds.has(id)) { duped++; return false; }
 
+      // Filter pure index hedge products — SPXW is almost exclusively institutional hedging
+      const ticker = (f.ticker ?? "").toUpperCase();
+      if (ticker === "SPXW" || ticker === "SPX" || ticker === "VIX") { notSweep++; return false; }
+
       // Accept sweeps AND repeated hits (equal conviction — repeated fills at same strike)
       const rule = (f.alert_rule ?? "").toLowerCase();
       const isSweep = f.has_sweep || f.is_sweep ||
@@ -275,11 +291,16 @@ export async function GET(request: NextRequest) {
     }
 
     // ── 3. Vol arb + Grok screen + alert ─────────────────────────────────
+    // Fetch Tastytrade token once — reuse for all candidates this run
+    const ttToken = await getTTToken();
+    if (!ttToken) log.push("Warning: Tastytrade token unavailable — vol signals will show UNKNOWN");
+
     for (const alert of candidates.slice(0, 5)) {
       const id = alert.id ?? `${alert.ticker}-${alert.strike}-${alert.expiry}-${alert.total_premium}`;
 
-      // Vol arb — context only, never blocks
-      const volSignal = await getVolSignal(alert.ticker);
+      // Vol arb — skip for index ETFs, use shared token for individual stocks
+      const isIdx = ["SPY","QQQ","IWM","DIA","XSP"].includes((alert.ticker ?? "").toUpperCase());
+      const volSignal = isIdx ? "INDEX ETF" : ttToken ? await getVolSignal(alert.ticker, ttToken) : "UNKNOWN";
       log.push(`${alert.ticker}: vol signal ${volSignal}`);
 
       // Grok red flag screen
