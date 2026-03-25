@@ -238,11 +238,18 @@ export async function GET(request: NextRequest) {
       const id = f.id ?? `${f.ticker}-${f.strike}-${f.expiry}-${f.total_premium}`;
       if (alertedIds.has(id)) { duped++; return false; }
 
+      // Accept sweeps AND repeated hits (equal conviction — repeated fills at same strike)
+      const rule = (f.alert_rule ?? "").toLowerCase();
       const isSweep = f.has_sweep || f.is_sweep ||
-                      (f.alert_rule ?? "").toLowerCase().includes("sweep");
+                      rule.includes("sweep") ||
+                      rule.includes("repeatedhits") ||
+                      rule.includes("repeated_hits");
       if (!isSweep) { notSweep++; return false; }
 
-      if (f.all_opening_trades === false) { isClosing++; return false; }
+      // Only block if explicitly closing AND vol/OI confirms it (ratio < 0.5)
+      // null opening = unknown = let it through
+      const volOi = parseFloat(f.volume_oi_ratio ?? "1");
+      if (f.all_opening_trades === false && volOi < 0.5) { isClosing++; return false; }
 
       const askP = parseFloat(f.total_ask_side_prem ?? "0");
       const bidP = parseFloat(f.total_bid_side_prem ?? "0");
