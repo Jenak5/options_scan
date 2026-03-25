@@ -853,7 +853,7 @@ function AlertsTab() {
     try {
       const secret = prompt("Enter your CRON_SECRET to test:");
       if (!secret) { setTesting(false); return; }
-      const res  = await fetch(`/api/cron?secret=${encodeURIComponent(secret)}&manual=true`);
+      const res  = await fetch(`/api/cron?secret=${encodeURIComponent(secret)}&manual=true&debug=true`);
       const json = await res.json();
       if (json.error) throw new Error(json.error);
       setTestResult(`✅ Scan complete — ${json.alertsSent} alert(s) sent\n\nLog:\n${json.log?.join("\n") ?? ""}`);
