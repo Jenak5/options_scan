@@ -50,7 +50,7 @@ async function uwFetch(path: string, params?: Record<string, string>) {
 }
 
 // ── Tastytrade token (fetched once per cron run) ──────────────────────────
-async function getTTToken(): Promise<string | null> {
+async function getTTToken(): Promise<{ token: string | null; error: string }> {
   try {
     const ttBase = process.env.TASTYTRADE_ENV === "production"
       ? "https://api.tastyworks.com"
@@ -65,11 +65,16 @@ async function getTTToken(): Promise<string | null> {
         client_secret: process.env.TASTYTRADE_CLIENT_SECRET ?? "",
       }),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const err = await res.text();
+      return { token: null, error: `TT token HTTP ${res.status}: ${err.slice(0, 100)}` };
+    }
     const data = await res.json();
-    return data["access-token"] ?? data.access_token ?? null;
-  } catch {
-    return null;
+    const token = data["access-token"] ?? data.access_token ?? null;
+    if (!token) return { token: null, error: `TT token response missing access-token field: ${JSON.stringify(data).slice(0,100)}` };
+    return { token, error: "" };
+  } catch (e: any) {
+    return { token: null, error: `TT token exception: ${e.message}` };
   }
 }
 
@@ -297,11 +302,22 @@ export async function GET(request: NextRequest) {
 
     // ── 3. Vol arb + Grok screen + alert ─────────────────────────────────
     // Fetch Tastytrade token once — reuse for all candidates this run
-    const ttToken = await getTTToken();
-    if (!ttToken) log.push("Warning: Tastytrade token unavailable — vol signals will show UNKNOWN");
+    const { token: ttToken, error: ttError } = await getTTToken();
+    if (!ttToken) log.push(`Warning: Tastytrade token failed — ${ttError}`);
+    else log.push("Tastytrade token OK");
+
+    // Per-run ticker dedup — only one alert per ticker per scan
+    const alertedThisRun = new Set<string>();
 
     for (const alert of candidates.slice(0, 8)) {
       const id = alert.id ?? `${alert.ticker}-${alert.strike}-${alert.expiry}-${alert.total_premium}`;
+      const ticker = (alert.ticker ?? "").toUpperCase();
+
+      // Skip if we already alerted this ticker in this run
+      if (alertedThisRun.has(ticker)) {
+        log.push(`${ticker}: skipped — already alerted this run`);
+        continue;
+      }
 
       // Vol arb — skip for index ETFs, use shared token for individual stocks
       const isIdx = ["SPY","QQQ","IWM","DIA","XSP"].includes((alert.ticker ?? "").toUpperCase());
@@ -324,6 +340,7 @@ export async function GET(request: NextRequest) {
 
       if (sent) {
         alertsSent++;
+        alertedThisRun.add(ticker);
         log.push(`${alert.ticker}: ✅ Telegram alert sent`);
       } else {
         log.push(`${alert.ticker}: ❌ Telegram send failed — check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID`);
