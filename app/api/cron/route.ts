@@ -233,13 +233,22 @@ export async function GET(request: NextRequest) {
   let alertsSent = 0;
 
   try {
-    // ── 1. Fetch flow ─────────────────────────────────────────────────────
-    const flowData  = await uwFetch("/option-trades/flow-alerts", {
-      limit:       "50",
-      min_premium: "50000",
-    });
-    const allAlerts: any[] = flowData.data ?? [];
-    log.push(`Fetched ${allAlerts.length} flow alerts`);
+    // ── 1. Fetch flow — two pools so individual stocks aren't crowded out ──
+    // Pool A: individual stocks only (exclude known index products)
+    // Pool B: index ETFs (SPY, QQQ) for macro context, capped small
+    const INDEX_ETFS = new Set(["SPY","QQQ","IWM","DIA","XSP","SPXW","SPX","VIX","NDX","RUT"]);
+
+    const [stockData, indexData] = await Promise.all([
+      uwFetch("/option-trades/flow-alerts", { limit: "50", min_premium: "50000" }),
+      uwFetch("/option-trades/flow-alerts", { limit: "20", min_premium: "100000", ticker_symbol: "SPY" }),
+    ]);
+
+    const stockAlerts: any[] = (stockData.data ?? [])
+      .filter((f: any) => !INDEX_ETFS.has((f.ticker ?? "").toUpperCase()));
+    const indexAlerts: any[] = (indexData.data ?? []).slice(0, 3);
+    const allAlerts: any[] = [...stockAlerts, ...indexAlerts];
+
+    log.push(`Fetched ${stockAlerts.length} individual stock alerts + ${indexAlerts.length} index alerts`);
 
     // ── 2. Filter: sweep + opening + ask-side ─────────────────────────────
     // Debug mode: pass ?debug=true to see why each alert was filtered
@@ -249,10 +258,6 @@ export async function GET(request: NextRequest) {
     const candidates = allAlerts.filter((f) => {
       const id = f.id ?? `${f.ticker}-${f.strike}-${f.expiry}-${f.total_premium}`;
       if (alertedIds.has(id)) { duped++; return false; }
-
-      // Filter pure index hedge products — SPXW is almost exclusively institutional hedging
-      const ticker = (f.ticker ?? "").toUpperCase();
-      if (ticker === "SPXW" || ticker === "SPX" || ticker === "VIX") { notSweep++; return false; }
 
       // Accept sweeps AND repeated hits (equal conviction — repeated fills at same strike)
       const rule = (f.alert_rule ?? "").toLowerCase();
@@ -295,7 +300,7 @@ export async function GET(request: NextRequest) {
     const ttToken = await getTTToken();
     if (!ttToken) log.push("Warning: Tastytrade token unavailable — vol signals will show UNKNOWN");
 
-    for (const alert of candidates.slice(0, 5)) {
+    for (const alert of candidates.slice(0, 8)) {
       const id = alert.id ?? `${alert.ticker}-${alert.strike}-${alert.expiry}-${alert.total_premium}`;
 
       // Vol arb — skip for index ETFs, use shared token for individual stocks
