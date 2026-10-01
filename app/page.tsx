@@ -880,8 +880,9 @@ function AlertsTab() {
     { name: "SCHWAB_CLIENT_ID",         note: "Sensitive · Market Data app key" },
     { name: "SCHWAB_CLIENT_SECRET",     note: "Sensitive · Market Data secret" },
     { name: "SCHWAB_REDIRECT_URI",      note: "Sensitive · must match the callback URL" },
-    { name: "KV_REST_API_URL",          note: "Sensitive · token store, or Upstash" },
+    { name: "KV_REST_API_URL",          note: "Sensitive · token store, or Upstash or Blob" },
     { name: "KV_REST_API_TOKEN",        note: "Sensitive · token store" },
+    { name: "BLOB_READ_WRITE_TOKEN",    note: "Sensitive · private Blob token store" },
   ];
 
   return (

@@ -179,7 +179,7 @@ describe("refresh window", () => {
     expect(JSON.stringify(absent).includes("fixture")).toBe(false);
   });
 
-  it("names the KV and Upstash env vars when production storage is not configured", () => {
+  it("names the KV, Upstash, and Blob env vars when production storage is not configured", () => {
     const status = publicTokenStatus({
       configured: true,
       storage: "unconfigured",
@@ -192,6 +192,7 @@ describe("refresh window", () => {
     expect(status.storageWarning).toContain("KV_REST_API_TOKEN");
     expect(status.storageWarning).toContain("UPSTASH_REDIS_REST_URL");
     expect(status.storageWarning).toContain("UPSTASH_REDIS_REST_TOKEN");
+    expect(status.storageWarning).toContain("BLOB_READ_WRITE_TOKEN");
     expect(status.message).toContain("not configured");
     expect(JSON.stringify(status).includes("fixture")).toBe(false);
   });

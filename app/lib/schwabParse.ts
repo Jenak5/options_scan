@@ -1,6 +1,6 @@
 import type { OptionContract, PutCall } from "@/app/lib/contract";
 import { REFRESH_TOKEN_WARNING_DAYS } from "@/app/lib/risk";
-import { SCHWAB_STORAGE_UNCONFIGURED_MESSAGE } from "@/app/lib/schwabStorage";
+import { SCHWAB_STORAGE_UNCONFIGURED_MESSAGE, type SchwabStoreKind } from "@/app/lib/schwabStorage";
 
 /** Schwab access tokens last about 30 minutes. */
 export const ACCESS_TOKEN_FALLBACK_SECONDS = 30 * 60;
@@ -21,8 +21,8 @@ export interface StoredTokens {
 
 export interface SchwabPublicStatus {
   configured: boolean;
-  storage: "kv" | "memory" | "unconfigured";
-  /** Set when production has no KV or Upstash. The dashboard banner shows this. */
+  storage: SchwabStoreKind;
+  /** Set when production has no KV, Upstash, or Blob. The dashboard banner shows this. */
   storageWarning: string | null;
   connected: boolean;
   accessExpired: boolean;
@@ -90,7 +90,7 @@ export function formatDaysLeft(days: number): string {
 
 export function publicTokenStatus(input: {
   configured: boolean;
-  storage: "kv" | "memory" | "unconfigured";
+  storage: SchwabStoreKind;
   accessExpiresAt: number | null;
   refreshExpiresAt: number | null;
   now: number;
@@ -124,7 +124,7 @@ export function publicTokenStatus(input: {
   }
   if (input.refreshExpiresAt == null) {
     const memoryNote = input.storage === "memory"
-      ? " Token storage is in-memory until Vercel KV or Upstash is set."
+      ? " Token storage is in-memory until Vercel KV, Upstash, or Vercel Blob is set."
       : "";
     return {
       ...base,
