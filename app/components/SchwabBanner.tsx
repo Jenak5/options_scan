@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { SCHWAB_STORAGE_UNCONFIGURED_MESSAGE } from "@/app/lib/schwabStorage";
 
 interface SchwabStatus {
   configured: boolean;
-  storage: "kv" | "memory";
+  storage: "kv" | "memory" | "unconfigured";
+  storageWarning: string | null;
   connected: boolean;
   accessExpired: boolean;
   refreshExpired: boolean;
@@ -13,17 +15,31 @@ interface SchwabStatus {
   message: string;
 }
 
+type NoticeKind = "success" | "error" | null;
+
+const FAILURES: Record<string, string> = {
+  state: "Schwab connect stopped because the security check did not match. You are back on the dashboard. Use Reconnect Schwab if you want to try again.",
+  denied: "Schwab did not grant access. Nothing was connected. You are back on the dashboard. Use Reconnect Schwab if you want to try again.",
+  exchange: "Schwab connect could not be completed. Nothing was connected. You are back on the dashboard. Use Reconnect Schwab if you want to try again.",
+  storage: SCHWAB_STORAGE_UNCONFIGURED_MESSAGE,
+};
+
 export function SchwabBanner() {
   const [status, setStatus] = useState<SchwabStatus | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [noticeKind, setNoticeKind] = useState<NoticeKind>(null);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get("schwab") === "connected") {
-      setNotice("Schwab connected. The tokens stay on the server.");
-    } else if (params.get("schwab") === "error") {
-      setNotice("Schwab connect did not finish. Use Reconnect Schwab and approve Market Data again.");
+    const schwab = params.get("schwab");
+    if (schwab === "connected") {
+      setNotice("Schwab connected");
+      setNoticeKind("success");
+    } else if (schwab === "error") {
+      const reason = params.get("reason") ?? "";
+      setNotice(FAILURES[reason] ?? "Schwab connect did not finish. You are back on the dashboard. Use Reconnect Schwab if you want to try again.");
+      setNoticeKind("error");
     }
 
     let cancelled = false;
@@ -42,10 +58,22 @@ export function SchwabBanner() {
     };
   }, []);
 
-  const warn = Boolean(status?.warnRefreshSoon || status?.refreshExpired);
-  const border = warn ? "rgba(245,158,11,0.45)" : "rgba(255,255,255,0.08)";
-  const background = warn ? "rgba(245,158,11,0.1)" : "rgba(255,255,255,0.03)";
-  const color = warn ? "#fbbf24" : "#94a3b8";
+  const storageWarning = status?.storageWarning ?? (status?.storage === "unconfigured" ? SCHWAB_STORAGE_UNCONFIGURED_MESSAGE : null);
+  const showStorage = Boolean(storageWarning) && storageWarning !== notice;
+  const warn = Boolean(status?.warnRefreshSoon || status?.refreshExpired || noticeKind === "error" || storageWarning);
+  const success = noticeKind === "success" && !warn;
+
+  const border = success
+    ? "rgba(16,185,129,0.45)"
+    : warn
+      ? "rgba(245,158,11,0.45)"
+      : "rgba(255,255,255,0.08)";
+  const background = success
+    ? "rgba(16,185,129,0.1)"
+    : warn
+      ? "rgba(245,158,11,0.1)"
+      : "rgba(255,255,255,0.03)";
+  const color = success ? "#6ee7b7" : warn ? "#fbbf24" : "#94a3b8";
 
   return (
     <div style={{
@@ -61,9 +89,17 @@ export function SchwabBanner() {
       marginBottom: 16,
     }}>
       <div style={{ fontSize: 14, color, lineHeight: 1.45 }}>
-        {notice && <div style={{ color: "#e2e8f0", marginBottom: 4 }}>{notice}</div>}
+        {notice && (
+          <div role={noticeKind === "error" ? "alert" : "status"} style={{ color: success ? "#6ee7b7" : "#e2e8f0", marginBottom: 4, fontWeight: 700 }}>
+            {notice}
+          </div>
+        )}
+        {showStorage && (
+          <div role="alert" style={{ color: "#fbbf24", marginBottom: 4, fontWeight: 700 }}>{storageWarning}</div>
+        )}
         {loadError && "Schwab status is unavailable."}
-        {!loadError && (status?.message ?? "Checking Schwab…")}
+        {!loadError && status?.message && status.message !== notice && status.message !== storageWarning && status.message}
+        {!loadError && !status && "Checking Schwab…"}
         {status?.warnRefreshSoon && (
           <div style={{ marginTop: 4, fontWeight: 700 }}>
             Refresh token has under 2 days left. Reconnect before the weekly login lapses.

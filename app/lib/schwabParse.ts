@@ -1,5 +1,6 @@
 import type { OptionContract, PutCall } from "@/app/lib/contract";
 import { REFRESH_TOKEN_WARNING_DAYS } from "@/app/lib/risk";
+import { SCHWAB_STORAGE_UNCONFIGURED_MESSAGE } from "@/app/lib/schwabStorage";
 
 /** Schwab access tokens last about 30 minutes. */
 export const ACCESS_TOKEN_FALLBACK_SECONDS = 30 * 60;
@@ -20,7 +21,9 @@ export interface StoredTokens {
 
 export interface SchwabPublicStatus {
   configured: boolean;
-  storage: "kv" | "memory";
+  storage: "kv" | "memory" | "unconfigured";
+  /** Set when production has no KV or Upstash. The dashboard banner shows this. */
+  storageWarning: string | null;
   connected: boolean;
   accessExpired: boolean;
   refreshExpired: boolean;
@@ -87,7 +90,7 @@ export function formatDaysLeft(days: number): string {
 
 export function publicTokenStatus(input: {
   configured: boolean;
-  storage: "kv" | "memory";
+  storage: "kv" | "memory" | "unconfigured";
   accessExpiresAt: number | null;
   refreshExpiresAt: number | null;
   now: number;
@@ -95,7 +98,19 @@ export function publicTokenStatus(input: {
   const base = {
     configured: input.configured,
     storage: input.storage,
+    storageWarning: input.storage === "unconfigured" ? SCHWAB_STORAGE_UNCONFIGURED_MESSAGE : null,
   };
+  if (input.storage === "unconfigured") {
+    return {
+      ...base,
+      connected: false,
+      accessExpired: false,
+      refreshExpired: false,
+      refreshDaysLeft: null,
+      warnRefreshSoon: false,
+      message: SCHWAB_STORAGE_UNCONFIGURED_MESSAGE,
+    };
+  }
   if (!input.configured) {
     return {
       ...base,

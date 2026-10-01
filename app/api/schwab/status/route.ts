@@ -14,6 +14,7 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({
     configured: status.configured,
     storage: status.storage,
+    storageWarning: status.storageWarning,
     connected: status.connected,
     accessExpired: status.accessExpired,
     refreshExpired: status.refreshExpired,

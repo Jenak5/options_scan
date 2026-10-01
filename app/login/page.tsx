@@ -1,6 +1,12 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
+import { safeNextPath } from "@/app/lib/safeNext";
+
+function destinationAfterLogin(): string {
+  const raw = new URLSearchParams(window.location.search).get("next");
+  return safeNextPath(raw, window.location.origin) ?? "/";
+}
 
 export default function LoginPage() {
   const [password, setPassword] = useState("");
@@ -21,7 +27,7 @@ export default function LoginPage() {
       if (!res.ok) {
         throw new Error(typeof json.error === "string" ? json.error : "Sign-in failed");
       }
-      window.location.href = "/";
+      window.location.href = destinationAfterLogin();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sign-in failed");
       setPending(false);
