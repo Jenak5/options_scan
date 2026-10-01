@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { SCHWAB_STORAGE_UNCONFIGURED_MESSAGE } from "@/app/lib/schwabStorage";
+import { SCHWAB_STORAGE_UNCONFIGURED_MESSAGE, type SchwabStoreKind } from "@/app/lib/schwabStorage";
 
 interface SchwabStatus {
   configured: boolean;
-  storage: "kv" | "memory" | "unconfigured";
+  storage: SchwabStoreKind;
   storageWarning: string | null;
   connected: boolean;
   accessExpired: boolean;

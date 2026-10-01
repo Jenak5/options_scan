@@ -13,7 +13,13 @@ import {
   type SchwabPublicStatus,
   type StoredTokens,
 } from "@/app/lib/schwabParse";
-import { readAlertMeta, readTokens, resolveStoreKind, writeAlertMeta, writeTokens } from "@/app/lib/schwabStore";
+import {
+  commitRefreshedTokens,
+  readAlertMeta,
+  readTokens,
+  resolveStoreKind,
+  writeAlertMeta,
+} from "@/app/lib/schwabStore";
 import { sendTelegramAlert, telegramConfigured } from "@/app/lib/telegram";
 
 /**
@@ -91,17 +97,11 @@ export async function noteRefreshWindow(status: SchwabPublicStatus): Promise<voi
 export async function getAccessToken(): Promise<string> {
   const stored = await readTokens();
   if (!stored) throw new SchwabNotConnectedError();
-  const now = Date.now();
-  if (stored.refreshExpiresAt <= now) {
-    await notifyExpiry();
-    throw new SchwabNotConnectedError();
-  }
-  if (refreshWarnSoon(stored.refreshExpiresAt, now)) {
+  const usable = await resolveUsableTokens(stored, false);
+  if (refreshWarnSoon(usable.refreshExpiresAt, Date.now())) {
     await notifyExpiry();
   }
-  if (stored.accessExpiresAt - ACCESS_REFRESH_SKEW_MS > now) return stored.accessToken;
-  const next = await refreshStored(stored, now);
-  return next.accessToken;
+  return usable.accessToken;
 }
 
 export async function getOptionChain(input: {
@@ -133,7 +133,38 @@ export async function getQuotes(symbols: string[]): Promise<OptionContract[]> {
   return parseQuotes(payload);
 }
 
-async function refreshStored(stored: StoredTokens, now: number): Promise<StoredTokens> {
+/**
+ * Blob reads can lag a write for a short time. When the access token looks
+ * expired, re-read before calling Schwab. A failed refresh does the same
+ * and keeps a newer stored token instead of treating a stale copy as dead.
+ * forceRefresh is the 401 retry: refresh unless a newer token is already stored.
+ */
+async function resolveUsableTokens(stored: StoredTokens, forceRefresh: boolean): Promise<StoredTokens> {
+  const now = Date.now();
+  const expired = stored.refreshExpiresAt <= now || stored.accessExpiresAt - ACCESS_REFRESH_SKEW_MS <= now;
+  const latest = expired || forceRefresh ? await fresherStoredTokens(stored) : stored;
+  if (latest.refreshExpiresAt <= now) {
+    await notifyExpiry();
+    throw new SchwabNotConnectedError();
+  }
+  const changed = latest.accessToken !== stored.accessToken || latest.refreshToken !== stored.refreshToken;
+  const accessUsable = latest.accessExpiresAt - ACCESS_REFRESH_SKEW_MS > now;
+  if (accessUsable && (!forceRefresh || changed)) return latest;
+  return refreshStored(latest, now);
+}
+
+async function fresherStoredTokens(stored: StoredTokens): Promise<StoredTokens> {
+  if (resolveStoreKind() !== "blob") return stored;
+  const latest = await readTokens();
+  if (!latest) return stored;
+  if (latest.refreshToken !== stored.refreshToken || latest.accessExpiresAt > stored.accessExpiresAt) {
+    return latest;
+  }
+  return stored;
+}
+
+async function refreshStored(stored: StoredTokens, now: number, depth = 0): Promise<StoredTokens> {
+  if (depth > 1) throw new Error("Schwab token refresh failed. Reconnect Schwab.");
   try {
     const body = await postToken({
       grant_type: "refresh_token",
@@ -143,11 +174,36 @@ async function refreshStored(stored: StoredTokens, now: number): Promise<StoredT
       refreshToken: stored.refreshToken,
       refreshExpiresAt: stored.refreshExpiresAt,
     });
-    await writeTokens(next);
-    return next;
+    const saved = await commitRefreshedTokens(stored, next);
+    if (
+      saved.refreshToken !== next.refreshToken
+      && saved.accessExpiresAt - ACCESS_REFRESH_SKEW_MS <= Date.now()
+      && depth < 1
+    ) {
+      return refreshStored(saved, Date.now(), depth + 1);
+    }
+    return saved;
   } catch (err) {
+    const recovered = await readTokens();
+    const currentNow = Date.now();
+    if (
+      recovered
+      && recovered.refreshExpiresAt > currentNow
+      && recovered.accessExpiresAt - ACCESS_REFRESH_SKEW_MS > currentNow
+      && (recovered.refreshToken !== stored.refreshToken || recovered.accessExpiresAt > stored.accessExpiresAt)
+    ) {
+      return recovered;
+    }
+    if (
+      recovered
+      && recovered.refreshToken !== stored.refreshToken
+      && recovered.refreshExpiresAt > currentNow
+      && depth < 1
+    ) {
+      return refreshStored(recovered, currentNow, depth + 1);
+    }
     await notifyRefreshFailure();
-    if (err instanceof SchwabConfigError) throw err;
+    if (err instanceof SchwabConfigError || err instanceof SchwabNotConnectedError) throw err;
     throw new Error("Schwab token refresh failed. Reconnect Schwab.");
   }
 }
@@ -171,7 +227,7 @@ async function marketDataGet(path: "chains" | "quotes", query: URLSearchParams):
 async function retryMarketDataOnce(url: string): Promise<unknown> {
   const stored = await readTokens();
   if (!stored) throw new SchwabNotConnectedError();
-  const next = await refreshStored(stored, Date.now());
+  const next = await resolveUsableTokens(stored, true);
   const retry = await fetch(url, {
     method: "GET",
     headers: {

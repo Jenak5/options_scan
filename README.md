@@ -66,10 +66,11 @@ Set every secret in Vercel as a **Sensitive** variable. Do not leave them readab
 | `SCHWAB_CLIENT_ID` | Yes | Schwab Market Data app key |
 | `SCHWAB_CLIENT_SECRET` | Yes | Schwab Market Data app secret |
 | `SCHWAB_REDIRECT_URI` | Yes | Must match the callback URL registered on the Schwab app |
-| `KV_REST_API_URL` | Yes | Vercel KV REST URL. Required in production unless the Upstash pair below is set. |
-| `KV_REST_API_TOKEN` | Yes | Vercel KV REST token. Required in production unless the Upstash pair below is set. |
-| `UPSTASH_REDIS_REST_URL` | Yes | Upstash Redis REST URL. Used when `KV_REST_API_URL` is not set. |
-| `UPSTASH_REDIS_REST_TOKEN` | Yes | Upstash Redis REST token. Used when `KV_REST_API_TOKEN` is not set. |
+| `KV_REST_API_URL` | Yes | Vercel KV REST URL. Used when both KV variables are set. |
+| `KV_REST_API_TOKEN` | Yes | Vercel KV REST token. Used when both KV variables are set. |
+| `UPSTASH_REDIS_REST_URL` | Yes | Upstash Redis REST URL. Used when the KV pair is not complete and both Upstash variables are set. |
+| `UPSTASH_REDIS_REST_TOKEN` | Yes | Upstash Redis REST token. Used when the KV pair is not complete and both Upstash variables are set. |
+| `BLOB_READ_WRITE_TOKEN` | Yes | Private Vercel Blob token. Used when neither Redis pair is complete. |
 | `ALERT_MIN_PREMIUM` | No | Alert filter |
 | `ALERT_SWEEPS_ONLY` | No | Alert filter |
 | `ALERT_OTM_ONLY` | No | Alert filter |
@@ -119,10 +120,11 @@ Set **one** of these pairs. Names are exact:
 |-------|------------------------|
 | Vercel KV | `KV_REST_API_URL` and `KV_REST_API_TOKEN` |
 | Upstash Redis | `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` |
+| Vercel Blob | `BLOB_READ_WRITE_TOKEN` |
 
-If both pairs are set, `KV_REST_API_URL` and `KV_REST_API_TOKEN` are used. The value written there is encrypted with a key derived from `SESSION_SECRET`.
+A complete KV pair wins. Otherwise a complete Upstash pair. Otherwise `BLOB_READ_WRITE_TOKEN`. The value written there is encrypted with a key derived from `SESSION_SECRET`. Blob is a private store. The encrypted envelope lives at a fixed pathname, `schwab/tokens.json`. Reads bypass the CDN cache, because a refresh token rotates and a stale copy must not be written back over a newer one.
 
-If neither pair is set **in production** (including on Vercel), the app does **not** fall back to process memory. Memory does not survive across serverless instances, so a connection saved that way looks lost on the next request. The dashboard banner says storage is not configured and names `KV_REST_API_URL`, `KV_REST_API_TOKEN`, `UPSTASH_REDIS_REST_URL`, and `UPSTASH_REDIS_REST_TOKEN`. Connect and the callback refuse to save a token until one pair is set.
+If none of those are set **in production** (including on Vercel), the app does **not** fall back to process memory. Memory does not survive across serverless instances, so a connection saved that way looks lost on the next request. The dashboard banner says storage is not configured and names `KV_REST_API_URL`, `KV_REST_API_TOKEN`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, and `BLOB_READ_WRITE_TOKEN`. Connect and the callback refuse to save a token until one store is set.
 
 Process memory is only for local development, when `NODE_ENV` is not `production` and `VERCEL` is not `1`. A restart drops that token.
 
