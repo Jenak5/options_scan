@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ALERT_RULES, EVENT_RULES } from "@/app/lib/alertConfig";
+import { ALERT_RULES, EVENT_RULES, gradeARubric } from "@/app/lib/alertConfig";
 import {
   EARNINGS_SKIP_SENTENCE,
   EARNINGS_UNKNOWN_PHRASE,
@@ -13,8 +13,11 @@ import { addCalendarDays } from "@/app/lib/flow";
 import { DEBIT_SPREAD_SUGGESTION } from "@/app/lib/gate";
 import { formatLevelsSummary, type KeyLevels } from "@/app/lib/levels";
 import { MAX_LOSS_DOLLARS, MIN_OPEN_INTEREST } from "@/app/lib/risk";
-import { formatVerdictHtml } from "@/app/lib/telegram";
-import { gradeSetup, type SetupInput } from "@/app/lib/verdict";
+import type { OptionContract } from "@/app/lib/contract";
+import type { FlowRow } from "@/app/lib/flow";
+import { EMPTY_PRINTS } from "@/app/lib/prints";
+import { formatFlowAlert, formatVerdictHtml } from "@/app/lib/telegram";
+import { gradeContract, gradeFlowRow, gradeSetup, type SetupInput } from "@/app/lib/verdict";
 
 function setup(over: Partial<SetupInput> = {}): SetupInput {
   return {
@@ -63,7 +66,7 @@ describe("alert checklist", () => {
     const result = gradeSetup(setup());
     expect(result.verdict).toBe("TAKE");
     expect(result.verdictLabel).toBe("TAKE");
-    expect(result.uncappedGrade).toBe("A");
+    expect(result.uncappedGrade).toBe("B");
     expect(result.grade).toBe(ALERT_RULES.maxGradeUntilLevels);
     expect(result.grade).toBe("B");
     expect(result.levels).toBeNull();
@@ -83,14 +86,15 @@ describe("alert checklist", () => {
   it("lifts the B cap when support and resistance were computed and there is room", () => {
     const result = gradeSetup(setup({ levels: levels() }));
     expect(result.verdict).toBe("TAKE");
-    expect(result.grade).toBe("A");
+    expect(result.grade).toBe("B");
+    expect(result.uncappedGrade).toBe("B");
     expect(result.levelsNote).toBeNull();
     expect(result.levels?.supportPrice).toBe(99);
     expect(result.levels?.resistancePrice).toBe(102);
     expect(result.reasons.some((reason) => /room for a call/i.test(reason))).toBe(true);
     expect(result.reasons.some((reason) => reason.includes("$99.00"))).toBe(true);
     const html = formatVerdictHtml(result);
-    expect(html).toContain("A · TAKE");
+    expect(html).toContain("B · TAKE");
     expect(html).toContain(formatLevelsSummary(result.levels!));
   });
 
@@ -104,7 +108,7 @@ describe("alert checklist", () => {
       }),
     }));
     expect(result.verdict).toBe("TAKE");
-    expect(result.grade).toBe("A");
+    expect(result.grade).toBe("B");
     expect(result.reasons.some((reason) => /room for a put/i.test(reason))).toBe(true);
   });
 
@@ -254,7 +258,7 @@ describe("alert checklist", () => {
   });
 
   it("keeps an A when earnings are after expiration and no macro release is inside the contract", () => {
-    const result = gradeSetup(setup({ levels: levels() }));
+    const result = gradeSetup(excellent());
     expect(result.verdict).toBe("TAKE");
     expect(result.grade).toBe("A");
     expect(result.eventLine).toContain("Next earnings 2026-12-20 after the close.");
@@ -262,8 +266,7 @@ describe("alert checklist", () => {
   });
 
   it("downgrades when earnings fall on or before expiration and names IV crush", () => {
-    const result = gradeSetup(setup({
-      levels: levels(),
+    const result = gradeSetup(excellent({
       earnings: { status: "known", date: "2026-10-08", timing: "before-market", estimated: false },
     }));
     expect(result.verdict).toBe("TAKE");
@@ -299,13 +302,13 @@ describe("alert checklist", () => {
       earnings: { status: "known", date: "2026-10-06", timing: "after-market", estimated: false },
     }));
     expect(result.verdict).toBe("TAKE");
-    expect(result.grade).toBe("B");
+    expect(result.grade).toBe("C");
     expect(result.eventLine.includes(EARNINGS_SKIP_SENTENCE)).toBe(false);
     expect(result.eventLine).toContain(IV_CRUSH_SENTENCE);
   });
 
   it("caps the grade at B and says earnings date unknown when the date is missing", () => {
-    const result = gradeSetup(setup({ levels: levels(), earnings: UNKNOWN_EARNINGS }));
+    const result = gradeSetup(excellent({ earnings: UNKNOWN_EARNINGS }));
     expect(result.verdict).toBe("TAKE");
     expect(result.grade).toBe(EVENT_RULES.maxGradeUntilEarnings);
     expect(result.grade).toBe("B");
@@ -315,7 +318,7 @@ describe("alert checklist", () => {
   });
 
   it("does not cap a ticker that has no earnings calendar", () => {
-    const result = gradeSetup(setup({ levels: levels(), earnings: NO_EARNINGS_LISTED }));
+    const result = gradeSetup(excellent({ earnings: NO_EARNINGS_LISTED }));
     expect(result.verdict).toBe("TAKE");
     expect(result.grade).toBe("A");
     expect(result.eventLine).toContain("No earnings date listed");
@@ -325,8 +328,7 @@ describe("alert checklist", () => {
   it("downgrades one step for a macro release on or before expiration", () => {
     const jobs = EVENT_RULES.macroDates.find((row) => row.date === "2026-10-02" && row.name === "Jobs report");
     expect(jobs).toBeTruthy();
-    const result = gradeSetup(setup({
-      levels: levels(),
+    const result = gradeSetup(excellent({
       now: new Date("2026-10-02T15:00:00Z"),
       dte: 6,
       expiration: "2026-10-08",
@@ -339,8 +341,7 @@ describe("alert checklist", () => {
   });
 
   it("stacks the earnings downgrade and the macro downgrade", () => {
-    const result = gradeSetup(setup({
-      levels: levels(),
+    const result = gradeSetup(excellent({
       now: new Date("2026-10-02T15:00:00Z"),
       dte: 6,
       expiration: "2026-10-08",
@@ -383,6 +384,97 @@ describe("alert checklist", () => {
     expect(html).toContain("Not an exchange-reported sweep.");
   });
 
+  it("grades an exceptional quiet setup as an A", () => {
+    const result = gradeSetup(excellent());
+    expect(result.verdict).toBe("TAKE");
+    expect(result.grade).toBe("A");
+    expect(result.uncappedGrade).toBe("A");
+    expect(gradeARubric()).toMatch(/best setups of the day/);
+    expect(gradeARubric()).toContain(`${ALERT_RULES.aGradeVolOiRatio}×`);
+    expect(gradeARubric()).toContain("$500K");
+    expect(gradeARubric()).toMatch(/never shown when the levels or the earnings date are missing/i);
+  });
+
+  it("shows that same A on a Flow row, the Gate, and Telegram", () => {
+    const input = excellent();
+    const verdict = gradeSetup(input);
+    const fromFlow = gradeFlowRow(flowFrom(input), input.consecutiveLosses, input.now);
+    const fromGate = gradeContract({
+      contract: contractFrom(input),
+      underlyingPrice: input.underlyingPrice,
+      delayed: input.delayed,
+      now: input.now,
+      consecutiveLosses: input.consecutiveLosses,
+      volumeJump: input.volumeJump,
+      levels: input.levels,
+      earnings: input.earnings,
+      definedRiskSpread: input.definedRiskSpread,
+    });
+    expect(verdict.grade).toBe("A");
+    expect(fromFlow.grade).toBe(verdict.grade);
+    expect(fromFlow.verdict).toBe(verdict.verdict);
+    expect(fromGate.grade).toBe(verdict.grade);
+    expect(fromGate.verdict).toBe(verdict.verdict);
+    expect(formatVerdictHtml(verdict)).toContain("A · TAKE");
+    const alert = formatFlowAlert({
+      ticker: "NVDA",
+      putCall: input.putCall,
+      strike: input.strike,
+      expiration: input.expiration,
+      ask: input.ask,
+      notionalPremium: input.notionalPremium,
+      volume: input.volume,
+      openInterest: input.openInterest,
+      iv: null,
+      side: input.side,
+      otm: input.otm,
+      volumeExceedsOi: true,
+      volOiRatio: input.volOiRatio,
+      verdict: fromFlow,
+    });
+    expect(alert).toContain("A · TAKE");
+  });
+
+  it("keeps ordinary flow, a farther strike, and a macro day off A", () => {
+    expect(gradeSetup(setup({ levels: levels() })).grade).toBe("B");
+    const farther = gradeSetup(excellent({ otmFraction: 0.08 }));
+    expect(farther.verdict).toBe("TAKE");
+    expect(farther.grade).toBe("B");
+    const dayBeforeJobs = gradeSetup(excellent({
+      now: new Date("2026-10-01T15:00:00Z"),
+      dte: 7,
+      expiration: "2026-10-08",
+    }));
+    expect(dayBeforeJobs.verdict).toBe("TAKE");
+    expect(dayBeforeJobs.grade).toBe("B");
+    expect(dayBeforeJobs.uncappedGrade).toBe("B");
+    expect(dayBeforeJobs.eventLine).toContain("Jobs report on 2026-10-02");
+  });
+
+  it("does not show an A when levels are missing or the hard skips fail", () => {
+    const missingLevels = gradeSetup(excellent({ levels: null }));
+    expect(missingLevels.uncappedGrade).toBe("A");
+    expect(missingLevels.grade).toBe("B");
+    const tight = gradeSetup(excellent({
+      levels: levels({
+        support: { price: 97, label: "prior day low", distance: 0.03 },
+        resistance: { price: 100.1, label: "round number", distance: 0.001 },
+      }),
+    }));
+    expect(tight.verdict).toBe("WATCH");
+    expect(tight.grade).not.toBe("A");
+    expect(gradeSetup(excellent({ openInterest: MIN_OPEN_INTEREST - 1 })).grade).toBe("D");
+    expect(gradeSetup(excellent({ openInterest: MIN_OPEN_INTEREST - 1 })).verdict).toBe("SKIP");
+    expect(gradeSetup(excellent({ bid: 4.9, ask: 5, mid: 4.95 })).verdict).toBe("SKIP");
+    expect(gradeSetup(excellent({ bid: 4.9, ask: 5, mid: 4.95 })).grade).toBe("D");
+    expect(gradeSetup(excellent({ delayed: true })).verdict).toBe("SKIP");
+    expect(gradeSetup(excellent({ delayed: true })).grade).toBe("D");
+    const stopped = gradeSetup(excellent({ consecutiveLosses: 2 }));
+    expect(stopped.verdict).toBe("STOP");
+    expect(stopped.verdictLabel).toBe("STOP for today");
+    expect(stopped.grade).toBe("A");
+  });
+
   it("keeps the earnings reason and the quote print when both apply", () => {
     const summary = "Detected from Schwab quotes: block print, 100 contracts at the ask (about $20K). Not an exchange-reported sweep.";
     const result = gradeSetup(setup({
@@ -396,6 +488,79 @@ describe("alert checklist", () => {
     expect(result.reasons.length).toBeLessThanOrEqual(4);
   });
 });
+
+function excellent(over: Partial<SetupInput> = {}): SetupInput {
+  return setup({
+    volume: 3000,
+    openInterest: 1000,
+    volOiRatio: 3,
+    notionalPremium: 607_500,
+    volumeJump: 400,
+    side: "estimated at ask",
+    otmFraction: 0.04,
+    otm: true,
+    dte: 7,
+    expiration: "2026-10-12",
+    levels: levels(),
+    earnings: farEarnings(),
+    ...over,
+  });
+}
+
+function contractFrom(input: SetupInput): OptionContract {
+  return {
+    bid: input.bid,
+    ask: input.ask,
+    last: input.ask,
+    volume: input.volume,
+    openInterest: input.openInterest,
+    delta: null,
+    iv: null,
+    strike: input.strike,
+    expiration: input.expiration,
+    putCall: input.putCall,
+  };
+}
+
+function flowFrom(input: SetupInput): FlowRow {
+  return {
+    id: "NVDA|2026-10-12|104|call",
+    ticker: "NVDA",
+    putCall: input.putCall,
+    strike: input.strike,
+    expiration: input.expiration,
+    bid: input.bid,
+    ask: input.ask,
+    last: input.ask,
+    volume: input.volume,
+    openInterest: input.openInterest,
+    iv: null,
+    delta: null,
+    mid: input.mid,
+    notionalPremium: input.notionalPremium,
+    volOiRatio: input.volOiRatio,
+    volumeOiJump: null,
+    volumeExceedsOi: true,
+    previousVolume: null,
+    volumeJump: input.volumeJump,
+    otmPoints: 4,
+    otmFraction: input.otmFraction,
+    otm: input.otm,
+    dte: input.dte,
+    spreadFraction: 0.025,
+    spreadQuality: "acceptable",
+    side: input.side,
+    sideNote: "Estimated from the last price versus the bid and ask. Not a sweep print.",
+    askFraction: 1,
+    liquidityPasses: true,
+    delayed: input.delayed,
+    underlyingPrice: input.underlyingPrice,
+    levels: input.levels,
+    prints: EMPTY_PRINTS,
+    earnings: input.earnings,
+    score: 40,
+  };
+}
 
 function farEarnings(): EarningsFact {
   return { status: "known", date: "2026-12-20", timing: "after-market", estimated: false };

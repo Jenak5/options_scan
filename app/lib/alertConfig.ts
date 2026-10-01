@@ -26,6 +26,21 @@ export const ALERT_RULES = {
   strongVolumeJump: 100,
   /** Estimated-at-ask is the fourth flow signal. Bid, mid, and unknown are not. */
   takeMinFlowSignals: 2,
+  /**
+   * Signals required before a TAKE can be an A.
+   * Two signals can still be a TAKE. That letter is B.
+   */
+  aMinFlowSignals: 3,
+  /**
+   * Volume / open interest required for an A.
+   * The flow signal itself uses the lower strongVolOiRatio.
+   */
+  aGradeVolOiRatio: 2,
+  /**
+   * Notional required for an A.
+   * The flow signal itself uses the lower strongNotional.
+   */
+  aGradeNotional: 500_000,
 
   /** Inclusive days-to-expiration window for a quick short hold. */
   idealDteMin: 1,
@@ -33,7 +48,7 @@ export const ALERT_RULES = {
   /** Still a short-hold candidate, but not enough on its own for TAKE. */
   acceptableDteMax: 21,
 
-  /** Out-of-the-money fraction at or under this is a comfortable distance. */
+  /** Out-of-the-money fraction at or under this is close enough for an A. */
   idealOtmFraction: 0.05,
   /** Out-of-the-money fraction at or under this can still be a TAKE. */
   acceptableOtmFraction: 0.10,
@@ -241,8 +256,19 @@ export const EVENT_RULES = {
   ] as MacroRelease[],
 };
 
-export function verdictBanner(): string {
-  const cap = ALERT_RULES.maxGradeUntilLevels;
+/**
+ * One-paragraph rubric for a letter A. Numbers come from ALERT_RULES
+ * so the sentence cannot drift from the checklist.
+ */
+export function gradeARubric(): string {
+  const notional = `$${Math.round(ALERT_RULES.aGradeNotional / 1000).toLocaleString("en-US")}K`;
+  const otm = Math.round(ALERT_RULES.idealOtmFraction * 100);
+  const itm = Math.round(ALERT_RULES.maxItmFraction * 100);
+  const levelsCap = ALERT_RULES.maxGradeUntilLevels;
   const earningsCap = EVENT_RULES.maxGradeUntilEarnings;
-  return `Checklist for a $${ACCOUNT_SIZE_DOLLARS.toLocaleString("en-US")} account with a $${MAX_LOSS_DOLLARS} loss cap. Not a prediction of profit. The grade can be an A when support and resistance are computed and the next earnings date is known. If price history is unavailable, the grade stops at ${cap}. If the earnings date is unknown, the grade stops at ${earningsCap}.`;
+  return `An A is a TAKE that is one of the best setups of the day, not every contract that passes the checklist. It needs live quotes, open interest, volume, and a bid-ask spread that pass the Gate, and at least one contract under the $${MAX_LOSS_DOLLARS} loss cap. Expiration is ${ALERT_RULES.idealDteMin} to ${ALERT_RULES.idealDteMax} days, and the strike is within ${otm}% out of the money or ${itm}% in the money. Flow is exceptional: at least ${ALERT_RULES.aMinFlowSignals} of the 4 signals (volume versus open interest, notional, a last trade at the ask, and a same-day volume jump), with volume at least ${ALERT_RULES.aGradeVolOiRatio}× open interest and notional at least ${notional}. Support and resistance are computed and leave room to the next level. The earnings date is known, or the ticker has no earnings calendar, and that date falls after expiration. No listed macro release falls on or before expiration. Missing price levels, an unknown earnings date, earnings or a macro release inside the contract, ordinary flow, or a farther strike leaves the letter at ${levelsCap} or lower. If price history is unavailable, the grade stops at ${levelsCap}. If the earnings date is unknown, the grade stops at ${earningsCap}. A liquidity failure, a single contract over the cap, delayed quotes, and an expired contract stay SKIP. Two losing closes stay STOP for today instead of TAKE. An A is never shown when the levels or the earnings date are missing.`;
+}
+
+export function verdictBanner(): string {
+  return `Checklist for a $${ACCOUNT_SIZE_DOLLARS.toLocaleString("en-US")} account with a $${MAX_LOSS_DOLLARS} loss cap. Not a prediction of profit. ${gradeARubric()}`;
 }
