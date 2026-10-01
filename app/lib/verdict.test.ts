@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { ALERT_RULES } from "@/app/lib/alertConfig";
+import { ALERT_RULES, EVENT_RULES } from "@/app/lib/alertConfig";
+import {
+  EARNINGS_SKIP_SENTENCE,
+  EARNINGS_UNKNOWN_PHRASE,
+  IV_CRUSH_SENTENCE,
+  MACRO_CAUTION,
+  NO_EARNINGS_LISTED,
+  UNKNOWN_EARNINGS,
+  type EarningsFact,
+} from "@/app/lib/eventRisk";
+import { addCalendarDays } from "@/app/lib/flow";
 import { DEBIT_SPREAD_SUGGESTION } from "@/app/lib/gate";
 import { formatLevelsSummary, type KeyLevels } from "@/app/lib/levels";
 import { MAX_LOSS_DOLLARS, MIN_OPEN_INTEREST } from "@/app/lib/risk";
@@ -27,6 +37,9 @@ function setup(over: Partial<SetupInput> = {}): SetupInput {
     underlyingPrice: 100,
     consecutiveLosses: null,
     levels: null,
+    earnings: { status: "known", date: "2026-12-20", timing: "after-market", estimated: false },
+    definedRiskSpread: false,
+    now: new Date("2026-10-05T15:00:00Z"),
     ...over,
   };
 }
@@ -237,5 +250,128 @@ describe("alert checklist", () => {
     expect(html).toContain("B · TAKE");
     expect(html).toContain("5 &lt; 6 &amp; more");
     expect(html.includes("<script>")).toBe(false);
+    expect(html).toContain("Next earnings 2026-12-20 after the close.");
+  });
+
+  it("keeps an A when earnings are after expiration and no macro release is inside the contract", () => {
+    const result = gradeSetup(setup({ levels: levels() }));
+    expect(result.verdict).toBe("TAKE");
+    expect(result.grade).toBe("A");
+    expect(result.eventLine).toContain("Next earnings 2026-12-20 after the close.");
+    expect(result.eventLine.includes(IV_CRUSH_SENTENCE)).toBe(false);
+  });
+
+  it("downgrades when earnings fall on or before expiration and names IV crush", () => {
+    const result = gradeSetup(setup({
+      levels: levels(),
+      earnings: { status: "known", date: "2026-10-08", timing: "before-market", estimated: false },
+    }));
+    expect(result.verdict).toBe("TAKE");
+    expect(result.grade).toBe("B");
+    expect(result.uncappedGrade).toBe("B");
+    expect(result.eventLine).toContain("Next earnings 2026-10-08 before the open.");
+    expect(result.eventLine).toContain(IV_CRUSH_SENTENCE);
+    expect(result.reasons.some((reason) => reason.includes(IV_CRUSH_SENTENCE))).toBe(true);
+  });
+
+  it("skips a short-dated single when earnings are today or tomorrow", () => {
+    const today = "2026-10-05";
+    const earningsDate = addCalendarDays(today, EVENT_RULES.imminentEarningsDays);
+    const result = gradeSetup(setup({
+      levels: levels(),
+      dte: EVENT_RULES.shortDatedDteMax,
+      expiration: "2026-10-20",
+      earnings: { status: "known", date: earningsDate, timing: "after-market", estimated: false },
+    }));
+    expect(result.verdict).toBe("SKIP");
+    expect(result.grade).not.toBe("A");
+    expect(result.eventLine).toContain(EARNINGS_SKIP_SENTENCE);
+    expect(result.eventLine).toContain(IV_CRUSH_SENTENCE);
+    expect(result.reasons.some((reason) => reason === EARNINGS_SKIP_SENTENCE)).toBe(true);
+  });
+
+  it("does not skip a defined-risk spread when earnings are tomorrow", () => {
+    const result = gradeSetup(setup({
+      levels: levels(),
+      dte: 3,
+      expiration: "2026-10-08",
+      definedRiskSpread: true,
+      earnings: { status: "known", date: "2026-10-06", timing: "after-market", estimated: false },
+    }));
+    expect(result.verdict).toBe("TAKE");
+    expect(result.grade).toBe("B");
+    expect(result.eventLine.includes(EARNINGS_SKIP_SENTENCE)).toBe(false);
+    expect(result.eventLine).toContain(IV_CRUSH_SENTENCE);
+  });
+
+  it("caps the grade at B and says earnings date unknown when the date is missing", () => {
+    const result = gradeSetup(setup({ levels: levels(), earnings: UNKNOWN_EARNINGS }));
+    expect(result.verdict).toBe("TAKE");
+    expect(result.grade).toBe(EVENT_RULES.maxGradeUntilEarnings);
+    expect(result.grade).toBe("B");
+    expect(result.uncappedGrade).toBe("A");
+    expect(result.eventLine.startsWith(EARNINGS_UNKNOWN_PHRASE)).toBe(true);
+    expect(result.reasons.some((reason) => reason.includes(EARNINGS_UNKNOWN_PHRASE))).toBe(true);
+  });
+
+  it("does not cap a ticker that has no earnings calendar", () => {
+    const result = gradeSetup(setup({ levels: levels(), earnings: NO_EARNINGS_LISTED }));
+    expect(result.verdict).toBe("TAKE");
+    expect(result.grade).toBe("A");
+    expect(result.eventLine).toContain("No earnings date listed");
+    expect(result.eventLine.includes(EARNINGS_UNKNOWN_PHRASE)).toBe(false);
+  });
+
+  it("downgrades one step for a macro release on or before expiration", () => {
+    const jobs = EVENT_RULES.macroDates.find((row) => row.date === "2026-10-02" && row.name === "Jobs report");
+    expect(jobs).toBeTruthy();
+    const result = gradeSetup(setup({
+      levels: levels(),
+      now: new Date("2026-10-02T15:00:00Z"),
+      dte: 6,
+      expiration: "2026-10-08",
+      earnings: farEarnings(),
+    }));
+    expect(result.verdict).toBe("TAKE");
+    expect(result.grade).toBe("B");
+    expect(result.eventLine).toContain("Jobs report on 2026-10-02");
+    expect(result.eventLine).toContain(MACRO_CAUTION);
+  });
+
+  it("stacks the earnings downgrade and the macro downgrade", () => {
+    const result = gradeSetup(setup({
+      levels: levels(),
+      now: new Date("2026-10-02T15:00:00Z"),
+      dte: 6,
+      expiration: "2026-10-08",
+      earnings: { status: "known", date: "2026-10-07", timing: "after-market", estimated: false },
+    }));
+    expect(result.verdict).toBe("TAKE");
+    expect(result.grade).toBe("C");
+    expect(result.eventLine).toContain(IV_CRUSH_SENTENCE);
+    expect(result.eventLine).toContain("Jobs report on 2026-10-02");
+    expect(result.reasons.length).toBeLessThanOrEqual(4);
+  });
+
+  it("does not let an earnings skip replace a liquidity skip", () => {
+    const result = gradeSetup(setup({
+      openInterest: MIN_OPEN_INTEREST - 1,
+      dte: 2,
+      expiration: "2026-10-07",
+      earnings: { status: "known", date: "2026-10-06", timing: "before-market", estimated: false },
+    }));
+    expect(result.verdict).toBe("SKIP");
+    expect(result.grade).toBe("D");
+    expect(result.liquidityPasses).toBe(false);
+  });
+
+  it("escapes the event line for Telegram", () => {
+    const result = gradeSetup(setup());
+    const html = formatVerdictHtml({ ...result, eventLine: "CPI < jobs & more" });
+    expect(html).toContain("CPI &lt; jobs &amp; more");
   });
 });
+
+function farEarnings(): EarningsFact {
+  return { status: "known", date: "2026-12-20", timing: "after-market", estimated: false };
+}

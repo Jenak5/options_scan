@@ -297,6 +297,9 @@ function FlowTab() {
                           {f.verdict.levelsNote && (
                             <div style={{ color: "#64748b", fontSize: 12, marginTop: 4 }}>{f.verdict.levelsNote}</div>
                           )}
+                          {f.verdict.eventLine && (
+                            <div style={{ color: "#fbbf24", fontSize: 12, marginTop: 4 }}>{f.verdict.eventLine}</div>
+                          )}
                         </div>
                       ) : "—"}
                     </td>
@@ -1202,6 +1205,9 @@ function AlertReportTab() {
                       )}
                       {alert.levelsNote && (
                         <div style={{ color: "#64748b", fontSize: 12, marginTop: 4 }}>{alert.levelsNote}</div>
+                      )}
+                      {alert.eventLine && (
+                        <div style={{ color: "#fbbf24", fontSize: 12, marginTop: 4 }}>{alert.eventLine}</div>
                       )}
                     </td>
                     {(["m15", "h1", "close"] as const).map((name) => (

@@ -8,6 +8,8 @@ import {
   watchlistFromEnv,
   type FlowRow,
 } from "@/app/lib/flow";
+import { earningsForTicker } from "@/app/lib/earnings";
+import { UNKNOWN_EARNINGS } from "@/app/lib/eventRisk";
 import { keyLevelsForTicker } from "@/app/lib/levelScan";
 import { getOptionChain, getSchwabStatus, SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { readFlowSnapshots, writeFlowSnapshots } from "@/app/lib/schwabStore";
@@ -85,6 +87,7 @@ export async function scanEstimatedFlow(options?: {
           contracts: chain.contracts,
           now,
         });
+        const earnings = await earningsForTicker(ticker, now).catch(() => UNKNOWN_EARNINGS);
         const scored = scoreChain({
           ticker,
           contracts: chain.contracts,
@@ -92,7 +95,7 @@ export async function scanEstimatedFlow(options?: {
           delayed: chain.delayed,
           previous: previous[ticker] ?? null,
           now: asOf,
-        }).map((row) => ({ ...row, levels }));
+        }).map((row) => ({ ...row, levels, earnings }));
         rows.push(...scored);
         updates[ticker] = snapshotFromRows(scored, now);
       } catch (err) {
