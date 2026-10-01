@@ -93,6 +93,14 @@ export default function GatePage() {
 
   return (
     <main style={{ minHeight: "100vh", background: "#0b0f1a", color: "#e2e8f0", fontFamily: "system-ui, -apple-system, sans-serif" }}>
+      <style dangerouslySetInnerHTML={{ __html: `
+        .gate-form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+        .gate-check { display: grid; grid-template-columns: 88px 160px 1fr; gap: 10px; align-items: baseline; }
+        @media (max-width: 640px) {
+          .gate-form { grid-template-columns: 1fr; }
+          .gate-check { grid-template-columns: 72px 1fr; }
+        }
+      ` }} />
       <div style={{ borderBottom: "1px solid rgba(255,255,255,0.06)", padding: "16px 24px", display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
         <div>
           <h1 style={{ margin: 0, fontSize: 20, fontFamily: "monospace" }}>
@@ -116,7 +124,7 @@ export default function GatePage() {
           Two losses in a row stops the day. The loss count is typed in for now.
         </p>
 
-        <form onSubmit={onSubmit} style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
+        <form onSubmit={onSubmit} className="gate-form">
           <Field label="Ticker">
             <input value={ticker} onChange={(e) => setTicker(e.target.value)} style={INPUT} />
           </Field>
@@ -204,11 +212,7 @@ export default function GatePage() {
             )}
             <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 8 }}>
               {result.checks.map((check) => (
-                <li key={check.id} style={{
-                  display: "grid",
-                  gridTemplateColumns: "88px 160px 1fr",
-                  gap: 10,
-                  alignItems: "baseline",
+                <li key={check.id} className="gate-check" style={{
                   background: "rgba(255,255,255,0.03)",
                   border: "1px solid rgba(255,255,255,0.06)",
                   borderRadius: 8,
