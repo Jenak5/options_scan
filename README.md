@@ -15,12 +15,15 @@ Read-only scan-and-alert tool for a small personal options account ($3,000, max 
 | Kelly Lab | Local | Retired sizing illustration. Not the account model. |
 | Research | Grok (xAI) | Chat grounded in the scanner's current data |
 | Alerts | Telegram | Test a Telegram alert; scheduled scans run from cron |
+| Alert Report | Saved alerts | Checklist grade at send time, then midpoint checks |
 
 ## Schedule
 
 Vercel cron calls `GET /api/cron` every 15 minutes from **13:30 through 21:00 UTC**, Monday–Friday. That span covers the US cash session in both Central Daylight Time and Central Standard Time.
 
-The handler then checks **America/Chicago** and exits immediately outside **8:30–15:00 Central**, weekdays. A run can pass `?manual=true` to skip that hours check. That flag is not a secret. The request still needs the bearer token.
+The handler then checks **America/Chicago** and exits immediately outside **8:30–15:00 Central**, weekdays, except for a short close check. A run can pass `?manual=true` to skip that hours check. That flag is not a secret. The request still needs the bearer token.
+
+From **15:00 through 15:20 Central** the same route only re-quotes alerts already sent that day. It does not send new Telegram alerts in that window. That quote is the same-day close. 15-minute and 1-hour checks run on the regular in-session crons.
 
 Vercel sends `Authorization: Bearer <CRON_SECRET>`. The route accepts that header only. It does not accept `?secret=` or `x-cron-secret`, because secrets in URLs end up in logs.
 
@@ -129,6 +132,8 @@ Status (`GET /api/schwab/status`, session required) reports connected, expired, 
 
 Volume snapshots for the flow scanner use the same store, on a separate key. Redis uses `oes:flow:snapshots`. Blob uses the private pathname `schwab/flow-snapshots.json`. That file is small JSON of prior contract volume. It is not a token and it is not encrypted. The token envelope at `schwab/tokens.json` is unchanged.
 
+Sent alerts use that same store again. Redis key `oes:alert:records`. Blob pathname `schwab/alert-book.json`, private. The file holds the checklist grade, the quote at send time, later midpoint checks, and the loss count last typed into the Gate for that Chicago day. It is not a token and it is not encrypted. No new environment variable. If none of the stores are set in production, alerts can still be sent, and the report stays empty.
+
 ## Estimated flow
 
 `GET /api/flow` (session required) scores option contracts from the Schwab chains endpoint. It does not call Unusual Whales, and it does not place orders.
@@ -154,6 +159,20 @@ If Schwab is not connected, the tab says so and links to Reconnect Schwab.
 
 Cron still requires `Authorization: Bearer <CRON_SECRET>` before anything else. It alerts only on contracts that pass those liquidity filters, and only when notional is at least `ALERT_MIN_PREMIUM` (default $100,000). `ALERT_OTM_ONLY=true` also requires the contract to be out of the money. The Telegram text says the flow is estimated.
 
+## Alert checklist and report
+
+Every Flow row, Telegram alert, and Alert Report row carries a checklist verdict: **TAKE**, **WATCH**, or **SKIP**, a letter grade **A–D**, and two to four plain reasons. Thresholds that are not already in `app/lib/risk.ts` live in `app/lib/alertConfig.ts`.
+
+The checklist uses the Gate for open interest (at least 500), volume today (at least 100), spread (at most 5% of mid), and the $450 loss cap. One contract over $450 is an automatic **SKIP**, and the reason points at a debit spread. A failed liquidity check is also an automatic **SKIP**. Flow strength, days to expiration, and distance from the money decide TAKE versus WATCH. The message includes how many contracts fit under $450 at the ask.
+
+Support and resistance are not checked yet, so a grade cannot be higher than **B**. The wording says this is a rules checklist, not a prediction of profit.
+
+If she types a loss count into the Gate, that count is kept for the Chicago session. Two losses in a row turns a TAKE into **STOP for today**. There is no broker fill log.
+
+After a Telegram send, the cron stores the contract, the quote, the verdict, and the grade. Later runs re-read the Schwab chain and store the **mid** (not the last trade) and the underlying at about 15 minutes, 1 hour, and the close, plus the percent change in the option mid versus the alert mid. A missing quote or an expired contract is marked and skipped. The outcome label is **win** if the mid is up 20% or more at any of those checks, **miss** if the close mid is down 20% or more and nothing earlier won, and **flat** otherwise. Pending and unscored alerts are left out of the hit rate. That label is an estimate. It is not a fill and it is not trade profit or loss.
+
+Alert Report (session required, same as the other tabs) lists recent alerts and summarizes hit rate, average mid move at 1 hour and at the close, and the same numbers by ticker, by Gate liquidity, and by TAKE versus SKIP. The sample is small until many alerts are graded.
+
 ## Trade gate
 
 `/gate` asks for the ticker, expiration, strike, call or put, contracts, and planned entry. It also asks for an underlying stop, a time stop, a profit-taking rule, and how many losses in a row she has today.
@@ -166,7 +185,9 @@ Cron still requires `Authorization: Bearer <CRON_SECRET>` before anything else. 
 - Max loss is at most $450. A long option is `contracts × ask × 100`. A debit spread is `contracts × strike width × 100` (the most that spread can be worth). Leave the width blank for a single option.
 - If one contract at the ask is already over $450, the result says so and suggests a debit spread
 - The three exit rules have to be filled in
-- Two losses in a row is a NO for the day. The trade log is not stored yet; type the count.
+- Two losses in a row is a NO for the day. Type the count. That count is kept for the Chicago session and used by the checklist. It is not a broker fill log.
+
+The result also shows the checklist grade for that contract. The Gate's own PASS or NO is unchanged.
 
 Each check is PASS or FAIL. Any FAIL makes the overall result **NO**. Quotes Schwab marks as delayed are a FAIL, because this account needs real-time data.
 

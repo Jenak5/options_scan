@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
+import { currentDailyLoss, rememberSentAlert, wasSentToday } from "@/app/lib/alertStore";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import { selectAlertRows, watchlistFromEnv } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { sendTelegramAlert, formatFlowAlert } from "@/app/lib/telegram";
+import { gradeFlowRow } from "@/app/lib/verdict";
 
 export async function GET(request: NextRequest) {
   const denied = await denyIfUnauthorized(request);
@@ -31,12 +33,19 @@ export async function GET(request: NextRequest) {
           otmOnly,
           limit: 25,
         });
+        const now = new Date();
+        const losses = await currentDailyLoss(now);
         let alertsSent = 0;
 
         for (const flow of rows) {
-          const message = formatFlowAlert(flow);
+          if (await wasSentToday(flow.id, now)) continue;
+          const verdict = gradeFlowRow(flow, losses);
+          const message = formatFlowAlert({ ...flow, verdict });
           const sent = await sendTelegramAlert(message);
-          if (sent) alertsSent++;
+          if (sent) {
+            alertsSent++;
+            await rememberSentAlert(flow, verdict, now);
+          }
           await new Promise((r) => setTimeout(r, 1100));
         }
 

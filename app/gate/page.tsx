@@ -4,6 +4,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { SchwabBanner } from "@/app/components/SchwabBanner";
 import type { OptionContract } from "@/app/lib/contract";
 import type { GateCheck } from "@/app/lib/gate";
+import type { AlertVerdict } from "@/app/lib/verdict";
 import {
   ACCOUNT_SIZE_DOLLARS,
   MAX_BID_ASK_SPREAD_OF_MID,
@@ -19,6 +20,7 @@ interface GateResponse {
   suggestion: string | null;
   maxLoss: number | null;
   contract: OptionContract | null;
+  verdict?: AlertVerdict | null;
   error?: string;
   reconnect?: string;
 }
@@ -205,6 +207,28 @@ export default function GatePage() {
 
         {result && (
           <section>
+            {result.verdict && (
+              <div style={{
+                background: "rgba(6,182,212,0.06)",
+                border: "1px solid rgba(6,182,212,0.25)",
+                borderRadius: 8,
+                padding: "12px 14px",
+                marginBottom: 14,
+              }}>
+                <div style={{ display: "flex", gap: 10, alignItems: "baseline", marginBottom: 6 }}>
+                  <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 22, color: "#e2e8f0" }}>
+                    {result.verdict.grade} · {result.verdict.verdictLabel}
+                  </span>
+                </div>
+                <div style={{ color: "#a5f3fc", fontSize: 13, marginBottom: 8 }}>{result.verdict.note}</div>
+                <ul style={{ margin: 0, paddingLeft: 18, color: "#cbd5e1", fontSize: 14, lineHeight: 1.45 }}>
+                  {result.verdict.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+                </ul>
+                {result.verdict.levelsNote && (
+                  <div style={{ color: "#94a3b8", fontSize: 13, marginTop: 8 }}>{result.verdict.levelsNote}</div>
+                )}
+              </div>
+            )}
             <div style={{
               fontSize: 28,
               fontWeight: 800,

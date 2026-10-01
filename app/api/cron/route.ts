@@ -1,9 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
+import { OUTCOME_RULES } from "@/app/lib/alertConfig";
+import { runAlertFollowUps } from "@/app/lib/alertFollowUp";
+import { currentDailyLoss, rememberSentAlert, wasSentToday } from "@/app/lib/alertStore";
 import { hasValidBearer } from "@/app/lib/auth";
 import { selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
-import { isChicagoMarketHours } from "@/app/lib/marketHours";
+import { isChicagoMarketHours, isChicagoMinuteWindow } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
+import { formatVerdictHtml } from "@/app/lib/telegram";
+import { gradeFlowRow, type AlertVerdict } from "@/app/lib/verdict";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // AUTOMATED ALERT CRON  — /api/cron
@@ -139,7 +144,7 @@ In 1-2 sentences: are there any obvious red flags RIGHT NOW? (earnings tomorrow,
   }
 }
 
-function formatAlert(row: FlowRow, volSignal: string, grokNote: string): string {
+function formatAlert(row: FlowRow, volSignal: string, grokNote: string, verdict: AlertVerdict): string {
   const premium = row.notionalPremium ?? 0;
   const premStr = premium >= 1_000_000
     ? `$${(premium / 1_000_000).toFixed(1)}M`
@@ -161,6 +166,8 @@ function formatAlert(row: FlowRow, volSignal: string, grokNote: string): string 
   const ratio = row.volOiRatio != null ? `${row.volOiRatio.toFixed(2)}x vol/OI` : "vol/OI n/a";
 
   return `${typeEmoji} <b>${row.ticker} ${row.putCall.toUpperCase()}</b>
+${formatVerdictHtml(verdict)}
+
 ${conviction.emoji} <b>${conviction.tier}</b>
 Estimated flow from Schwab volume/open interest, not a sweep.
 
@@ -202,7 +209,14 @@ export async function GET(request: NextRequest) {
   }
 
   const isManual = request.nextUrl.searchParams.get("manual") === "true";
-  if (!isChicagoMarketHours() && !isManual) {
+  const now = new Date();
+  const inSession = isChicagoMarketHours(now);
+  const closeWindow = isChicagoMinuteWindow(
+    now,
+    OUTCOME_RULES.closeCheckpointMinutes,
+    OUTCOME_RULES.closeCheckpointMinutes + OUTCOME_RULES.closeWindowMinutes,
+  );
+  if (!inSession && !closeWindow && !isManual) {
     return NextResponse.json({
       skipped: true,
       reason: "Outside Central market hours (8:30–15:00 America/Chicago)",
@@ -213,6 +227,20 @@ export async function GET(request: NextRequest) {
   let alertsSent = 0;
 
   try {
+    let followUps = { updated: 0, quoted: 0 };
+    try {
+      followUps = await runAlertFollowUps(now);
+      log.push(`Follow-up quotes: ${followUps.quoted} requested, ${followUps.updated} records updated`);
+    } catch (err) {
+      if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+      log.push("Alert follow-up failed");
+    }
+
+    if (!inSession && !isManual) {
+      return NextResponse.json({ alertsSent: 0, followUpOnly: true, followUps, log });
+    }
+
+    const losses = await currentDailyLoss(now);
     const scan = await scanEstimatedFlow({
       tickers: watchlistFromEnv(process.env.FLOW_WATCHLIST),
     });
@@ -242,6 +270,11 @@ export async function GET(request: NextRequest) {
         log.push(`${row.ticker}: skipped — already alerted this run`);
         continue;
       }
+      if (await wasSentToday(row.id, now)) {
+        alertedIds.add(row.id);
+        log.push(`${row.ticker}: skipped — this contract was already saved today`);
+        continue;
+      }
 
       const isIdx = INDEX_ETFS.has(row.ticker);
       const volSignal = isIdx ? "INDEX ETF" : ttToken ? await getVolSignal(row.ticker, ttToken) : "UNKNOWN";
@@ -256,11 +289,15 @@ export async function GET(request: NextRequest) {
       }
       log.push(`${row.ticker}: Grok clean — ${reason}`);
 
-      const sent = await sendTelegram(formatAlert(row, volSignal, reason));
+      const verdict = gradeFlowRow(row, losses);
+      const sent = await sendTelegram(formatAlert(row, volSignal, reason, verdict));
       if (sent) {
         alertsSent++;
         alertedThisRun.add(row.ticker);
-        log.push(`${row.ticker}: Telegram alert sent`);
+        const saved = await rememberSentAlert(row, verdict, now);
+        log.push(saved
+          ? `${row.ticker}: Telegram alert sent and saved (${verdict.verdictLabel} ${verdict.grade})`
+          : `${row.ticker}: Telegram alert sent, but the alert book was not saved`);
       } else {
         log.push(`${row.ticker}: Telegram send failed — check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID`);
       }

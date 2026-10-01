@@ -2,8 +2,10 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { SchwabBanner } from "@/app/components/SchwabBanner";
+import type { AlertSummary, StoredAlert } from "@/app/lib/alertBook";
 import { FLOW_DISCLAIMER, gateCheckHref, type FlowRow } from "@/app/lib/flow";
 import { ACCOUNT_SIZE_DOLLARS, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
+import type { AlertVerdict } from "@/app/lib/verdict";
 
 // ─── API helpers ───────────────────────────────────────────────────────────
 async function fetchApi(base: string, params: Record<string, string>) {
@@ -113,6 +115,32 @@ const BTN = (color: "cyan" | "gray" | "ghost"): React.CSSProperties => {
   return { background: map.bg, color: map.fg, border: `1px solid ${map.border}`, borderRadius: 6, padding: "8px 16px", fontSize: 15, cursor: "pointer" };
 };
 
+function verdictColor(verdict: AlertVerdict["verdict"]): BadgeColor {
+  if (verdict === "TAKE") return "green";
+  if (verdict === "WATCH") return "amber";
+  if (verdict === "STOP") return "purple";
+  return "red";
+}
+
+function outcomeColor(outcome: StoredAlert["outcome"]): string {
+  if (outcome === "win") return "#10b981";
+  if (outcome === "miss") return "#ef4444";
+  if (outcome === "flat") return "#94a3b8";
+  return "#64748b";
+}
+
+function pctText(value: number | null | undefined): string {
+  if (value == null || !isFinite(value)) return "—";
+  const pct = value * 100;
+  const sign = pct > 0 ? "+" : "";
+  return `${sign}${pct.toFixed(1)}%`;
+}
+
+function hitText(rate: number | null, wins: number, graded: number): string {
+  if (rate == null || graded === 0) return "—";
+  return `${Math.round(rate * 100)}% (${wins}/${graded})`;
+}
+
 function SideBadge({ side }: { side: FlowRow["side"] }) {
   if (side === "estimated at ask") return <Badge color="green">EST ASK ▲</Badge>;
   if (side === "estimated at bid") return <Badge color="red">EST BID ▼</Badge>;
@@ -123,13 +151,19 @@ function SideBadge({ side }: { side: FlowRow["side"] }) {
 // ═══════════════════════════════════════════════════════════════════════════
 // FLOW SCANNER  — estimated from Schwab volume and open interest
 // ═══════════════════════════════════════════════════════════════════════════
+interface ScoredFlow extends FlowRow {
+  verdict?: AlertVerdict;
+}
+
 function FlowTab() {
-  const [flows, setFlows] = useState<FlowRow[]>([]);
+  const [flows, setFlows] = useState<ScoredFlow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [disconnected, setDisconnected] = useState(false);
   const [reconnect, setReconnect] = useState("/api/schwab/connect");
   const [disclaimer, setDisclaimer] = useState(FLOW_DISCLAIMER);
+  const [verdictNote, setVerdictNote] = useState("");
+  const [dailyStop, setDailyStop] = useState(false);
   const [partial, setPartial] = useState<string[]>([]);
   const [filters, setFilters] = useState({ ticker: "", minPremium: "50000", otmOnly: false, liquidOnly: true });
 
@@ -146,6 +180,8 @@ function FlowTab() {
       const res = await fetch(url.toString());
       const json = await res.json();
       if (typeof json.disclaimer === "string") setDisclaimer(json.disclaimer);
+      setVerdictNote(typeof json.verdictBanner === "string" ? json.verdictBanner : "");
+      setDailyStop(json.dailyStop === true);
       if (json.connected === false || res.status === 409 || res.status === 503) {
         setDisconnected(true);
         setReconnect(typeof json.reconnect === "string" ? json.reconnect : "");
@@ -168,6 +204,16 @@ function FlowTab() {
       <div style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.28)", borderRadius: 8, padding: "10px 14px", marginBottom: 12, color: "#fbbf24", fontSize: 14, lineHeight: 1.45 }}>
         {disclaimer}
       </div>
+      {verdictNote && (
+        <div style={{ background: "rgba(6,182,212,0.06)", border: "1px solid rgba(6,182,212,0.2)", borderRadius: 8, padding: "10px 14px", marginBottom: 12, color: "#a5f3fc", fontSize: 14, lineHeight: 1.45 }}>
+          {verdictNote}
+        </div>
+      )}
+      {dailyStop && (
+        <div style={{ background: "rgba(168,85,247,0.1)", border: "1px solid rgba(168,85,247,0.35)", borderRadius: 8, padding: "10px 14px", marginBottom: 12, color: "#d8b4fe", fontSize: 14 }}>
+          Daily stop is on. A setup that would have been TAKE shows STOP for today.
+        </div>
+      )}
 
       <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
         <input placeholder="Ticker…" value={filters.ticker}
@@ -218,14 +264,14 @@ function FlowTab() {
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ borderBottom: "2px solid rgba(255,255,255,0.1)" }}>
-                {["Ticker","Type","Strike","Expiry","Premium","Volume","OI","Vol/OI","Vol jump","IV","Side","DTE","Spread","Score",""].map((h) => (
+                {["Ticker","Verdict","Type","Strike","Expiry","Premium","Volume","OI","Vol/OI","Vol jump","IV","Side","DTE","Spread","Score",""].map((h) => (
                   <th key={h || "gate"} style={TH}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {flows.length === 0 && (
-                <tr><td colSpan={15} style={{ ...TD, textAlign: "center", color: "#475569" }}>No estimated flow matches these filters.</td></tr>
+                <tr><td colSpan={16} style={{ ...TD, textAlign: "center", color: "#475569" }}>No estimated flow matches these filters.</td></tr>
               )}
               {flows.map((f, i) => {
                 const isCall = f.putCall === "call";
@@ -233,6 +279,22 @@ function FlowTab() {
                 return (
                   <tr key={f.id || i} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)", background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.015)" }}>
                     <td style={{ ...TD_MONO, fontWeight: 700, color: "#e2e8f0" }}>{f.ticker}</td>
+                    <td style={{ ...TD, minWidth: 240 }}>
+                      {f.verdict ? (
+                        <div>
+                          <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4 }}>
+                            <Badge color={verdictColor(f.verdict.verdict)}>{f.verdict.verdictLabel}</Badge>
+                            <span style={{ fontFamily: "monospace", fontWeight: 800, color: "#e2e8f0" }}>{f.verdict.grade}</span>
+                          </div>
+                          <ul style={{ margin: 0, paddingLeft: 16, color: "#94a3b8", fontSize: 12, lineHeight: 1.4 }}>
+                            {f.verdict.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+                          </ul>
+                          {f.verdict.levelsNote && (
+                            <div style={{ color: "#64748b", fontSize: 12, marginTop: 4 }}>{f.verdict.levelsNote}</div>
+                          )}
+                        </div>
+                      ) : "—"}
+                    </td>
                     <td style={TD}><Badge color={isCall ? "green" : "red"}>{isCall ? "CALL" : "PUT"}</Badge></td>
                     <td style={{ ...TD_MONO, color: "#94a3b8" }}>${f.strike}</td>
                     <td style={{ ...TD, color: "#94a3b8", whiteSpace: "nowrap" }}>{fmtDate(f.expiration)}</td>
@@ -603,7 +665,8 @@ function AlertsTab() {
           "Alerts only on contracts that pass the gate liquidity filters: open interest at least 500, volume at least 100, and spread at most 5% of mid. Notional still has to clear ALERT_MIN_PREMIUM.",
           "Side is estimated from the last price versus the bid and ask. This is not a sweep.",
           "Cross-checks the ticker's vol arb signal and asks Grok to screen for red flags (earnings, FDA, news).",
-          "If it is still a candidate, sends a Telegram alert that says the flow is estimated.",
+          "If it is still a candidate, sends a Telegram alert with a TAKE, WATCH, or SKIP checklist grade. Two losses in a row, when that count was typed into the Gate today, shows STOP for today instead of TAKE.",
+          "The same cron later re-quotes the mid at about 15 minutes, 1 hour, and the close. Alert Report compares those mids. That is an estimate, not a fill.",
         ].map((step, i) => (
           <div key={i} style={{ display: "flex", gap: 10, marginBottom: 6, fontSize: 14, color: "#94a3b8" }}>
             <span style={{ color: "#06b6d4", fontWeight: 700, minWidth: 20 }}>{i + 1}.</span>
@@ -835,6 +898,215 @@ function ResearchTab() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ALERT REPORT
+// ═══════════════════════════════════════════════════════════════════════════
+interface AlertReportPayload {
+  alerts: StoredAlert[];
+  summary: AlertSummary;
+  notes: { sample: string; outcome: string; checklist: string };
+}
+
+function checkpointLabel(point: StoredAlert["checkpoints"]["m15"]): string {
+  if (point.status === "quoted") return pctText(point.midChangePct);
+  if (point.status === "no_quote") return "no quote";
+  if (point.status === "expired") return "expired";
+  if (point.status === "missed") return "missed";
+  return "pending";
+}
+
+function checkpointTitle(point: StoredAlert["checkpoints"]["m15"]): string {
+  const mid = point.mid == null ? "—" : point.mid.toFixed(2);
+  const underlying = point.underlying == null ? "—" : point.underlying.toFixed(2);
+  return `mid ${mid} · underlying ${underlying} · ${point.status}`;
+}
+
+function AlertReportTab() {
+  const [report, setReport] = useState<AlertReportPayload | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/alert-report");
+      const json = await res.json();
+      if (!res.ok || json.error) throw new Error(json.error || "Alert report failed");
+      setReport(json as AlertReportPayload);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Alert report failed");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const summary = report?.summary;
+
+  return (
+    <div>
+      <div style={{ fontSize: 17, fontWeight: 700, color: "#e2e8f0", marginBottom: 6 }}>Alert Report</div>
+      <div style={{ fontSize: 14, color: "#94a3b8", lineHeight: 1.5, marginBottom: 8, maxWidth: 760 }}>
+        Each saved alert keeps the checklist grade from the moment Telegram accepted it. Later rows are a midpoint check at about 15 minutes, 1 hour, and the same-day close.
+      </div>
+      {report && (
+        <div style={{ fontSize: 13, color: "#64748b", lineHeight: 1.5, marginBottom: 16, maxWidth: 760 }}>
+          <div>{report.notes.checklist}</div>
+          <div>{report.notes.outcome}</div>
+          <div>{report.notes.sample}</div>
+        </div>
+      )}
+
+      {loading && <Spinner />}
+      {error && <ErrorBox message={error} onRetry={load} />}
+
+      {!loading && !error && summary && (
+        <>
+          <div style={{ display: "flex", gap: 12, marginBottom: 18, flexWrap: "wrap" }}>
+            {[
+              { label: "HIT RATE", value: hitText(summary.hitRate, summary.wins, summary.graded), color: "#10b981" },
+              { label: "AVG MOVE AT 1 HOUR", value: pctText(summary.avgHourPct), color: "#06b6d4" },
+              { label: "AVG MOVE AT CLOSE", value: pctText(summary.avgClosePct), color: "#f59e0b" },
+              { label: "GRADED / SAVED", value: `${summary.graded} / ${summary.total}`, color: "#e2e8f0" },
+            ].map((card) => (
+              <div key={card.label} style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: "12px 18px", minWidth: 150 }}>
+                <div style={{ color: "#475569", fontSize: 11, letterSpacing: "0.06em", marginBottom: 4 }}>{card.label}</div>
+                <div style={{ color: card.color, fontSize: 22, fontWeight: 700, fontFamily: "monospace" }}>{card.value}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ fontSize: 13, color: "#64748b", marginBottom: 16 }}>
+            Hit rate is wins divided by graded alerts. Graded means win, miss, or flat. Pending and unscored alerts stay out of the rate. A win is the option mid up 20% or more at any checkpoint. A miss is the close mid down 20% or more with no earlier win. Anything else with a close mid is flat.
+          </div>
+
+          <ReportTable
+            title="Checklist grade, then what the mid did"
+            headers={["Verdict", "Saved", "Graded", "Hit rate", "Avg close mid"]}
+            rows={summary.byVerdict.filter((row) => row.count > 0).map((row) => [
+              row.verdict === "STOP" ? "STOP for today" : row.verdict,
+              String(row.count),
+              String(row.graded),
+              hitText(row.hitRate, row.wins, row.graded),
+              pctText(row.avgClosePct),
+            ])}
+          />
+          <ReportTable
+            title="By ticker"
+            headers={["Ticker", "Saved", "Graded", "Hit rate", "Avg 1 hour", "Avg close"]}
+            rows={summary.byTicker.map((row) => [
+              row.label,
+              String(row.count),
+              String(row.graded),
+              hitText(row.hitRate, row.wins, row.graded),
+              pctText(row.avgHourPct),
+              pctText(row.avgClosePct),
+            ])}
+          />
+          <ReportTable
+            title="Gate liquidity"
+            headers={["Liquidity", "Saved", "Graded", "Hit rate", "Avg 1 hour", "Avg close"]}
+            rows={summary.byLiquidity.map((row) => [
+              row.label,
+              String(row.count),
+              String(row.graded),
+              hitText(row.hitRate, row.wins, row.graded),
+              pctText(row.avgHourPct),
+              pctText(row.avgClosePct),
+            ])}
+          />
+
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ borderBottom: "2px solid rgba(255,255,255,0.1)" }}>
+                  {["Sent", "Contract", "Checklist", "15 min", "1 hour", "Close", "Outcome"].map((header) => (
+                    <th key={header} style={TH}>{header}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {report.alerts.length === 0 && (
+                  <tr>
+                    <td colSpan={7} style={{ ...TD, textAlign: "center", color: "#475569" }}>
+                      No alerts saved yet. The cron stores one when Telegram accepts a message.
+                    </td>
+                  </tr>
+                )}
+                {report.alerts.map((alert) => (
+                  <tr key={alert.id} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)", verticalAlign: "top" }}>
+                    <td style={{ ...TD, color: "#94a3b8", whiteSpace: "nowrap" }}>
+                      {new Date(alert.sentAt).toLocaleString("en-US", {
+                        timeZone: "America/Chicago",
+                        month: "short",
+                        day: "numeric",
+                        hour: "numeric",
+                        minute: "2-digit",
+                      })}
+                    </td>
+                    <td style={TD_MONO}>
+                      <div style={{ color: "#e2e8f0", fontWeight: 700 }}>{alert.ticker} {alert.putCall.toUpperCase()}</div>
+                      <div style={{ color: "#94a3b8" }}>${alert.strike} · {alert.expiration}</div>
+                      <div style={{ color: "#64748b", fontSize: 12 }}>
+                        mid {alert.mid == null ? "—" : alert.mid.toFixed(2)} · underlying {alert.underlyingPrice == null ? "—" : alert.underlyingPrice.toFixed(2)}
+                      </div>
+                    </td>
+                    <td style={{ ...TD, minWidth: 220 }}>
+                      <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4 }}>
+                        <Badge color={verdictColor(alert.verdict)}>{alert.verdictLabel}</Badge>
+                        <span style={{ fontFamily: "monospace", fontWeight: 800 }}>{alert.grade}</span>
+                      </div>
+                      <ul style={{ margin: 0, paddingLeft: 16, color: "#94a3b8", fontSize: 12, lineHeight: 1.4 }}>
+                        {alert.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+                      </ul>
+                      {alert.levelsNote && (
+                        <div style={{ color: "#64748b", fontSize: 12, marginTop: 4 }}>{alert.levelsNote}</div>
+                      )}
+                    </td>
+                    {(["m15", "h1", "close"] as const).map((name) => (
+                      <td key={name} style={{ ...TD_MONO, color: "#e2e8f0" }} title={checkpointTitle(alert.checkpoints[name])}>
+                        {checkpointLabel(alert.checkpoints[name])}
+                      </td>
+                    ))}
+                    <td style={{ ...TD_MONO, color: outcomeColor(alert.outcome), fontWeight: 700 }}>{alert.outcome}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ReportTable({ title, headers, rows }: { title: string; headers: string[]; rows: string[][] }) {
+  if (rows.length === 0) return null;
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: "#94a3b8", marginBottom: 8 }}>{title}</div>
+      <table style={{ width: "100%", borderCollapse: "collapse", maxWidth: 720 }}>
+        <thead>
+          <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+            {headers.map((header) => <th key={header} style={TH}>{header}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.join("|")} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+              {row.map((cell, index) => (
+                <td key={`${cell}-${index}`} style={index === 0 ? TD : TD_MONO}>{cell}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ROOT
 // ═══════════════════════════════════════════════════════════════════════════
 const TABS = [
@@ -844,6 +1116,7 @@ const TABS = [
   { id: "kelly",    label: "△ Kelly (retired)" },
   { id: "research", label: "◆ Research"      },
   { id: "alerts",   label: "⏰ Alerts"       },
+  { id: "report",   label: "▣ Alert Report" },
 ];
 
 export default function OptionsEdgeScanner() {
@@ -864,7 +1137,7 @@ export default function OptionsEdgeScanner() {
               <span style={{ color: "#06b6d4" }}>◆</span> OPTIONS EDGE SCANNER
             </h1>
             <p style={{ margin: "3px 0 0", color: "#475569", fontSize: 14 }}>
-              Estimated flow · Vol Arb · Account · Trade Gate · Research
+              Estimated flow · Verdict · Alert Report · Trade Gate
             </p>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -905,6 +1178,7 @@ export default function OptionsEdgeScanner() {
         {tab === "kelly"    && <KellyTab    />}
         {tab === "research" && <ResearchTab />}
         {tab === "alerts"   && <AlertsTab   />}
+        {tab === "report"   && <AlertReportTab />}
       </div>
 
       <div style={{ padding: "12px 24px", borderTop: "1px solid rgba(255,255,255,0.05)", display: "flex", justifyContent: "space-between", color: "#334155", fontSize: 12 }}>

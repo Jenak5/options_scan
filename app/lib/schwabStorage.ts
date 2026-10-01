@@ -19,6 +19,12 @@ export const SCHWAB_BLOB_TOKEN_PATH = "schwab/tokens.json";
 export const SCHWAB_BLOB_FLOW_PATH = "schwab/flow-snapshots.json";
 
 /**
+ * Private blob for sent alerts, checkpoint quotes, and the loss count
+ * last typed into the Gate. Not a token and not encrypted.
+ */
+export const SCHWAB_BLOB_ALERT_BOOK_PATH = "schwab/alert-book.json";
+
+/**
  * Shortest cache lifetime the Blob SDK accepts (60 seconds).
  * Token reads still bypass the CDN with useCache: false.
  */

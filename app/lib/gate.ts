@@ -126,6 +126,49 @@ export function singleContractExceedsCap(ask: number, cap: number = MAX_LOSS_DOL
   return ask * 100 > cap;
 }
 
+/**
+ * How many long contracts fit under the loss cap at this ask.
+ * Zero when one contract is already over the cap. Null when the ask cannot be priced.
+ */
+export function maxLongContractsWithinCap(ask: number, cap: number = MAX_LOSS_DOLLARS): number | null {
+  const one = longOptionMaxLoss(1, ask);
+  if (one == null) return null;
+  const count = Math.floor(cap / one);
+  if (!Number.isFinite(count) || count < 1) return 0;
+  return Math.min(count, MAX_CONTRACTS);
+}
+
+export interface QuoteChecks {
+  checks: GateCheck[];
+  /** Open interest, volume, and spread. Delayed quotes are reported separately. */
+  liquidityPasses: boolean;
+  maxContracts: number | null;
+  exceedsCap: boolean;
+  suggestion: string | null;
+}
+
+/**
+ * Liquidity, quote timing, and the single-contract cap.
+ * Exit rules and the typed loss count stay in evaluateGate.
+ */
+export function evaluateQuoteChecks(contract: OptionContract | null, delayed: boolean): QuoteChecks {
+  const checks: GateCheck[] = [
+    delayedCheck(delayed),
+    openInterestCheck(contract),
+    volumeCheck(contract),
+    spreadCheck(contract),
+  ];
+  const liquidity = checks.filter((check) => check.id !== "delayed");
+  const exceedsCap = contract != null && singleContractExceedsCap(contract.ask);
+  return {
+    checks,
+    liquidityPasses: liquidity.every((check) => check.status === "PASS"),
+    maxContracts: contract == null ? null : maxLongContractsWithinCap(contract.ask),
+    exceedsCap,
+    suggestion: exceedsCap ? DEBIT_SPREAD_SUGGESTION : null,
+  };
+}
+
 export function dailyStopPasses(
   consecutiveLosses: number,
   limit: number = DAILY_STOP_CONSECUTIVE_LOSSES,

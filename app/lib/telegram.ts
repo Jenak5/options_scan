@@ -39,6 +39,22 @@ export async function sendTelegramAlert(message: string): Promise<boolean> {
   }
 }
 
+export function formatVerdictHtml(verdict: {
+  grade: string;
+  verdictLabel: string;
+  note: string;
+  reasons: string[];
+  levelsNote: string | null;
+}): string {
+  const lines = [
+    `<b>${escapeHtml(verdict.grade)} · ${escapeHtml(verdict.verdictLabel)}</b>`,
+    escapeHtml(verdict.note),
+    ...verdict.reasons.map((reason) => `• ${escapeHtml(reason)}`),
+  ];
+  if (verdict.levelsNote) lines.push(escapeHtml(verdict.levelsNote));
+  return lines.join("\n");
+}
+
 export function formatFlowAlert(flow: {
   ticker: string;
   putCall: "call" | "put";
@@ -52,6 +68,13 @@ export function formatFlowAlert(flow: {
   otm: boolean | null;
   volumeExceedsOi: boolean;
   volOiRatio: number | null;
+  verdict?: {
+    grade: string;
+    verdictLabel: string;
+    note: string;
+    reasons: string[];
+    levelsNote: string | null;
+  } | null;
 }): string {
   const emoji = flow.putCall === "call" ? "🟢" : "🔴";
   const type = flow.putCall === "call" ? "CALL" : "PUT";
@@ -73,6 +96,7 @@ export function formatFlowAlert(flow: {
   return [
     `${emoji} <b>${escapeHtml(flow.ticker)}</b> ${type}`,
     `<b>Estimated flow</b> from Schwab volume/open interest, not a sweep.`,
+    flow.verdict ? formatVerdictHtml(flow.verdict) : "",
     ``,
     `💰 <b>${premiumStr}</b> notional (volume × mid × 100)`,
     `📍 $${flow.strike} strike · ${escapeHtml(flow.expiration)}`,

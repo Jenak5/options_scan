@@ -25,7 +25,8 @@ export const MAX_BID_ASK_SPREAD_OF_MID = 0.05;
 
 /**
  * Daily stop. Two losses in a row and the gate is NO for the day.
- * The trade log is not stored yet; the gate takes the count as an input.
+ * The count is typed into the Gate and kept for that Chicago session.
+ * It is not a broker fill log.
  */
 export const DAILY_STOP_CONSECUTIVE_LOSSES = 2;
 

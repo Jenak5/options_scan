@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { verdictBanner } from "@/app/lib/alertConfig";
+import { currentDailyLoss } from "@/app/lib/alertStore";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import {
   FLOW_DISCLAIMER,
@@ -8,7 +10,9 @@ import {
   watchlistFromEnv,
 } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
+import { DAILY_STOP_CONSECUTIVE_LOSSES } from "@/app/lib/risk";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
+import { gradeFlowRow } from "@/app/lib/verdict";
 
 export const dynamic = "force-dynamic";
 
@@ -38,10 +42,15 @@ export async function GET(request: NextRequest) {
 
   try {
     const scan = await scanEstimatedFlow({ tickers, bypassCache: fresh });
-    const data = filterFlowRows(scan.rows, { minPremium, otmOnly, liquidOnly, limit });
+    const losses = await currentDailyLoss(new Date());
+    const data = filterFlowRows(scan.rows, { minPremium, otmOnly, liquidOnly, limit })
+      .map((row) => ({ ...row, verdict: gradeFlowRow(row, losses) }));
     return NextResponse.json({
       data,
       disclaimer: FLOW_DISCLAIMER,
+      verdictBanner: verdictBanner(),
+      consecutiveLosses: losses,
+      dailyStop: losses != null && losses >= DAILY_STOP_CONSECUTIVE_LOSSES,
       connected: true,
       cached: scan.cached,
       scannedAt: scan.scannedAt,
@@ -56,6 +65,7 @@ export async function GET(request: NextRequest) {
         reconnect: "/api/schwab/connect",
         connected: false,
         disclaimer: FLOW_DISCLAIMER,
+        verdictBanner: verdictBanner(),
       }, { status: 409 });
     }
     if (err instanceof SchwabConfigError) {
@@ -63,6 +73,7 @@ export async function GET(request: NextRequest) {
         error: err.message,
         connected: false,
         disclaimer: FLOW_DISCLAIMER,
+        verdictBanner: verdictBanner(),
       }, { status: 503 });
     }
     const message = err instanceof Error && err.message.startsWith("Schwab ")
