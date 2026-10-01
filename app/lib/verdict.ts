@@ -33,7 +33,9 @@ import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
  * Alert-time checklist. TAKE, WATCH, or SKIP, plus a letter grade.
  * Liquidity failures and a single contract over the loss cap are SKIP.
  * Two losing closes in a row today turn TAKE into STOP for today.
- * A computed support and resistance can leave the grade at A.
+ * A TAKE with exceptional flow, a close strike, room to the next level,
+ * a known earnings date after expiration, and no macro release in the
+ * contract is an A. An ordinary TAKE is a B.
  * Missing price history keeps the grade at B.
  * An unknown earnings date also keeps the grade at B.
  * Earnings on or before expiration, and a macro release in that window, each lower the grade.
@@ -90,7 +92,7 @@ export interface SetupInput {
 
 const GRADE_RANK: LetterGrade[] = ["A", "B", "C", "D"];
 
-export function gradeFlowRow(row: FlowRow, consecutiveLosses: number | null): AlertVerdict {
+export function gradeFlowRow(row: FlowRow, consecutiveLosses: number | null, now: Date = new Date()): AlertVerdict {
   return gradeSetup({
     bid: row.bid,
     ask: row.ask,
@@ -114,7 +116,7 @@ export function gradeFlowRow(row: FlowRow, consecutiveLosses: number | null): Al
     printSummary: row.prints?.summary ?? null,
     earnings: row.earnings ?? null,
     definedRiskSpread: false,
-    now: new Date(),
+    now,
   });
 }
 
@@ -177,12 +179,16 @@ export function gradeSetup(input: SetupInput): AlertVerdict {
 
   let checklist: "TAKE" | "WATCH" | "SKIP" = "WATCH";
   let uncapped: LetterGrade = "C";
+  const take = dteFit === "ideal" && distanceOk && signals.length >= ALERT_RULES.takeMinFlowSignals;
   if (hardSkip) {
     checklist = "SKIP";
     uncapped = "D";
-  } else if (dteFit === "ideal" && distanceOk && signals.length >= ALERT_RULES.takeMinFlowSignals) {
+  } else if (take && qualifiesForA(input, signals)) {
     checklist = "TAKE";
     uncapped = "A";
+  } else if (take) {
+    checklist = "TAKE";
+    uncapped = "B";
   } else if (signals.length >= 1 || dteFit !== "poor" || distanceOk) {
     checklist = "WATCH";
     uncapped = "C";
@@ -275,6 +281,21 @@ function flowSignals(input: SetupInput): string[] {
   if (input.side === "estimated at ask") hit.push("side");
   if (input.volumeJump != null && input.volumeJump >= ALERT_RULES.strongVolumeJump) hit.push("jump");
   return hit;
+}
+
+function qualifiesForA(input: SetupInput, signals: string[]): boolean {
+  if (signals.length < ALERT_RULES.aMinFlowSignals) return false;
+  if (input.volOiRatio == null || input.volOiRatio < ALERT_RULES.aGradeVolOiRatio) return false;
+  if (input.notionalPremium == null || input.notionalPremium < ALERT_RULES.aGradeNotional) return false;
+  return distanceIdeal(input);
+}
+
+function distanceIdeal(input: SetupInput): boolean {
+  if (!distanceFits(input)) return false;
+  if (input.otm) {
+    return input.otmFraction != null && input.otmFraction <= ALERT_RULES.idealOtmFraction;
+  }
+  return true;
 }
 
 function distanceFits(input: SetupInput): boolean {

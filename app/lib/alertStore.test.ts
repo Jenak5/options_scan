@@ -109,7 +109,7 @@ describe("alert book store", () => {
     const book = await loadAlertBook();
     expect(book.records).toHaveLength(1);
     expect(book.records[0].verdict).toBe("TAKE");
-    expect(book.records[0].grade).toBe("B");
+    expect(book.records[0].grade).toBe(verdict.grade);
     expect(book.records[0].bid).toBe(2);
     expect(book.records[0].ask).toBe(2.05);
     expect(book.records[0].mid).toBe(2.025);
