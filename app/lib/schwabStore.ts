@@ -1,3 +1,4 @@
+import { PRINT_RULES } from "@/app/lib/alertConfig";
 import { BlobPreconditionFailedError, del, get, put } from "@vercel/blob";
 import type { StoredTokens } from "@/app/lib/schwabParse";
 import {
@@ -50,6 +51,18 @@ const FLOW_SNAPSHOT_MAX_CONTRACTS = 500;
 export interface FlowVolumeSnapshot {
   scannedAt: number;
   volumes: Record<string, number>;
+  /** Recent chain quotes per contract. Absent on snapshots saved before print detection. */
+  quotes?: Record<string, StoredQuotePoint[]>;
+}
+
+interface StoredQuotePoint {
+  at: number;
+  volume: number;
+  last: number | null;
+  lastSize: number | null;
+  bid: number | null;
+  ask: number | null;
+  tradeTime: number | null;
 }
 
 /** Prior option volume by ticker. Separate from the token envelope. */
@@ -652,9 +665,57 @@ function sanitizeFlowBook(patch: FlowSnapshotBook): FlowSnapshotBook {
         volumes[key] = volume;
       }
     }
-    out[ticker] = { scannedAt, volumes };
+    out[ticker] = { scannedAt, volumes, quotes: sanitizeQuotes(row.quotes) };
   }
   return trimFlowBook(out);
+}
+
+function sanitizeQuotes(value: unknown): Record<string, StoredQuotePoint[]> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  const keys = Object.keys(source);
+  const out: Record<string, StoredQuotePoint[]> = {};
+  for (let i = 0; i < keys.length && Object.keys(out).length < FLOW_SNAPSHOT_MAX_CONTRACTS; i++) {
+    const key = keys[i];
+    if (key.length === 0 || key.length > 80) continue;
+    const points = sanitizePoints(source[key]);
+    if (points.length > 0) out[key] = points;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function sanitizePoints(value: unknown): StoredQuotePoint[] {
+  if (!Array.isArray(value)) return [];
+  const list = value.slice(-PRINT_RULES.historyPoints);
+  const points: StoredQuotePoint[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const row = list[i];
+    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+    const point = row as Partial<StoredQuotePoint>;
+    if (typeof point.at !== "number" || !Number.isFinite(point.at)) continue;
+    if (typeof point.volume !== "number" || !Number.isFinite(point.volume) || point.volume < 0) continue;
+    points.push({
+      at: point.at,
+      volume: point.volume,
+      last: optionalNonNegative(point.last),
+      lastSize: optionalPositive(point.lastSize),
+      bid: optionalNonNegative(point.bid),
+      ask: optionalNonNegative(point.ask),
+      tradeTime: optionalPositive(point.tradeTime),
+    });
+  }
+  return points;
+}
+
+function optionalNonNegative(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  return value;
+}
+
+function optionalPositive(value: unknown): number | null {
+  const parsed = optionalNonNegative(value);
+  if (parsed == null || parsed <= 0) return null;
+  return parsed;
 }
 
 function trimFlowBook(book: FlowSnapshotBook): FlowSnapshotBook {

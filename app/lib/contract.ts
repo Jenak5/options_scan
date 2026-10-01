@@ -16,4 +16,11 @@ export interface OptionContract {
   /** Calendar date, YYYY-MM-DD. */
   expiration: string;
   putCall: PutCall;
+  /** Contracts in the most recent trade, when the chain included lastSize. */
+  lastSize?: number | null;
+  bidSize?: number | null;
+  askSize?: number | null;
+  /** Milliseconds since epoch. The chain's trade time, not a time-and-sales print. */
+  tradeTime?: number | null;
+  quoteTime?: number | null;
 }

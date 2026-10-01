@@ -304,6 +304,11 @@ function optionFromQuote(value: unknown): OptionContract | null {
     last: quote.lastPrice ?? quote.last ?? row.last,
     totalVolume: quote.totalVolume ?? row.totalVolume,
     openInterest: quote.openInterest ?? row.openInterest,
+    lastSize: quote.lastSize ?? row.lastSize,
+    bidSize: quote.bidSize ?? row.bidSize,
+    askSize: quote.askSize ?? row.askSize,
+    tradeTimeInLong: quote.tradeTimeInLong ?? row.tradeTimeInLong,
+    quoteTimeInLong: quote.quoteTimeInLong ?? row.quoteTimeInLong,
     volatility: quote.volatility ?? row.volatility,
     delta: quote.delta ?? row.delta,
     strikePrice: quote.strikePrice ?? reference.strikePrice ?? row.strikePrice,
@@ -356,6 +361,11 @@ function normalizeOptionRecord(raw: unknown, fallback: {
     strike,
     expiration,
     putCall,
+    lastSize: positiveCount(row.lastSize),
+    bidSize: nonNegativeCount(row.bidSize),
+    askSize: nonNegativeCount(row.askSize),
+    tradeTime: epochMillis(row.tradeTimeInLong ?? row.tradeTime),
+    quoteTime: epochMillis(row.quoteTimeInLong ?? row.quoteTime),
   };
 }
 
@@ -387,6 +397,25 @@ function epochToNewYorkDate(value: number): string | null {
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
+}
+
+function positiveCount(value: unknown): number | null {
+  const parsed = nonNegativeCount(value);
+  if (parsed == null || parsed <= 0) return null;
+  return parsed;
+}
+
+function nonNegativeCount(value: unknown): number | null {
+  const parsed = num(value);
+  if (parsed == null || parsed < 0) return null;
+  return parsed;
+}
+
+/** Chain trade times are epoch milliseconds. A 10-digit value is seconds. */
+function epochMillis(value: unknown): number | null {
+  const parsed = num(value);
+  if (parsed == null || parsed <= 0) return null;
+  return parsed < 10_000_000_000 ? parsed * 1000 : parsed;
 }
 
 function num(value: unknown): number | null {

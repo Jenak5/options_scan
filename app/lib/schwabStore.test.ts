@@ -130,6 +130,25 @@ describe("token store", () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
+  it("keeps quote points and drops a point that is not a quote", async () => {
+    await writeFlowSnapshots({
+      SPY: {
+        scannedAt: 1_700_000_000_000,
+        volumes: { "2026-10-08|105|call": 10 },
+        quotes: {
+          "2026-10-08|105|call": [
+            { at: 1, volume: 4, last: 1.2, lastSize: 2, bid: 1.1, ask: 1.3, tradeTime: 50 },
+            { at: Number.NaN, volume: 1, last: null, lastSize: null, bid: null, ask: null, tradeTime: null },
+          ],
+        },
+      },
+    });
+    const points = (await readFlowSnapshots()).SPY.quotes?.["2026-10-08|105|call"];
+    expect(points).toEqual([
+      { at: 1, volume: 4, last: 1.2, lastSize: 2, bid: 1.1, ask: 1.3, tradeTime: 50 },
+    ]);
+  });
+
   it("encrypts the payload so the token text is not stored in the clear", async () => {
     process.env.SESSION_SECRET = "unit-test-session-secret";
     const json = JSON.stringify(tokens);

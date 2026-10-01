@@ -245,7 +245,7 @@ function FlowTab() {
         <span style={{ color: "#10b981", fontSize: 13 }}>▲ EST ASK — last price near the ask</span>
         <span style={{ color: "#ef4444", fontSize: 13 }}>▼ EST BID — last price near the bid</span>
         <span style={{ color: "#f59e0b", fontSize: 13 }}>↔ EST MID — last price between</span>
-        <span style={{ color: "#64748b", fontSize: 13 }}>Premium is volume × mid × 100. Vol jump is the change since the last same-day scan.</span>
+        <span style={{ color: "#64748b", fontSize: 13 }}>Premium is volume × mid × 100. Vol jump is the change since the last same-day scan. Prints are detected from Schwab quotes, not exchange-reported sweeps.</span>
       </div>
 
       {disconnected && (
@@ -266,14 +266,14 @@ function FlowTab() {
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ borderBottom: "2px solid rgba(255,255,255,0.1)" }}>
-                {["Ticker","Verdict","Type","Strike","Expiry","Premium","Volume","OI","Vol/OI","Vol jump","IV","Side","DTE","Spread","Score",""].map((h) => (
+                {["Ticker","Verdict","Type","Strike","Expiry","Premium","Volume","OI","Vol/OI","Vol jump","IV","Side","Prints","DTE","Spread","Score",""].map((h) => (
                   <th key={h || "gate"} style={TH}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {flows.length === 0 && (
-                <tr><td colSpan={16} style={{ ...TD, textAlign: "center", color: "#475569" }}>No estimated flow matches these filters.</td></tr>
+                <tr><td colSpan={17} style={{ ...TD, textAlign: "center", color: "#475569" }}>No estimated flow matches these filters.</td></tr>
               )}
               {flows.map((f, i) => {
                 const isCall = f.putCall === "call";
@@ -321,6 +321,9 @@ function FlowTab() {
                     </td>
                     <td style={{ ...TD_MONO, color: "#a855f7" }}>{iv > 0 ? `${fmt(iv * 100, 0)}%` : "—"}</td>
                     <td style={TD} title={f.sideNote}><SideBadge side={f.side} /></td>
+                    <td style={{ ...TD, minWidth: 180, color: f.prints?.block || f.prints?.sweepLike ? "#fbbf24" : "#94a3b8", fontSize: 12 }}>
+                      {f.prints?.summary ?? "—"}
+                    </td>
                     <td style={{ ...TD_MONO, color: "#94a3b8" }}>{f.dte != null ? `${f.dte}d` : "—"}</td>
                     <td style={{ ...TD_MONO, color: f.spreadQuality === "wide" ? "#ef4444" : "#94a3b8" }}>
                       {f.spreadFraction != null ? `${(f.spreadFraction * 100).toFixed(1)}%` : "—"}

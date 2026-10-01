@@ -370,6 +370,31 @@ describe("alert checklist", () => {
     const html = formatVerdictHtml({ ...result, eventLine: "CPI < jobs & more" });
     expect(html).toContain("CPI &lt; jobs &amp; more");
   });
+
+  it("puts a quote-derived print on the checklist without calling it an exchange sweep", () => {
+    const summary = "Detected from Schwab quotes: block print, 100 contracts at the ask (about $20K). Not an exchange-reported sweep.";
+    const result = gradeSetup(setup({ printSummary: summary }));
+    expect(result.verdict).toBe("TAKE");
+    expect(result.reasons).toContain(summary);
+    expect(result.reasons.length).toBeLessThanOrEqual(4);
+    expect(result.reasons.join(" ").includes("exchange-reported sweep")).toBe(true);
+    expect(result.reasons.join(" ").includes("Not an exchange-reported sweep")).toBe(true);
+    const html = formatVerdictHtml(result);
+    expect(html).toContain("Not an exchange-reported sweep.");
+  });
+
+  it("keeps the earnings reason and the quote print when both apply", () => {
+    const summary = "Detected from Schwab quotes: block print, 100 contracts at the ask (about $20K). Not an exchange-reported sweep.";
+    const result = gradeSetup(setup({
+      levels: levels(),
+      printSummary: summary,
+      earnings: { status: "known", date: "2026-10-08", timing: "before-market", estimated: false },
+    }));
+    expect(result.reasons).toContain(IV_CRUSH_SENTENCE);
+    expect(result.reasons).toContain(summary);
+    expect(result.eventLine).toContain(IV_CRUSH_SENTENCE);
+    expect(result.reasons.length).toBeLessThanOrEqual(4);
+  });
 });
 
 function farEarnings(): EarningsFact {

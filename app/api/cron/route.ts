@@ -114,7 +114,7 @@ Estimated flow from Schwab volume/open interest, not a sweep.
 💰 <b>${premStr}</b> notional
 🎯 Strike <b>$${row.strike}</b> · Exp <b>${row.expiration}</b>
 📊 ${escapeHtml(row.side)} · ${ratio} · IV ${iv} · OI ${oi}
-📈 Vol Arb: <b>${escapeHtml(volSummary)}</b> — ${conviction.note}
+${row.prints?.summary ? `🖨 ${escapeHtml(row.prints.summary)}\n` : ""}📈 Vol Arb: <b>${escapeHtml(volSummary)}</b> — ${conviction.note}
 
 🤖 <i>${escapeHtml(grokNote)}</i>
 

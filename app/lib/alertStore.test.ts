@@ -8,6 +8,7 @@ import {
   rememberSentAlert,
 } from "@/app/lib/alertStore";
 import type { FlowRow } from "@/app/lib/flow";
+import { EMPTY_PRINTS } from "@/app/lib/prints";
 import {
   SCHWAB_BLOB_ALERT_BOOK_PATH,
   SCHWAB_BLOB_TOKEN_PATH,
@@ -73,6 +74,7 @@ function row(over: Partial<FlowRow> = {}): FlowRow {
     delayed: false,
     underlyingPrice: 100,
     levels: null,
+    prints: EMPTY_PRINTS,
     score: 55,
     ...over,
   };

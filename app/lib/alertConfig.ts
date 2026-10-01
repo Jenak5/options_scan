@@ -85,6 +85,39 @@ export const OUTCOME_RULES = {
   note: "Percents compare option midpoints. This is an estimate, not a fill, and it is not trade profit or loss.",
 };
 
+/**
+ * Quote-derived prints. These are not exchange-reported sweeps.
+ * Schwab's chain carries the latest trade (last size, trade time, bid, and ask),
+ * not a tape. The cron runs every 15 minutes, so the only second-scale samples
+ * are a few extra chain reads inside that one request.
+ */
+export const PRINT_RULES = {
+  /** Last size at or above this many contracts is a block, even if the dollars are smaller. */
+  blockMinContracts: 100,
+  /** Last size × price × 100 at or above this is a block. */
+  blockMinNotional: 50_000,
+  /** Distinct trade times on one side, inside the window, before a burst is called sweep-like. */
+  sweepMinPrints: 3,
+  /** Milliseconds from the first trade time in the burst to the last. */
+  sweepWindowMs: 8_000,
+  /** Extra chain reads after the first, only for the most active tickers. */
+  followUpReads: 2,
+  /** Pause between those extra reads so a new last trade can show up. */
+  followUpGapMs: 2_000,
+  /** Stop extra reads after this much waiting, so a serverless invocation can still finish. */
+  followUpBudgetMs: 8_000,
+  /** How many active tickers get the extra reads. The rest keep the single chain. */
+  maxFollowUpTickers: 4,
+  /** Quote points kept per contract for the next poll. */
+  historyPoints: 6,
+  /** Added to the flow score when a new print was detected. */
+  printScore: 4,
+  /** Added on top when that print's last size is a block. */
+  blockScore: 8,
+  /** Added on top when several prints land inside the burst window. */
+  sweepScore: 12,
+};
+
 export const SMALL_SAMPLE_NOTE =
   "The sample is small until many alerts are graded. A hit rate on a handful of names is not a track record.";
 

@@ -80,6 +80,7 @@ export interface SetupInput {
   underlyingPrice: number | null;
   consecutiveLosses: number | null;
   levels: KeyLevels | null;
+  printSummary?: string | null;
   /** Null when the lookup has not run. That is treated as unknown, not as safe. */
   earnings: EarningsFact | null;
   /** True only for a defined-risk spread. A single long option is not one. */
@@ -110,6 +111,7 @@ export function gradeFlowRow(row: FlowRow, consecutiveLosses: number | null): Al
     underlyingPrice: row.underlyingPrice,
     consecutiveLosses: knownLosses(consecutiveLosses),
     levels: row.levels,
+    printSummary: row.prints?.summary ?? null,
     earnings: row.earnings ?? null,
     definedRiskSpread: false,
     now: new Date(),
@@ -223,7 +225,16 @@ export function gradeSetup(input: SetupInput): AlertVerdict {
     verdictLabel: verdict === "STOP" ? "STOP for today" : verdict,
     grade,
     uncappedGrade: uncapped,
-    reasons: buildReasons(input, market, signals.length, verdict, expired, levelsRead.sentence, event.reason),
+    reasons: buildReasons(
+      input,
+      market,
+      signals.length,
+      verdict,
+      expired,
+      levelsRead.sentence,
+      event.reason,
+      input.printSummary ?? null,
+    ),
     note: ALERT_RULES.note,
     levels: toStoredLevels(input.levels),
     levelsNote,
@@ -355,6 +366,7 @@ function buildReasons(
   expired: boolean,
   levelSentenceText: string,
   eventReason: string | null,
+  printSummary: string | null,
 ): string[] {
   const head: string[] = [];
   if (expired) head.push("This expiration has already passed.");
@@ -384,11 +396,13 @@ function buildReasons(
     unique.push(line);
   }
   const eventText = eventReason?.trim() ?? "";
-  const rest = unique.filter((line) => line !== levelSentenceText && line !== eventText);
+  const printText = printSummary?.trim() ?? "";
+  const rest = unique.filter((line) => line !== levelSentenceText && line !== eventText && line !== printText);
   const picked: string[] = [];
   if (rest.length > 0) picked.push(rest[0]);
   if (levelSentenceText.trim()) picked.push(levelSentenceText.trim());
   if (eventText) picked.push(eventText);
+  if (printText) picked.push(printText);
   for (let i = 1; i < rest.length && picked.length < 4; i++) picked.push(rest[i]);
   if (picked.length < 2) picked.push(ALERT_RULES.note);
   return picked.slice(0, 4);
