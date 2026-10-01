@@ -7,7 +7,9 @@ export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // Vercel cron authenticates itself with Authorization: Bearer.
-  if (pathname === "/api/cron" || PUBLIC_PATHS.has(pathname)) {
+  // The Schwab callback is a cross-site redirect, so the SameSite=Strict
+  // session cookie is not sent. The route checks the OAuth state cookie.
+  if (pathname === "/api/cron" || pathname === "/api/schwab/callback" || PUBLIC_PATHS.has(pathname)) {
     return NextResponse.next();
   }
 

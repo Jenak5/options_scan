@@ -1,6 +1,8 @@
 "use client";
 
 import React, { useState, useEffect, useCallback } from "react";
+import { SchwabBanner } from "@/app/components/SchwabBanner";
+import { ACCOUNT_SIZE_DOLLARS, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 
 // ─── API helpers ───────────────────────────────────────────────────────────
 async function fetchApi(base: string, params: Record<string, string>) {
@@ -565,10 +567,10 @@ function AccountTab() {
 // KELLY LAB
 // ═══════════════════════════════════════════════════════════════════════════
 function KellyTab() {
-  const [winPct,   setWinPct]   = useState(55);
+  const [winPct,   setWinPct]   = useState(50);
   const [winMult,  setWinMult]  = useState(2.0);
   const [lossMult, setLossMult] = useState(1.0);
-  const [bankroll, setBankroll] = useState(5000);
+  const [bankroll, setBankroll] = useState(ACCOUNT_SIZE_DOLLARS);
 
   const p     = winPct / 100;
   const q     = 1 - p;
@@ -589,6 +591,9 @@ function KellyTab() {
 
   return (
     <div style={{ maxWidth: 680 }}>
+      <div style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 8, padding: "12px 14px", marginBottom: 16, color: "#fbbf24", fontSize: 14, lineHeight: 1.5 }}>
+        Retired as the sizing model. This lab used to assume a $5,000 account and a 55% win rate. Those assumptions are not used. The account is ${ACCOUNT_SIZE_DOLLARS.toLocaleString()}, and the Gate caps a trade at ${MAX_LOSS_DOLLARS}. The sliders below are only an illustration.
+      </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 24 }}>
         {([
           { label: "Win Rate (%)",        value: winPct,   set: setWinPct,   min: 1,   max: 99,      step: 1   },
@@ -872,6 +877,11 @@ function AlertsTab() {
     { name: "TELEGRAM_BOT_TOKEN",       note: "From @BotFather" },
     { name: "TELEGRAM_CHAT_ID",         note: "Your chat ID" },
     { name: "UNUSUAL_WHALES_API_TOKEN", note: "Unusual Whales" },
+    { name: "SCHWAB_CLIENT_ID",         note: "Sensitive · Market Data app key" },
+    { name: "SCHWAB_CLIENT_SECRET",     note: "Sensitive · Market Data secret" },
+    { name: "SCHWAB_REDIRECT_URI",      note: "Sensitive · must match the callback URL" },
+    { name: "KV_REST_API_URL",          note: "Sensitive · token store, or Upstash" },
+    { name: "KV_REST_API_TOKEN",        note: "Sensitive · token store" },
   ];
 
   return (
@@ -1124,7 +1134,7 @@ const TABS = [
   { id: "darkpool", label: "◈ Dark Pool"    },
   { id: "volArb",   label: "◇ Vol Arb"      },
   { id: "account",  label: "⊞ Account"      },
-  { id: "kelly",    label: "△ Kelly Lab"     },
+  { id: "kelly",    label: "△ Kelly (retired)" },
   { id: "chain",    label: "≡ Chain"         },
   { id: "research", label: "◆ Research"      },
   { id: "alerts",   label: "⏰ Alerts"       },
@@ -1148,7 +1158,7 @@ export default function OptionsEdgeScanner() {
               <span style={{ color: "#06b6d4" }}>◆</span> OPTIONS EDGE SCANNER
             </h1>
             <p style={{ margin: "3px 0 0", color: "#475569", fontSize: 14 }}>
-              Unusual Whales Flow · Dark Pool · Vol Arb · Tastytrade Account · Kelly Sizing · Option Chain · AI Research
+              Flow · Dark Pool · Vol Arb · Account · Trade Gate · Chain · Research
             </p>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1164,6 +1174,10 @@ export default function OptionsEdgeScanner() {
           </div>
         </div>
         <div style={{ display: "flex", overflowX: "auto", padding: "0 24px" }}>
+          <a href="/gate" style={{
+            padding: "12px 18px", fontSize: 14, fontWeight: 600,
+            color: "#475569", letterSpacing: "0.03em", whiteSpace: "nowrap", textDecoration: "none",
+          }}>▣ Gate</a>
           {TABS.map((t) => (
             <button key={t.id} onClick={() => setTab(t.id)} style={{
               padding: "12px 18px", fontSize: 14, fontWeight: 600, cursor: "pointer",
@@ -1178,6 +1192,7 @@ export default function OptionsEdgeScanner() {
 
       {/* Content */}
       <div style={{ padding: 24 }}>
+        <SchwabBanner />
         {tab === "flow"     && <FlowTab     />}
         {tab === "darkpool" && <DarkPoolTab />}
         {tab === "volArb"   && <VolArbTab   />}
@@ -1190,7 +1205,7 @@ export default function OptionsEdgeScanner() {
 
       <div style={{ padding: "12px 24px", borderTop: "1px solid rgba(255,255,255,0.05)", display: "flex", justifyContent: "space-between", color: "#334155", fontSize: 12 }}>
         <span>Options Edge Scanner · Not financial advice · Read-only · never places orders</span>
-        <span>Tastytrade + Unusual Whales APIs</span>
+        <span>Schwab market data · Tastytrade · Unusual Whales</span>
       </div>
     </div>
   );

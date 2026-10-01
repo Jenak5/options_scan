@@ -1,10 +1,16 @@
 const TG_API = "https://api.telegram.org/bot";
 
+export function telegramConfigured(): boolean {
+  const token = process.env.TELEGRAM_BOT_TOKEN?.trim() ?? "";
+  const chatId = process.env.TELEGRAM_CHAT_ID?.trim() ?? "";
+  return token.length > 0 && chatId.length > 0;
+}
+
 export async function sendTelegramAlert(message: string): Promise<boolean> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
 
-  if (!token || !chatId) {
+  if (!telegramConfigured() || !token || !chatId) {
     console.warn("Telegram not configured — skipping alert");
     return false;
   }

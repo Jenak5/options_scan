@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json --noEmit"
   },
   "dependencies": {
     "next": "^14.2.0",
@@ -15,6 +17,7 @@
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/react": "^18.3.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "vitest": "^2.1.8"
   }
 }

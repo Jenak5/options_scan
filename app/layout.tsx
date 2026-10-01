@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 
 export const metadata: Metadata = {
   title: "Options Edge Scanner",
-  description: "EV Gap · Vol Arb · Kelly Sizing · Flow Alerts · Greeks Dashboard",
+  description: "Read-only options scanner with a Schwab trade gate",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -13,7 +13,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter:wght@400;500;600;700&display=swap"
           rel="stylesheet"
         />
-        <style>{`
+        <style dangerouslySetInnerHTML={{ __html: `
           *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
           body {
             background: #0b0f19;
@@ -45,7 +45,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           button { font-family: inherit; }
           @keyframes spin { to { transform: rotate(360deg); } }
           @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-        `}</style>
+        ` }} />
       </head>
       <body>{children}</body>
     </html>
