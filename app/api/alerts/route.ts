@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
+import { denyIfUnauthorized } from "@/app/lib/auth";
 import { getFlowAlerts } from "@/app/lib/unusualwhales";
 import { sendTelegramAlert, formatFlowAlert, shouldAlert } from "@/app/lib/telegram";
 
 export async function GET(request: NextRequest) {
+  const denied = await denyIfUnauthorized(request);
+  if (denied) return denied;
+
   const action = request.nextUrl.searchParams.get("action");
 
   try {
@@ -52,6 +56,9 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const denied = await denyIfUnauthorized(request);
+  if (denied) return denied;
+
   try {
     const { message } = await request.json();
     if (!message) return NextResponse.json({ error: "message required" }, { status: 400 });

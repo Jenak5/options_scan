@@ -851,12 +851,10 @@ function AlertsTab() {
   const testAlert = async () => {
     setTesting(true); setTestResult(null);
     try {
-      const secret = prompt("Enter your CRON_SECRET to test:");
-      if (!secret) { setTesting(false); return; }
-      const res  = await fetch(`/api/cron?secret=${encodeURIComponent(secret)}&manual=true&debug=true`);
+      const res = await fetch("/api/alerts?action=test");
       const json = await res.json();
-      if (json.error) throw new Error(json.error);
-      setTestResult(`✅ Scan complete — ${json.alertsSent} alert(s) sent\n\nLog:\n${json.log?.join("\n") ?? ""}`);
+      if (!res.ok || json.error) throw new Error(json.error || "Test failed");
+      setTestResult(json.message || (json.success ? "Test alert sent." : "Telegram did not accept the alert."));
     } catch (e: any) {
       setTestResult(`❌ ${e.message}`);
     } finally {
@@ -865,27 +863,29 @@ function AlertsTab() {
   };
 
   const ENV_VARS = [
-    { name: "UNUSUAL_WHALES_API_TOKEN", note: "Already set ✓"       },
-    { name: "TASTYTRADE_CLIENT_SECRET", note: "Already set ✓"       },
-    { name: "TASTYTRADE_REFRESH_TOKEN", note: "Already set ✓"       },
-    { name: "XAI_API_KEY",             note: "Your Grok API key"    },
-    { name: "TELEGRAM_BOT_TOKEN",      note: "From @BotFather"      },
-    { name: "TELEGRAM_CHAT_ID",        note: "Your chat ID"         },
-    { name: "CRON_SECRET",             note: "Any random string"    },
+    { name: "APP_PASSWORD",             note: "App sign-in" },
+    { name: "SESSION_SECRET",           note: "Signs the session cookie" },
+    { name: "CRON_SECRET",              note: "Bearer header only — never in a URL" },
+    { name: "TASTYTRADE_CLIENT_SECRET", note: "OAuth, read-only scope" },
+    { name: "TASTYTRADE_REFRESH_TOKEN", note: "OAuth refresh token" },
+    { name: "XAI_API_KEY",              note: "Grok API key" },
+    { name: "TELEGRAM_BOT_TOKEN",       note: "From @BotFather" },
+    { name: "TELEGRAM_CHAT_ID",         note: "Your chat ID" },
+    { name: "UNUSUAL_WHALES_API_TOKEN", note: "Unusual Whales" },
   ];
 
   return (
     <div style={{ maxWidth: 640 }}>
       <div style={{ fontSize: 17, fontWeight: 700, color: "#e2e8f0", marginBottom: 4 }}>🔔 Automated Alert System</div>
       <div style={{ fontSize: 14, color: "#64748b", marginBottom: 24 }}>
-        Scans every 15 min during market hours · Alerts when sweep + opening + ask-side + BUY FRIENDLY all align · Grok screens for red flags before sending
+        Scheduled scan every 15 min, weekdays, 8:30am–3:00pm Central. Vercel fires 13:30–21:00 UTC so both CST and CDT are covered. Grok screens for red flags before a Telegram alert is sent.
       </div>
 
       {/* How it works */}
       <div style={{ background: "rgba(6,182,212,0.06)", border: "1px solid rgba(6,182,212,0.15)", borderRadius: 8, padding: "14px 18px", marginBottom: 20 }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: "#06b6d4", marginBottom: 10 }}>How it works</div>
         {[
-          "Every 15 min (9:30–4pm ET, weekdays), the scanner fetches fresh flow alerts",
+          "Every 15 min on weekdays, from 8:30am to 3:00pm Central, the scanner fetches fresh flow alerts. Outside that window it exits.",
           "Filters to sweeps ≥ $100K that are opening + ask-side (≥ 65%)",
           "Cross-checks each ticker's vol arb signal — only proceeds on BUY FRIENDLY or BUY VOL",
           "Sends the setup to Grok to screen for red flags (earnings, FDA, news)",
@@ -922,7 +922,7 @@ function AlertsTab() {
       {/* Test button */}
       <button onClick={testAlert} disabled={testing}
         style={{ ...BTN("cyan"), opacity: testing ? 0.5 : 1, marginBottom: 16 }}>
-        {testing ? "Scanning…" : "▶ Run Manual Scan Now"}
+        {testing ? "Sending…" : "Send test Telegram alert"}
       </button>
 
       {testResult && (
@@ -935,8 +935,8 @@ function AlertsTab() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// RESEARCH TAB  — Claude-powered chat with live scanner context
-// Requires ANTHROPIC_API_KEY in Vercel environment variables
+// RESEARCH TAB  — Grok-powered chat with live scanner context
+// Requires XAI_API_KEY in Vercel environment variables (Sensitive)
 // ═══════════════════════════════════════════════════════════════════════════
 interface ChatMessage { role: "user" | "assistant"; content: string; }
 
@@ -1152,8 +1152,15 @@ export default function OptionsEdgeScanner() {
             </p>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ background: "rgba(16,185,129,0.12)", color: "#10b981", border: "1px solid rgba(16,185,129,0.25)", padding: "3px 10px", borderRadius: 4, fontSize: 12, fontWeight: 700 }}>LIVE</span>
-            <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#10b981", boxShadow: "0 0 8px rgba(16,185,129,0.6)", animation: "oes-pulse 2s ease-in-out infinite" }} />
+            <span style={{ background: "rgba(16,185,129,0.12)", color: "#10b981", border: "1px solid rgba(16,185,129,0.25)", padding: "3px 10px", borderRadius: 4, fontSize: 12, fontWeight: 700 }}>READ ONLY</span>
+            <button
+              type="button"
+              onClick={async () => {
+                await fetch("/api/auth/logout", { method: "POST" });
+                window.location.href = "/login";
+              }}
+              style={{ background: "transparent", color: "#64748b", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 4, padding: "3px 10px", fontSize: 12, cursor: "pointer" }}
+            >Log out</button>
           </div>
         </div>
         <div style={{ display: "flex", overflowX: "auto", padding: "0 24px" }}>
@@ -1182,7 +1189,7 @@ export default function OptionsEdgeScanner() {
       </div>
 
       <div style={{ padding: "12px 24px", borderTop: "1px solid rgba(255,255,255,0.05)", display: "flex", justifyContent: "space-between", color: "#334155", fontSize: 12 }}>
-        <span>Options Edge Scanner v7 · Not financial advice · Read-only</span>
+        <span>Options Edge Scanner · Not financial advice · Read-only · never places orders</span>
         <span>Tastytrade + Unusual Whales APIs</span>
       </div>
     </div>

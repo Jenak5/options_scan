@@ -1,3 +1,8 @@
+// Read-only Tastytrade client.
+// Authentication is the OAuth refresh-token grant only. Tastytrade removed
+// username/password session login on 2026-02-11; this module must not send
+// a username, password, or session-token, and it must not place orders.
+
 const BASE_URLS = {
   sandbox: "https://api.cert.tastyworks.com",
   production: "https://api.tastyworks.com",
@@ -38,17 +43,17 @@ export async function authenticate(): Promise<string> {
     }),
   });
   if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Tastytrade OAuth failed (${res.status}): ${err}`);
+    throw new Error(`Tastytrade OAuth failed (${res.status})`);
   }
   const data = await res.json();
   accessToken =
     data.data?.["access-token"] ||
+    data["access-token"] ||
     data.access_token ||
-    data.data?.["session-token"];
+    null;
   tokenExpiry = Date.now() + 14 * 60 * 1000;
   if (!accessToken) {
-    throw new Error(`Tastytrade OAuth: no token in response: ${JSON.stringify(data)}`);
+    throw new Error("Tastytrade OAuth: response did not include an access token");
   }
   return accessToken;
 }
