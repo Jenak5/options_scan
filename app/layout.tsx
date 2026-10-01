@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 
 export const metadata: Metadata = {
   title: "Options Edge Scanner",
-  description: "EV Gap · Vol Arb · Kelly Sizing · Flow Alerts · Greeks Dashboard",
+  description: "Read-only options scanner with a Schwab trade gate",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
