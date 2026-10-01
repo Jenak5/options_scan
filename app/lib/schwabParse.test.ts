@@ -6,6 +6,7 @@ import {
   buildAuthorizeUrl,
   marketDataGetUrl,
   parseOptionChain,
+  parsePriceHistory,
   parseQuotes,
   parseTokenResponse,
   publicTokenStatus,
@@ -19,16 +20,21 @@ afterEach(() => {
 });
 
 describe("market-data URL guard", () => {
-  it("allows chains and quotes and refuses everything else", () => {
+  it("allows chains, quotes, and price history and refuses everything else", () => {
     const chain = marketDataGetUrl("chains", new URLSearchParams({ symbol: "SPY" }));
     const quotes = marketDataGetUrl("quotes", new URLSearchParams({ symbols: "SPY" }));
+    const history = marketDataGetUrl("pricehistory", new URLSearchParams({ symbol: "SPY", periodType: "month" }));
     expect(chain.startsWith("https://api.schwabapi.com/marketdata/v1/chains?")).toBe(true);
     expect(quotes.startsWith("https://api.schwabapi.com/marketdata/v1/quotes?")).toBe(true);
+    expect(history.startsWith("https://api.schwabapi.com/marketdata/v1/pricehistory?")).toBe(true);
+    expect(history.includes("symbol=SPY")).toBe(true);
     expect(chain.includes("/orders")).toBe(false);
-    expect(() => marketDataGetUrl("orders", new URLSearchParams())).toThrow(/chains and quotes/);
-    expect(() => marketDataGetUrl("trader/v1/accounts", new URLSearchParams())).toThrow(/chains and quotes/);
-    expect(() => marketDataGetUrl("../trader/v1/orders", new URLSearchParams())).toThrow(/chains and quotes/);
-    expect(() => marketDataGetUrl("chains/../orders", new URLSearchParams())).toThrow(/chains and quotes/);
+    expect(history.includes("/trader")).toBe(false);
+    expect(() => marketDataGetUrl("orders", new URLSearchParams())).toThrow(/price history/);
+    expect(() => marketDataGetUrl("trader/v1/accounts", new URLSearchParams())).toThrow(/price history/);
+    expect(() => marketDataGetUrl("../trader/v1/orders", new URLSearchParams())).toThrow(/price history/);
+    expect(() => marketDataGetUrl("chains/../orders", new URLSearchParams())).toThrow(/price history/);
+    expect(() => marketDataGetUrl("pricehistory/../orders", new URLSearchParams())).toThrow(/price history/);
   });
 });
 
@@ -269,6 +275,28 @@ describe("quote and chain normalization", () => {
     });
     parseOptionChain({ callExpDateMap: {}, putExpDateMap: {} });
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("price history", () => {
+  it("keeps positive closes in time order and drops the rest", () => {
+    expect(parsePriceHistory({
+      candles: [
+        { close: 10, datetime: 2_000 },
+        { close: 0, datetime: 3_000 },
+        { close: "11.5", datetime: 1_000 },
+        { open: 9 },
+        { close: -1, datetime: 4_000 },
+      ],
+    })).toEqual([
+      { close: 11.5, datetime: 1_000 },
+      { close: 10, datetime: 2_000 },
+    ]);
+  });
+
+  it("returns an empty list when Schwab sends no candles", () => {
+    expect(parsePriceHistory({ empty: true })).toEqual([]);
+    expect(parsePriceHistory(null)).toEqual([]);
   });
 });
 

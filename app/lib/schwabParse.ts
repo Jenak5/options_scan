@@ -32,23 +32,24 @@ export interface SchwabPublicStatus {
   message: string;
 }
 
-const CHAIN_OR_QUOTES = new Set(["chains", "quotes"]);
+const MARKET_DATA_GETS = new Set(["chains", "quotes", "pricehistory"]);
+const MARKET_DATA_READ_ERROR = "Schwab client only reads option chains, quotes, and price history";
 
 /**
- * Only the two market-data GETs this app uses.
+ * Market-data GETs this app uses: option chains, quotes, and daily price history.
  * Trader, account, and order paths are rejected.
  */
 export function marketDataGetUrl(path: string, query: URLSearchParams): string {
-  if (!CHAIN_OR_QUOTES.has(path) || path.includes("/") || path.includes(".")) {
-    throw new Error("Schwab client only reads option chains and quotes");
+  if (!MARKET_DATA_GETS.has(path) || path.includes("/") || path.includes(".")) {
+    throw new Error(MARKET_DATA_READ_ERROR);
   }
   const url = `${MARKET_DATA_ORIGIN}/marketdata/v1/${path}?${query.toString()}`;
   const parsed = new URL(url);
   if (parsed.origin !== MARKET_DATA_ORIGIN) {
-    throw new Error("Schwab client only reads option chains and quotes");
+    throw new Error(MARKET_DATA_READ_ERROR);
   }
   if (!parsed.pathname.startsWith("/marketdata/v1/")) {
-    throw new Error("Schwab client only reads option chains and quotes");
+    throw new Error(MARKET_DATA_READ_ERROR);
   }
   return url;
 }
@@ -225,6 +226,29 @@ export function parseOptionChain(payload: unknown): ChainParseResult {
     delayed: root?.isDelayed === true,
     underlyingPrice,
   };
+}
+
+export interface PriceCandle {
+  close: number;
+  /** Epoch milliseconds when Schwab sent one. */
+  datetime: number | null;
+}
+
+/** Daily candles from the pricehistory endpoint. Non-positive closes are dropped. */
+export function parsePriceHistory(payload: unknown): PriceCandle[] {
+  const root = asRecord(payload);
+  const candles = root?.candles;
+  if (!Array.isArray(candles)) return [];
+  const out: PriceCandle[] = [];
+  for (let i = 0; i < candles.length; i++) {
+    const row = asRecord(candles[i]);
+    if (!row) continue;
+    const close = num(row.close);
+    if (close == null || !(close > 0)) continue;
+    out.push({ close, datetime: num(row.datetime) });
+  }
+  out.sort((a, b) => (a.datetime ?? 0) - (b.datetime ?? 0));
+  return out;
 }
 
 /** Option quotes become contracts. Equity and index quotes are skipped. */

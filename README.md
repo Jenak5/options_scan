@@ -9,7 +9,7 @@ Read-only scan-and-alert tool for a small personal options account ($3,000, max 
 | Tab | Source | What it does |
 |-----|--------|--------------|
 | Flow | Schwab | Estimated flow from volume and open interest. Not sweeps. |
-| Vol Arb | Tastytrade | IV versus realized volatility |
+| Vol Arb | Schwab | ATM implied vol versus 20-day realized vol, plus term structure and skew |
 | Account | Tastytrade | Positions, P&L, balances, buying power (read-only) |
 | Gate | Schwab | Live chain check. Overall PASS only if every rule passes. |
 | Kelly Lab | Local | Retired sizing illustration. Not the account model. |

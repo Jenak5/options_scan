@@ -4,12 +4,14 @@ import {
   marketDataGetUrl,
   alertDue,
   parseOptionChain,
+  parsePriceHistory,
   parseQuotes,
   parseTokenResponse,
   publicTokenStatus,
   refreshWarnSoon,
   TOKEN_URL,
   type ChainParseResult,
+  type PriceCandle,
   type SchwabPublicStatus,
   type StoredTokens,
 } from "@/app/lib/schwabParse";
@@ -29,6 +31,7 @@ import { sendTelegramAlert, telegramConfigured } from "@/app/lib/telegram";
  * - POST https://api.schwabapi.com/v1/oauth/token
  * - GET  https://api.schwabapi.com/marketdata/v1/chains
  * - GET  https://api.schwabapi.com/marketdata/v1/quotes
+ * - GET  https://api.schwabapi.com/marketdata/v1/pricehistory
  *
  * It never calls the trader API and never places an order.
  * Tokens stay in the server store. Do not put them in a response or a log.
@@ -131,6 +134,26 @@ export async function getOptionChain(input: {
   return parseOptionChain(payload);
 }
 
+const PRICE_HISTORY_SYMBOL = /^[A-Z][A-Z0-9.\-]{0,9}$/;
+
+/**
+ * Daily closes from Schwab price history. Same market-data token as chains.
+ * Three months is enough for 20-session realized vol. No orders.
+ */
+export async function getPriceHistory(symbol: string): Promise<PriceCandle[]> {
+  const ticker = symbol.trim().toUpperCase();
+  if (!PRICE_HISTORY_SYMBOL.test(ticker)) throw new Error("Schwab symbol was rejected");
+  const query = new URLSearchParams();
+  query.set("symbol", ticker);
+  query.set("periodType", "month");
+  query.set("period", "3");
+  query.set("frequencyType", "daily");
+  query.set("frequency", "1");
+  query.set("needExtendedHoursData", "false");
+  const payload = await marketDataGet("pricehistory", query);
+  return parsePriceHistory(payload);
+}
+
 export async function getQuotes(symbols: string[]): Promise<OptionContract[]> {
   const cleaned = symbols.map((symbol) => symbol.trim()).filter((symbol) => symbol.length > 0);
   if (cleaned.length === 0) return [];
@@ -216,7 +239,7 @@ async function refreshStored(stored: StoredTokens, now: number, depth = 0): Prom
   }
 }
 
-async function marketDataGet(path: "chains" | "quotes", query: URLSearchParams): Promise<unknown> {
+async function marketDataGet(path: "chains" | "quotes" | "pricehistory", query: URLSearchParams): Promise<unknown> {
   const url = marketDataGetUrl(path, query);
   const token = await getAccessToken();
   const res = await fetch(url, {
