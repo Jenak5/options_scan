@@ -24,9 +24,9 @@ export const MIN_CONTRACT_VOLUME = 100;
 export const MAX_BID_ASK_SPREAD_OF_MID = 0.05;
 
 /**
- * Daily stop. Two losses in a row and the gate is NO for the day.
- * The count is typed into the Gate and kept for that Chicago session.
- * It is not a broker fill log.
+ * Daily stop. Two losing closes in a row on the Chicago trading day and the
+ * gate is NO for the rest of that day. The count comes from the trade log.
+ * It is not a broker fill, and there is no weekly loss limit.
  */
 export const DAILY_STOP_CONSECUTIVE_LOSSES = 2;
 

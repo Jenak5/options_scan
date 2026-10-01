@@ -118,8 +118,9 @@ describe("alert book store", () => {
     expect(book.records[0].side).toBe("estimated at ask");
 
     expect(await rememberDailyLoss(2, NOW)).toBe(true);
-    expect(await currentDailyLoss(NOW)).toBe(2);
-    expect(await currentDailyLoss(new Date("2026-10-02T15:00:00Z"))).toBeNull();
+    expect((await loadAlertBook()).dailyLoss?.consecutiveLosses).toBe(2);
+    expect(await currentDailyLoss(NOW)).toBe(0);
+    expect(await currentDailyLoss(new Date("2026-10-02T15:00:00Z"))).toBe(0);
 
     const later = new Date(NOW.getTime() + 16 * 60 * 1000);
     const follow = await runAlertFollowUps(later, async () => ({ mid: 2.025 * 1.25, underlying: 101 }));

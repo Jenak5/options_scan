@@ -21,8 +21,15 @@ export const SCHWAB_BLOB_FLOW_PATH = "schwab/flow-snapshots.json";
 /**
  * Private blob for sent alerts, checkpoint quotes, and the loss count
  * last typed into the Gate. Not a token and not encrypted.
+ * The daily stop no longer reads that typed count. It reads the trade log.
  */
 export const SCHWAB_BLOB_ALERT_BOOK_PATH = "schwab/alert-book.json";
+
+/**
+ * Private blob for the manual trade log. Not a token and not encrypted.
+ * Same store as the alert book. No broker fills.
+ */
+export const SCHWAB_BLOB_TRADE_LOG_PATH = "schwab/trade-log.json";
 
 /**
  * Shortest cache lifetime the Blob SDK accepts (60 seconds).

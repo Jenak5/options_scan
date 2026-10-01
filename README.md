@@ -132,7 +132,9 @@ Status (`GET /api/schwab/status`, session required) reports connected, expired, 
 
 Volume snapshots for the flow scanner use the same store, on a separate key. Redis uses `oes:flow:snapshots`. Blob uses the private pathname `schwab/flow-snapshots.json`. That file is small JSON of prior contract volume. It is not a token and it is not encrypted. The token envelope at `schwab/tokens.json` is unchanged.
 
-Sent alerts use that same store again. Redis key `oes:alert:records`. Blob pathname `schwab/alert-book.json`, private. The file holds the checklist grade, the quote at send time, later midpoint checks, and the loss count last typed into the Gate for that Chicago day. It is not a token and it is not encrypted. No new environment variable. If none of the stores are set in production, alerts can still be sent, and the report stays empty.
+Sent alerts use that same store again. Redis key `oes:alert:records`. Blob pathname `schwab/alert-book.json`, private. The file holds the checklist grade, the quote at send time, and later midpoint checks. It is not a token and it is not encrypted. No new environment variable. If none of the stores are set in production, alerts can still be sent, and the report stays empty.
+
+The trade log uses that store too. Redis key `oes:trade:log`. Blob pathname `schwab/trade-log.json`, private. It holds trades typed by hand: ticker, call or put, strike, expiration, contracts, entry, and later the exit. It is not a token, it is not a broker fill, and nothing new has to be set.
 
 ## Estimated flow
 
@@ -169,7 +171,7 @@ Support and resistance come from that Schwab price history plus high-open-intere
 
 A call is favored when price is above support with room to the next resistance. A put is the mirror. The grade drops when a call is tight under resistance, a put is tight on support, or the reward to the next level is poor compared with the distance the other way. The letter can be an **A** only when those levels were computed. If price history is unavailable, the grade still stops at **B** and the checklist says so. Round numbers alone do not lift that cap. This is still a rules checklist, not a prediction of profit.
 
-If she types a loss count into the Gate, that count is kept for the Chicago session. Two losses in a row turns a TAKE into **STOP for today**. There is no broker fill log.
+The daily stop reads closed trades in the trade log for the Chicago day. Two losing closes in a row turn a TAKE into **STOP for today** for the rest of that day. A later win does not clear it. There is no weekly loss limit. A week down about 25% of the account ($750) is a flag on the log and the Flow tab, and it does not change the checklist.
 
 After a Telegram send, the cron stores the contract, the quote, the verdict, and the grade. Later runs re-read the Schwab chain and store the **mid** (not the last trade) and the underlying at about 15 minutes, 1 hour, and the close, plus the percent change in the option mid versus the alert mid. A missing quote or an expired contract is marked and skipped. The outcome label is **win** if the mid is up 20% or more at any of those checks, **miss** if the close mid is down 20% or more and nothing earlier won, and **flat** otherwise. Pending and unscored alerts are left out of the hit rate. That label is an estimate. It is not a fill and it is not trade profit or loss.
 
@@ -177,7 +179,7 @@ Alert Report (session required, same as the other tabs) lists recent alerts and 
 
 ## Trade gate
 
-`/gate` asks for the ticker, expiration, strike, call or put, contracts, and planned entry. It also asks for an underlying stop, a time stop, a profit-taking rule, and how many losses in a row she has today.
+`/gate` asks for the ticker, expiration, strike, call or put, contracts, and planned entry. It also asks for an underlying stop. The time stop and profit rule start from the exit defaults in `TRADE_RULES`, and she can edit the wording. The loss count is no longer typed. It comes from `/trades`.
 
 `POST /api/gate` (session required) reads the live Schwab chain and runs the checks in `app/lib/gate.ts`:
 
@@ -186,8 +188,10 @@ Alert Report (session required, same as the other tabs) lists recent alerts and 
 - Bid-ask spread is at most 5% of the midpoint
 - Max loss is at most $450. A long option is `contracts × ask × 100`. A debit spread is `contracts × strike width × 100` (the most that spread can be worth). Leave the width blank for a single option.
 - If one contract at the ask is already over $450, the result says so and suggests a debit spread
-- The three exit rules have to be filled in
-- Two losses in a row is a NO for the day. Type the count. That count is kept for the Chicago session and used by the checklist. It is not a broker fill log.
+- The underlying stop, time stop, and profit rule have to be filled in. Time and profit start from the exit defaults: take half off at +30% of the debit, stop at -25% of the debit and never more than $450, and be out by 3:00pm Chicago or if the trade is still flat after 60 minutes. A debit spread uses those same percents on the net debit. Change `TRADE_RULES` to tune them.
+- Two losing closes in a row, from the trade log, is a NO for the day. It is not a broker fill log.
+
+`/trades` (session required) is where a trade is entered and later closed. P&L, risk versus $450, the linked alert grade, hold time, and win, loss, or flat are on each row. The stats panel covers win rate, average win and loss, expectancy, P&L by grade and by TAKE, WATCH, and SKIP, and the week. CSV is `GET /api/trades?format=csv`.
 
 The result also shows the checklist grade for that contract. The Gate's own PASS or NO is unchanged.
 

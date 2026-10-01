@@ -6,7 +6,6 @@ import {
   buildStoredAlert,
   emptyBook,
   gradeOutcome,
-  lossCountForDay,
   parseAlertBook,
   planFollowUp,
   summarizeAlerts,
@@ -18,7 +17,8 @@ import {
 } from "@/app/lib/alertBook";
 import type { FlowRow } from "@/app/lib/flow";
 import { chicagoDate } from "@/app/lib/marketHours";
-import { readAlertBookText, updateAlertBook } from "@/app/lib/schwabStore";
+import { readAlertBookText, readTradeLogText, updateAlertBook } from "@/app/lib/schwabStore";
+import { dailyStopState, parseTradeLog, weeklyFlagSentence, weeklySummary } from "@/app/lib/trades";
 import type { AlertVerdict } from "@/app/lib/verdict";
 
 /**
@@ -30,9 +30,21 @@ export async function loadAlertBook(): Promise<AlertBook> {
   return parseAlertBook(await readAlertBookText());
 }
 
-export async function currentDailyLoss(now: Date): Promise<number | null> {
-  const book = await loadAlertBook();
-  return lossCountForDay(book, chicagoDate(now));
+/**
+ * Consecutive losing closes from the trade log for this Chicago day.
+ * A typed Gate count is not used. Zero when the log is empty or the store is down.
+ */
+export async function currentDailyLoss(now: Date): Promise<number> {
+  return (await loadRiskStatus(now)).stop.consecutiveLosses;
+}
+
+export async function loadRiskStatus(now: Date): Promise<{
+  stop: { tradingDay: string; consecutiveLosses: number; dailyStop: boolean };
+  weeklyNote: string | null;
+}> {
+  const log = parseTradeLog(await readTradeLogText());
+  const weekly = weeklySummary(log.trades, now);
+  return { stop: dailyStopState(log.trades, now), weeklyNote: weeklyFlagSentence(weekly) };
 }
 
 export async function rememberDailyLoss(consecutiveLosses: number, now: Date): Promise<boolean> {
