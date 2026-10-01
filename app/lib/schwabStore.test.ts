@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { StoredTokens } from "@/app/lib/schwabParse";
 import {
   SCHWAB_BLOB_CACHE_CONTROL_MAX_AGE,
+  SCHWAB_BLOB_FLOW_PATH,
   SCHWAB_BLOB_TOKEN_PATH,
 } from "@/app/lib/schwabStorage";
 import {
@@ -11,10 +12,12 @@ import {
   decryptTokenPayload,
   encryptTokenPayload,
   readAlertMeta,
+  readFlowSnapshots,
   readTokens,
   resolveStoreKind,
   setSchwabBlobClientForTests,
   writeAlertMeta,
+  writeFlowSnapshots,
   writeTokens,
   type SchwabBlobClient,
   type SchwabBlobGetOptions,
@@ -110,6 +113,21 @@ describe("token store", () => {
       if (previousVercel === undefined) delete process.env.VERCEL;
       else process.env.VERCEL = previousVercel;
     }
+  });
+
+  it("keeps flow volume snapshots in memory without calling the network", async () => {
+    expect(await readFlowSnapshots()).toEqual({});
+    await writeFlowSnapshots({
+      QQQ: { scannedAt: 1_700_000_000_000, volumes: { "2026-10-08|500|put": 120 } },
+    });
+    expect((await readFlowSnapshots()).QQQ.volumes["2026-10-08|500|put"]).toBe(120);
+    await writeFlowSnapshots({
+      SPY: { scannedAt: 1_700_000_000_100, volumes: { "2026-10-08|105|call": 10 } },
+    });
+    const book = await readFlowSnapshots();
+    expect(book.QQQ.volumes["2026-10-08|500|put"]).toBe(120);
+    expect(book.SPY.volumes["2026-10-08|105|call"]).toBe(10);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it("encrypts the payload so the token text is not stored in the clear", async () => {
@@ -259,6 +277,26 @@ describe("blob token store", () => {
     expect(options.access).toBe("private");
     const stored = mock.files.get(SCHWAB_BLOB_TOKEN_PATH)?.body ?? "";
     expect(stored.includes("fixture-refresh-next")).toBe(false);
+  });
+
+  it("stores volume snapshots on a separate pathname and leaves the token blob alone", async () => {
+    await writeTokens(tokens);
+    const tokenBody = mock.files.get(SCHWAB_BLOB_TOKEN_PATH)?.body;
+    await writeFlowSnapshots({
+      SPY: { scannedAt: 1_700_000_000_000, volumes: { "2026-10-08|105|call": 400 } },
+    });
+    expect(mock.files.get(SCHWAB_BLOB_TOKEN_PATH)?.body).toBe(tokenBody);
+    const flowBody = mock.files.get(SCHWAB_BLOB_FLOW_PATH)?.body ?? "";
+    expect(flowBody).toContain("2026-10-08|105|call");
+    expect(flowBody.includes("fixture-access")).toBe(false);
+    const book = await readFlowSnapshots();
+    expect(book.SPY.volumes["2026-10-08|105|call"]).toBe(400);
+    const flowPut = mock.put.mock.calls.find((call) => call[0] === SCHWAB_BLOB_FLOW_PATH);
+    expect(flowPut?.[2]).toMatchObject({
+      access: "private",
+      token: "fixture-blob-token",
+      addRandomSuffix: false,
+    });
   });
 
   it("does not put when the blob read fails", async () => {

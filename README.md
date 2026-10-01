@@ -8,13 +8,11 @@ Read-only scan-and-alert tool for a small personal options account ($3,000, max 
 
 | Tab | Source | What it does |
 |-----|--------|--------------|
-| Flow | Unusual Whales | Live options flow |
-| Dark Pool | Unusual Whales | Dark pool prints |
+| Flow | Schwab | Estimated flow from volume and open interest. Not sweeps. |
 | Vol Arb | Tastytrade | IV versus realized volatility |
 | Account | Tastytrade | Positions, P&L, balances, buying power (read-only) |
 | Gate | Schwab | Live chain check. Overall PASS only if every rule passes. |
 | Kelly Lab | Local | Retired sizing illustration. Not the account model. |
-| Chain | Tastytrade | Option chain quotes |
 | Research | Grok (xAI) | Chat grounded in the scanner's current data |
 | Alerts | Telegram | Test a Telegram alert; scheduled scans run from cron |
 
@@ -59,7 +57,6 @@ Set every secret in Vercel as a **Sensitive** variable. Do not leave them readab
 | `TASTYTRADE_REFRESH_TOKEN` | Yes | OAuth refresh token |
 | `TASTYTRADE_ACCOUNT_NUMBER` | Yes | Account to read |
 | `TASTYTRADE_ENV` | No | `production` for the live account. `sandbox` is the cert API. |
-| `UNUSUAL_WHALES_API_TOKEN` | Yes | Unusual Whales API token |
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | Yes | Chat that receives alerts |
 | `XAI_API_KEY` | Yes | Grok API key for screening and research |
@@ -71,9 +68,9 @@ Set every secret in Vercel as a **Sensitive** variable. Do not leave them readab
 | `UPSTASH_REDIS_REST_URL` | Yes | Upstash Redis REST URL. Used when the KV pair is not complete and both Upstash variables are set. |
 | `UPSTASH_REDIS_REST_TOKEN` | Yes | Upstash Redis REST token. Used when the KV pair is not complete and both Upstash variables are set. |
 | `BLOB_READ_WRITE_TOKEN` | Yes | Private Vercel Blob token. Used when neither Redis pair is complete. |
-| `ALERT_MIN_PREMIUM` | No | Alert filter |
-| `ALERT_SWEEPS_ONLY` | No | Alert filter |
-| `ALERT_OTM_ONLY` | No | Alert filter |
+| `ALERT_MIN_PREMIUM` | No | Minimum notional before a Telegram alert |
+| `ALERT_OTM_ONLY` | No | When `true`, alerts also require the contract to be out of the money |
+| `FLOW_WATCHLIST` | No | Comma-separated tickers for the flow scan and cron. Optional. |
 | `NEXT_PUBLIC_DEFAULT_WATCHLIST` | No | Browser-visible default tickers |
 
 Tastytrade auth is the **OAuth refresh-token grant only**. Do not set a tastytrade username or password. Username/password session login was removed by tastytrade on 2026-02-11.
@@ -129,6 +126,33 @@ If none of those are set **in production** (including on Vercel), the app does *
 Process memory is only for local development, when `NODE_ENV` is not `production` and `VERCEL` is not `1`. A restart drops that token.
 
 Status (`GET /api/schwab/status`, session required) reports connected, expired, and days left on the refresh token. It does not return the tokens.
+
+Volume snapshots for the flow scanner use the same store, on a separate key. Redis uses `oes:flow:snapshots`. Blob uses the private pathname `schwab/flow-snapshots.json`. That file is small JSON of prior contract volume. It is not a token and it is not encrypted. The token envelope at `schwab/tokens.json` is unchanged.
+
+## Estimated flow
+
+`GET /api/flow` (session required) scores option contracts from the Schwab chains endpoint. It does not call Unusual Whales, and it does not place orders.
+
+The label on the Flow tab is: estimated flow from Schwab volume/open interest, not true sweeps. Side is estimated by comparing the last price to the bid and ask. There is no sweep flag and no dark-pool tab.
+
+Each contract gets:
+
+- volume / open interest
+- volume minus open interest
+- notional premium, which is volume × midpoint × 100
+- distance out of the money, and days to expiration
+- spread quality
+- volume change since the previous same-day scan
+
+The default watchlist is SPY, QQQ, IWM, AAPL, NVDA, TSLA, AMD, AMZN, MSFT, META, GOOGL, PLTR, SOFI, NFLX, and COIN. Set `FLOW_WATCHLIST` to replace it. A ticker typed into the filter scans that symbol instead.
+
+Requests stay on the chains endpoint, with `range=NTM`, `strikeCount=6`, and a date window of 35 days. Schwab has no parameter for "four expirations," so after the response the scorer keeps the nearest four. Scans run in batches of three and stay under about 120 chain reads per minute. Results are cached for about 60 seconds.
+
+Illiquid contracts are hidden by default: open interest at least 500, volume at least 100, and bid-ask spread at most 5% of the midpoint. Those are the same bars as the Gate. The Flow tab has a checkbox to show the rest. Each row has **Check in Gate**, which opens `/gate` with the ticker, expiration, strike, call or put, and the midpoint as the planned entry.
+
+If Schwab is not connected, the tab says so and links to Reconnect Schwab.
+
+Cron still requires `Authorization: Bearer <CRON_SECRET>` before anything else. It alerts only on contracts that pass those liquidity filters, and only when notional is at least `ALERT_MIN_PREMIUM` (default $100,000). `ALERT_OTM_ONLY=true` also requires the contract to be out of the money. The Telegram text says the flow is estimated.
 
 ## Trade gate
 

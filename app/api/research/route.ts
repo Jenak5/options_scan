@@ -14,11 +14,11 @@ const XAI_API    = "https://api.x.ai/v1/chat/completions";
 const MODEL      = "grok-3-fast";
 const MAX_TOKENS = 1024;
 
-const SYSTEM_PROMPT = `You are a sharp options trading research assistant embedded in a live options scanner. You have direct access to real-time data from the scanner including options flow alerts, dark pool prints, and volatility metrics.
+const SYSTEM_PROMPT = `You are a sharp options trading research assistant embedded in a live options scanner. You have the scanner's current estimated options flow and volatility metrics. Estimated flow comes from Schwab volume and open interest. It is not a sweep print and there is no dark-pool feed.
 
 Your job is to help the trader interpret signals, research tickers, and think through trade ideas — combining the live scanner data you're given with your knowledge of markets, options mechanics, and trading.
 
-Be direct and specific. Lead with the signal, not the caveat. Use the scanner data provided in each message to ground your answers. If you see something interesting in the data that the trader didn't ask about, mention it briefly.
+Be direct and specific. Lead with the signal, not the caveat. Use the scanner data provided in each message to ground your answers. If you see something interesting in the data that the trader didn't ask about, mention it briefly. Say when a side is estimated.
 
 Format numbers cleanly: $1.2M not $1200000, 65% not 0.65, etc.
 Keep responses focused and scannable — use short paragraphs or bullet points, not walls of text.
@@ -63,20 +63,20 @@ export async function POST(request: NextRequest) {
     }
 
     if (context.flows && context.flows.length > 0) {
-      parts.push("\nRECENT OPTIONS FLOW (last 10):");
+      parts.push("\nESTIMATED OPTIONS FLOW (Schwab volume/open interest, not sweeps):");
       for (const f of context.flows.slice(0, 10)) {
-        const typeStr = (f.type ?? f.put_call ?? "").toLowerCase();
-        const premium = parseFloat(f.total_premium ?? "0");
+        const typeStr = String(f.putCall ?? f.type ?? f.put_call ?? "").toLowerCase();
+        const premium = Number(f.notionalPremium ?? f.total_premium ?? 0);
         const premStr = premium >= 1_000_000 ? `$${(premium / 1_000_000).toFixed(1)}M`
                       : premium >= 1_000     ? `$${(premium / 1_000).toFixed(0)}K`
                       : `$${premium}`;
-        const askPrem = parseFloat(f.total_ask_side_prem ?? "0");
-        const bidPrem = parseFloat(f.total_bid_side_prem ?? "0");
-        const ratio   = (askPrem + bidPrem) > 0 ? askPrem / (askPrem + bidPrem) : null;
-        const side    = ratio === null ? "" : ratio >= 0.65 ? " ASK-SIDE" : ratio <= 0.35 ? " BID-SIDE" : " MID";
-        const sweep   = (f.has_sweep || f.is_sweep) ? " SWEEP" : "";
-        const opening = f.all_opening_trades === true ? " OPENING" : f.all_opening_trades === false ? " CLOSING" : "";
-        parts.push(`  ${f.ticker} ${typeStr.toUpperCase()} $${f.strike} exp ${f.expiry ?? "?"} ${premStr}${side}${sweep}${opening} IV=${f.iv_start ? (parseFloat(f.iv_start) * 100).toFixed(0) + "%" : "?"}`);
+        const side = f.side ? ` ${f.side}` : "";
+        const volOi = f.volOiRatio != null ? ` vol/OI ${Number(f.volOiRatio).toFixed(2)}x` : "";
+        const jump = f.volumeJump != null ? ` jump ${f.volumeJump}` : "";
+        const ivRaw = f.iv ?? f.iv_start;
+        const iv = ivRaw != null && Number(ivRaw) > 0 ? ` IV ${(Number(ivRaw) <= 1 ? Number(ivRaw) * 100 : Number(ivRaw)).toFixed(0)}%` : "";
+        const expiry = f.expiration ?? f.expiry ?? "?";
+        parts.push(`  ${f.ticker} ${typeStr.toUpperCase()} $${f.strike} exp ${expiry} ${premStr}${side}${volOi}${jump}${iv}`);
       }
     }
 

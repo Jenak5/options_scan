@@ -110,6 +110,10 @@ export async function getOptionChain(input: {
   strike?: number;
   fromDate?: string;
   toDate?: string;
+  /** Schwab chain range. NTM keeps the scan near the money. */
+  range?: "ITM" | "NTM" | "OTM" | "ALL";
+  /** Strikes above and below the money. Still the chains endpoint. */
+  strikeCount?: number;
 }): Promise<ChainParseResult> {
   const query = new URLSearchParams();
   query.set("symbol", input.symbol);
@@ -119,6 +123,10 @@ export async function getOptionChain(input: {
   if (input.strike != null) query.set("strike", String(input.strike));
   if (input.fromDate) query.set("fromDate", input.fromDate);
   if (input.toDate) query.set("toDate", input.toDate);
+  if (input.range) query.set("range", input.range);
+  if (input.strikeCount != null && Number.isInteger(input.strikeCount) && input.strikeCount > 0) {
+    query.set("strikeCount", String(input.strikeCount));
+  }
   const payload = await marketDataGet("chains", query);
   return parseOptionChain(payload);
 }

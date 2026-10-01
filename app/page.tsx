@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { SchwabBanner } from "@/app/components/SchwabBanner";
+import { FLOW_DISCLAIMER, gateCheckHref, type FlowRow } from "@/app/lib/flow";
 import { ACCOUNT_SIZE_DOLLARS, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 
 // ─── API helpers ───────────────────────────────────────────────────────────
@@ -13,8 +14,7 @@ async function fetchApi(base: string, params: Record<string, string>) {
   if (json.error) throw new Error(json.error);
   return json.data;
 }
-const tt = (p: Record<string, string>) => fetchApi("/api/tastytrade",    p);
-const uw = (p: Record<string, string>) => fetchApi("/api/unusualwhales", p);
+const tt = (p: Record<string, string>) => fetchApi("/api/tastytrade", p);
 
 // ─── Safe number helpers ───────────────────────────────────────────────────
 function safeNum(v: unknown, fallback = 0): number {
@@ -113,97 +113,68 @@ const BTN = (color: "cyan" | "gray" | "ghost"): React.CSSProperties => {
   return { background: map.bg, color: map.fg, border: `1px solid ${map.border}`, borderRadius: 6, padding: "8px 16px", fontSize: 15, cursor: "pointer" };
 };
 
-// ─── Side badge ────────────────────────────────────────────────────────────
-function SideBadge({ ratio }: { ratio: number | null }) {
-  if (ratio === null) return <Badge color="gray">—</Badge>;
-  if (ratio >= 0.65)  return <Badge color="green">AT ASK ▲</Badge>;
-  if (ratio <= 0.35)  return <Badge color="red">AT BID ▼</Badge>;
-  return <Badge color="amber">MID ↔</Badge>;
-}
-
-// ─── Opening / Closing badge ───────────────────────────────────────────────
-function OpenCloseBadge({ allOpening, volOiRatio }: { allOpening?: boolean | null; volOiRatio?: number | null }) {
-  if (allOpening === true  || (volOiRatio != null && volOiRatio > 1))    return <Badge color="cyan">OPENING</Badge>;
-  if (allOpening === false || (volOiRatio != null && volOiRatio <= 0.2)) return <Badge color="gray">CLOSING</Badge>;
-  return null;
-}
-
-// ─── Premium breakdown bar ─────────────────────────────────────────────────
-function PremiumBar({ askPrem, bidPrem, total }: { askPrem: number; bidPrem: number; total: number }) {
-  const sum = askPrem + bidPrem;
-  if (sum === 0) {
-    return <span style={{ color: "#f59e0b", fontWeight: 600, fontFamily: "monospace", fontSize: 15 }}>{fmtPremium(total)}</span>;
-  }
-  const askPct = Math.round((askPrem / sum) * 100);
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 90 }}>
-      <span style={{ color: "#f59e0b", fontWeight: 600, fontFamily: "monospace", fontSize: 15 }}>{fmtPremium(total)}</span>
-      <div style={{ display: "flex", height: 5, borderRadius: 2, overflow: "hidden", background: "rgba(255,255,255,0.06)" }}>
-        <div style={{ width: `${askPct}%`, background: "#10b981" }} />
-        <div style={{ width: `${100 - askPct}%`, background: "#ef4444" }} />
-      </div>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#64748b" }}>
-        <span style={{ color: "#10b981" }}>Ask {fmtPremium(askPrem)}</span>
-        <span style={{ color: "#ef4444" }}>Bid {fmtPremium(bidPrem)}</span>
-      </div>
-    </div>
-  );
+function SideBadge({ side }: { side: FlowRow["side"] }) {
+  if (side === "estimated at ask") return <Badge color="green">EST ASK ▲</Badge>;
+  if (side === "estimated at bid") return <Badge color="red">EST BID ▼</Badge>;
+  if (side === "estimated mid") return <Badge color="amber">EST MID ↔</Badge>;
+  return <Badge color="gray">EST —</Badge>;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// FLOW SCANNER
+// FLOW SCANNER  — estimated from Schwab volume and open interest
 // ═══════════════════════════════════════════════════════════════════════════
-interface FlowAlert {
-  id?: string;
-  ticker?: string;
-  strike?: string | number;
-  type?: string;
-  put_call?: string;
-  expiry?: string | null;
-  total_premium?: string | number | null;
-  total_ask_side_prem?: string | number | null;
-  total_bid_side_prem?: string | number | null;
-  all_opening_trades?: boolean | null;
-  volume_oi_ratio?: string | number | null;
-  total_size?: number | null;
-  size?: number | null;
-  open_interest?: number | null;
-  iv_start?: string | number | null;
-  iv?: string | number | null;
-  has_sweep?: boolean;
-  is_sweep?: boolean;
-  is_golden_sweep?: boolean;
-  alert_rule?: string;
-}
-
 function FlowTab() {
-  const [flows, setFlows] = useState<FlowAlert[]>([]);
+  const [flows, setFlows] = useState<FlowRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [filters, setFilters] = useState({ ticker: "", sweepsOnly: false, minPremium: "50000", otmOnly: false });
+  const [disconnected, setDisconnected] = useState(false);
+  const [reconnect, setReconnect] = useState("/api/schwab/connect");
+  const [disclaimer, setDisclaimer] = useState(FLOW_DISCLAIMER);
+  const [partial, setPartial] = useState<string[]>([]);
+  const [filters, setFilters] = useState({ ticker: "", minPremium: "50000", otmOnly: false, liquidOnly: true });
 
-  const load = useCallback(async () => {
-    setLoading(true); setError(null);
+  const load = useCallback(async (fresh = false) => {
+    setLoading(true); setError(null); setDisconnected(false); setPartial([]);
     try {
-      const p: Record<string, string> = { action: "flow", limit: "60", min_premium: filters.minPremium };
-      if (filters.ticker)     p.ticker   = filters.ticker;
-      if (filters.sweepsOnly) p.is_sweep = "true";
-      if (filters.otmOnly)    p.is_otm   = "true";
-      setFlows(await uw(p));
+      const url = new URL("/api/flow", window.location.origin);
+      if (filters.ticker) url.searchParams.set("ticker", filters.ticker);
+      if (filters.minPremium) url.searchParams.set("minPremium", filters.minPremium);
+      if (filters.otmOnly) url.searchParams.set("otmOnly", "true");
+      if (!filters.liquidOnly) url.searchParams.set("liquidOnly", "false");
+      if (fresh) url.searchParams.set("fresh", "true");
+      url.searchParams.set("limit", "80");
+      const res = await fetch(url.toString());
+      const json = await res.json();
+      if (typeof json.disclaimer === "string") setDisclaimer(json.disclaimer);
+      if (json.connected === false || res.status === 409 || res.status === 503) {
+        setDisconnected(true);
+        setReconnect(typeof json.reconnect === "string" ? json.reconnect : "");
+        setError(typeof json.error === "string" ? json.error : "Schwab is not connected. Use Reconnect Schwab.");
+        setFlows([]);
+        return;
+      }
+      if (!res.ok || json.error) throw new Error(json.error || "Flow scan failed");
+      setFlows(Array.isArray(json.data) ? json.data : []);
+      const missed = Array.isArray(json.errors) ? json.errors.map((item: { ticker?: string }) => item.ticker).filter(Boolean) : [];
+      setPartial(missed);
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
   }, [filters]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(false); }, [load]);
 
   return (
     <div>
-      {/* Filters */}
+      <div style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.28)", borderRadius: 8, padding: "10px 14px", marginBottom: 12, color: "#fbbf24", fontSize: 14, lineHeight: 1.45 }}>
+        {disclaimer}
+      </div>
+
       <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
         <input placeholder="Ticker…" value={filters.ticker}
           onChange={(e) => setFilters({ ...filters, ticker: e.target.value.toUpperCase() })}
           style={{ ...INPUT, width: 110 }} />
         <select value={filters.minPremium} onChange={(e) => setFilters({ ...filters, minPremium: e.target.value })} style={{ ...INPUT, cursor: "pointer" }}>
+          <option value="0">Any premium</option>
           <option value="10000">$10K+ prem</option>
           <option value="50000">$50K+ prem</option>
           <option value="100000">$100K+ prem</option>
@@ -211,154 +182,86 @@ function FlowTab() {
           <option value="1000000">$1M+ prem</option>
         </select>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 15, color: "#94a3b8", cursor: "pointer" }}>
-          <input type="checkbox" checked={filters.sweepsOnly} onChange={(e) => setFilters({ ...filters, sweepsOnly: e.target.checked })} />
-          Sweeps only
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 15, color: "#94a3b8", cursor: "pointer" }}>
           <input type="checkbox" checked={filters.otmOnly} onChange={(e) => setFilters({ ...filters, otmOnly: e.target.checked })} />
           OTM only
         </label>
-        <button onClick={load} style={BTN("cyan")}>↻ Refresh</button>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 15, color: "#94a3b8", cursor: "pointer" }}>
+          <input type="checkbox" checked={filters.liquidOnly} onChange={(e) => setFilters({ ...filters, liquidOnly: e.target.checked })} />
+          Liquid only (OI ≥ 500, vol ≥ 100, spread ≤ 5%)
+        </label>
+        <button onClick={() => load(true)} style={BTN("cyan")}>↻ Refresh</button>
       </div>
 
-      {/* Legend */}
       <div style={{ display: "flex", gap: 16, marginBottom: 12, padding: "8px 14px", background: "rgba(255,255,255,0.025)", borderRadius: 6, flexWrap: "wrap" }}>
-        <span style={{ color: "#64748b", fontSize: 13, fontWeight: 700 }}>SIDE</span>
-        <span style={{ color: "#10b981", fontSize: 13 }}>▲ AT ASK — buyer-initiated (bullish)</span>
-        <span style={{ color: "#ef4444", fontSize: 13 }}>▼ AT BID — seller-initiated (bearish)</span>
-        <span style={{ color: "#f59e0b", fontSize: 13 }}>↔ MID — split fills</span>
-        <span style={{ color: "#64748b", fontSize: 13, fontWeight: 700, marginLeft: 8 }}>POSITION</span>
-        <span style={{ color: "#06b6d4", fontSize: 13 }}>OPENING — new contracts</span>
-        <span style={{ color: "#64748b", fontSize: 13 }}>CLOSING — exiting</span>
+        <span style={{ color: "#64748b", fontSize: 13, fontWeight: 700 }}>ESTIMATED SIDE</span>
+        <span style={{ color: "#10b981", fontSize: 13 }}>▲ EST ASK — last price near the ask</span>
+        <span style={{ color: "#ef4444", fontSize: 13 }}>▼ EST BID — last price near the bid</span>
+        <span style={{ color: "#f59e0b", fontSize: 13 }}>↔ EST MID — last price between</span>
+        <span style={{ color: "#64748b", fontSize: 13 }}>Premium is volume × mid × 100. Vol jump is the change since the last same-day scan.</span>
       </div>
+
+      {disconnected && (
+        <div style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.35)", borderRadius: 8, padding: "16px 18px", marginBottom: 12 }}>
+          <div style={{ color: "#fbbf24", fontSize: 15, fontWeight: 700, marginBottom: 8 }}>{error}</div>
+          {reconnect && <a href={reconnect} style={{ color: "#06b6d4", fontWeight: 700 }}>Reconnect Schwab</a>}
+        </div>
+      )}
 
       {loading && <Spinner />}
-      {error   && <ErrorBox message={error} onRetry={load} />}
+      {!disconnected && error && <ErrorBox message={error} onRetry={() => load(true)} />}
+      {!loading && partial.length > 0 && (
+        <div style={{ color: "#f59e0b", fontSize: 13, marginBottom: 8 }}>Some tickers did not load: {partial.join(", ")}</div>
+      )}
 
-      {!loading && !error && (
+      {!loading && !error && !disconnected && (
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ borderBottom: "2px solid rgba(255,255,255,0.1)" }}>
-                {["Ticker","Type","Strike","Expiry","Premium / Split","Size","OI","Vol/OI","IV","Side","Position","Flags"].map((h) => (
-                  <th key={h} style={TH}>{h}</th>
+                {["Ticker","Type","Strike","Expiry","Premium","Volume","OI","Vol/OI","Vol jump","IV","Side","DTE","Spread","Score",""].map((h) => (
+                  <th key={h || "gate"} style={TH}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {flows.length === 0 && (
-                <tr><td colSpan={12} style={{ ...TD, textAlign: "center", color: "#475569" }}>No flow alerts match current filters.</td></tr>
+                <tr><td colSpan={15} style={{ ...TD, textAlign: "center", color: "#475569" }}>No estimated flow matches these filters.</td></tr>
               )}
               {flows.map((f, i) => {
-                const premium  = safeNum(f.total_premium, 0);
-                const typeStr  = (f.type ?? f.put_call ?? "").toLowerCase();
-                const isCall   = typeStr === "call";
-                const askPrem  = safeNum(f.total_ask_side_prem, 0);
-                const bidPrem  = safeNum(f.total_bid_side_prem, 0);
-                const premSum  = askPrem + bidPrem;
-                const sideRatio: number | null = premSum > 0 ? askPrem / premSum : null;
-                const iv       = safeNum(f.iv_start ?? f.iv, 0);
-                const volOi    = f.volume_oi_ratio != null ? safeNum(f.volume_oi_ratio, 0) : null;
-                const size     = f.total_size ?? f.size ?? null;
-                const isSweep  = f.has_sweep || f.is_sweep || (f.alert_rule ?? "").toLowerCase().includes("sweep");
-                const isGolden = f.is_golden_sweep;
-
+                const isCall = f.putCall === "call";
+                const iv = f.iv != null ? f.iv : 0;
                 return (
-                  <tr key={f.id ?? i} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)", background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.015)" }}>
+                  <tr key={f.id || i} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)", background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.015)" }}>
                     <td style={{ ...TD_MONO, fontWeight: 700, color: "#e2e8f0" }}>{f.ticker}</td>
                     <td style={TD}><Badge color={isCall ? "green" : "red"}>{isCall ? "CALL" : "PUT"}</Badge></td>
-                    <td style={{ ...TD_MONO, color: "#94a3b8" }}>{f.strike ? `$${f.strike}` : "—"}</td>
-                    <td style={{ ...TD, color: "#94a3b8", whiteSpace: "nowrap" }}>{fmtDate(f.expiry)}</td>
-                    <td style={TD}><PremiumBar total={premium} askPrem={askPrem} bidPrem={bidPrem} /></td>
-                    <td style={{ ...TD_MONO, color: "#e2e8f0" }}>{size?.toLocaleString() ?? "—"}</td>
-                    <td style={{ ...TD_MONO, color: "#64748b" }}>{f.open_interest?.toLocaleString() ?? "—"}</td>
+                    <td style={{ ...TD_MONO, color: "#94a3b8" }}>${f.strike}</td>
+                    <td style={{ ...TD, color: "#94a3b8", whiteSpace: "nowrap" }}>{fmtDate(f.expiration)}</td>
+                    <td style={{ ...TD_MONO, color: "#f59e0b", fontWeight: 600 }}>{fmtPremium(f.notionalPremium)}</td>
+                    <td style={{ ...TD_MONO, color: "#e2e8f0" }}>{Number.isFinite(f.volume) ? f.volume.toLocaleString() : "—"}</td>
+                    <td style={{ ...TD_MONO, color: "#64748b" }}>{Number.isFinite(f.openInterest) ? f.openInterest.toLocaleString() : "—"}</td>
                     <td style={TD_MONO}>
-                      {volOi != null ? (
-                        <span style={{ color: volOi > 1 ? "#06b6d4" : volOi < 0.2 ? "#64748b" : "#94a3b8" }}>{fmt(volOi, 2)}x</span>
+                      {f.volOiRatio != null ? (
+                        <span style={{ color: f.volumeExceedsOi ? "#06b6d4" : "#94a3b8" }}>{fmt(f.volOiRatio, 2)}x</span>
                       ) : "—"}
                     </td>
-                    <td style={TD}>
-                      {iv > 0 ? (
-                        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                          <span style={{ color: "#a855f7", fontFamily: "monospace", fontSize: 15 }}>{fmt(iv * 100, 0)}%</span>
-                          <div style={{ width: 44, height: 4, background: "rgba(255,255,255,0.06)", borderRadius: 2, overflow: "hidden" }}>
-                            <div style={{ width: `${Math.min(iv / 2 * 100, 100)}%`, height: "100%", background: "#a855f7" }} />
-                          </div>
-                        </div>
+                    <td style={TD_MONO}>
+                      {f.volumeJump != null ? (
+                        <span style={{ color: f.volumeJump > 0 ? "#06b6d4" : "#64748b" }}>{f.volumeJump > 0 ? "+" : ""}{Math.round(f.volumeJump).toLocaleString()}</span>
                       ) : "—"}
                     </td>
-                    <td style={TD}><SideBadge ratio={sideRatio} /></td>
-                    <td style={TD}><OpenCloseBadge allOpening={f.all_opening_trades} volOiRatio={volOi} /></td>
+                    <td style={{ ...TD_MONO, color: "#a855f7" }}>{iv > 0 ? `${fmt(iv * 100, 0)}%` : "—"}</td>
+                    <td style={TD} title={f.sideNote}><SideBadge side={f.side} /></td>
+                    <td style={{ ...TD_MONO, color: "#94a3b8" }}>{f.dte != null ? `${f.dte}d` : "—"}</td>
+                    <td style={{ ...TD_MONO, color: f.spreadQuality === "wide" ? "#ef4444" : "#94a3b8" }}>
+                      {f.spreadFraction != null ? `${(f.spreadFraction * 100).toFixed(1)}%` : "—"}
+                    </td>
+                    <td style={{ ...TD_MONO, color: "#e2e8f0" }}>{fmt(f.score, 0)}</td>
                     <td style={TD}>
-                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                        {isGolden && <Badge color="amber">GOLDEN ★</Badge>}
-                        {isSweep  && <Badge color="cyan">SWEEP</Badge>}
-                      </div>
+                      <a href={gateCheckHref(f)} style={{ color: "#06b6d4", fontWeight: 700, fontSize: 13, whiteSpace: "nowrap" }}>Check in Gate</a>
                     </td>
                   </tr>
                 );
               })}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// DARK POOL
-// ═══════════════════════════════════════════════════════════════════════════
-interface DarkPrint { ticker?: string; price?: number | null; size?: number | null; notional?: number | null; date?: string | null; exchange?: string | null; premium?: number | null; }
-
-function DarkPoolTab() {
-  const [prints, setPrints] = useState<DarkPrint[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error,   setError]   = useState<string | null>(null);
-  const [ticker,  setTicker]  = useState("");
-
-  const load = useCallback(async () => {
-    setLoading(true); setError(null);
-    try {
-      const p: Record<string, string> = { action: "darkpool", limit: "50" };
-      if (ticker) p.ticker = ticker;
-      setPrints(await uw(p));
-    } catch (e: any) { setError(e.message); }
-    finally { setLoading(false); }
-  }, [ticker]);
-
-  useEffect(() => { load(); }, [load]);
-
-  return (
-    <div>
-      <div style={{ display: "flex", gap: 10, marginBottom: 16, alignItems: "center" }}>
-        <input placeholder="Filter ticker…" value={ticker} onChange={(e) => setTicker(e.target.value.toUpperCase())} style={{ ...INPUT, width: 140 }} />
-        <button onClick={load} style={BTN("cyan")}>↻ Refresh</button>
-      </div>
-      {loading && <Spinner />}
-      {error   && <ErrorBox message={error} onRetry={load} />}
-      {!loading && !error && (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ borderBottom: "2px solid rgba(255,255,255,0.1)" }}>
-                {["Ticker","Price","Size","Notional","Exchange","Time"].map((h) => (
-                  <th key={h} style={TH}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {prints.length === 0 && <tr><td colSpan={6} style={{ ...TD, textAlign: "center", color: "#475569" }}>No dark pool prints found.</td></tr>}
-              {prints.map((p, i) => (
-                <tr key={i} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)", background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.015)" }}>
-                  <td style={{ ...TD_MONO, fontWeight: 700, color: "#e2e8f0" }}>{p.ticker}</td>
-                  <td style={{ ...TD_MONO, color: "#94a3b8" }}>{p.price != null ? `$${fmt(p.price, 2)}` : "—"}</td>
-                  <td style={{ ...TD_MONO, color: "#e2e8f0" }}>{p.size?.toLocaleString() ?? "—"}</td>
-                  <td style={{ ...TD, color: "#f59e0b", fontWeight: 600 }}>{fmtPremium(p.notional ?? p.premium)}</td>
-                  <td style={{ ...TD, color: "#64748b" }}>{p.exchange ?? "OTC"}</td>
-                  <td style={{ ...TD, color: "#64748b" }}>{fmtDate(p.date)}</td>
-                </tr>
-              ))}
             </tbody>
           </table>
         </div>
@@ -647,206 +550,6 @@ function KellyTab() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// OPTION CHAIN  — powered by Unusual Whales
-// ★ Confirmed field names from live API response:
-//   option_symbol, volume, implied_volatility, open_interest,
-//   last_price, nbbo_ask, nbbo_bid, avg_price,
-//   ask_volume, bid_volume, mid_volume, sweep_volume, total_premium
-// ★ Strike, expiry, and option type are ALL encoded in option_symbol (OCC format)
-//   e.g. "SPY   260327C00660000"
-//        └ticker┘└YYMMDD┘└C/P┘└strike×1000┘
-// ═══════════════════════════════════════════════════════════════════════════
-interface UWContract {
-  option_symbol?:       string;
-  implied_volatility?:  number | string;
-  nbbo_bid?:            number | string;
-  nbbo_ask?:            number | string;
-  last_price?:          number | string;
-  avg_price?:           number | string;
-  volume?:              number | string;
-  open_interest?:       number | string;
-  prev_oi?:             number | string;
-  total_premium?:       number | string;
-  ask_volume?:          number | string;
-  bid_volume?:          number | string;
-  sweep_volume?:        number | string;
-}
-
-// ── OCC symbol parser ─────────────────────────────────────────────────────
-// OCC format (padded): "SPY   260327C00660000"
-// Compact format:      "SPY260327C00660000"
-// Fields: ticker (1-6 chars) | YYMMDD | C/P | strike*1000 (8 digits)
-interface ParsedOCC {
-  expiry:    string;  // "2026-03-27"
-  optType:   "C" | "P";
-  strike:    number;  // 660.0
-}
-
-function parseOCC(sym: string): ParsedOCC | null {
-  if (!sym) return null;
-  const s = sym.replace(/\s+/g, ""); // strip padding spaces
-  const m = s.match(/^[A-Z1-9]+(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/i);
-  if (!m) return null;
-  const [, yy, mm, dd, cp, strikePad] = m;
-  return {
-    expiry:  `20${yy}-${mm}-${dd}`,
-    optType: cp.toUpperCase() as "C" | "P",
-    strike:  parseInt(strikePad, 10) / 1000,
-  };
-}
-
-function extractExpiry(c: UWContract): string {
-  return parseOCC(c.option_symbol ?? "")?.expiry ?? "";
-}
-
-interface ChainRow { strike: number; call: UWContract | null; put: UWContract | null; }
-
-function buildChainRows(contracts: UWContract[]): ChainRow[] {
-  const map = new Map<number, ChainRow>();
-  for (const c of contracts) {
-    const parsed = parseOCC(c.option_symbol ?? "");
-    if (!parsed) continue;
-    const { strike, optType } = parsed;
-    if (!map.has(strike)) map.set(strike, { strike, call: null, put: null });
-    const row = map.get(strike)!;
-    if (optType === "C") row.call = c;
-    else                 row.put  = c;
-  }
-  return Array.from(map.values()).sort((a, b) => a.strike - b.strike);
-}
-
-function fmtChainIV(c: UWContract | null): string {
-  if (!c) return "—";
-  const raw = safeNum(c.implied_volatility, NaN);
-  if (isNaN(raw) || raw === 0) return "—";
-  // UW returns IV as decimal (0–1) — multiply × 100 for display
-  return `${(raw * 100).toFixed(0)}%`;
-}
-function fmtChainBid(c: UWContract | null): string {
-  if (!c) return "—";
-  const v = safeNum(c.nbbo_bid, NaN);
-  return isNaN(v) ? "—" : `$${v.toFixed(2)}`;
-}
-function fmtChainAsk(c: UWContract | null): string {
-  if (!c) return "—";
-  const v = safeNum(c.nbbo_ask, NaN);
-  return isNaN(v) ? "—" : `$${v.toFixed(2)}`;
-}
-
-function ChainTab() {
-  const [ticker,       setTicker]       = useState("SPY");
-  const [input,        setInput]        = useState("SPY");
-  const [expiries,     setExpiries]     = useState<string[]>([]);
-  const [selExp,       setSelExp]       = useState("");
-  const [rows,         setRows]         = useState<ChainRow[]>([]);
-  const [allContracts, setAllContracts] = useState<UWContract[]>([]);
-  const [loading,      setLoading]      = useState(false);
-  const [error,        setError]        = useState<string | null>(null);
-
-  // Fetch all contracts → extract expiries from OCC symbols → auto-select nearest
-  const loadAll = useCallback(async (sym: string) => {
-    setLoading(true); setError(null); setExpiries([]); setRows([]); setAllContracts([]);
-    try {
-      const contracts: UWContract[] = await uw({ action: "option-chain", ticker: sym });
-      const dateSet = new Set<string>();
-      for (const c of contracts) {
-        const d = extractExpiry(c);
-        if (d) dateSet.add(d);
-      }
-      const dates = Array.from(dateSet).sort();
-      setAllContracts(contracts);
-      setExpiries(dates);
-
-      const today = new Date().toISOString().slice(0, 10);
-      const first = dates.find((d) => d > today) ?? dates[0] ?? "";
-      setSelExp(first);
-      if (first) setRows(buildChainRows(contracts.filter((c) => extractExpiry(c) === first)));
-    } catch (e: any) { setError(e.message); }
-    finally { setLoading(false); }
-  }, []);
-
-  const handleExpChange = (exp: string) => {
-    setSelExp(exp);
-    const filtered = allContracts.filter((c) => extractExpiry(c) === exp);
-    if (filtered.length > 0) setRows(buildChainRows(filtered));
-  };
-
-  useEffect(() => { if (ticker) loadAll(ticker); }, [ticker]);
-
-  return (
-    <div>
-      <div style={{ display: "flex", gap: 10, marginBottom: 16, alignItems: "center", flexWrap: "wrap" }}>
-        <input value={input} onChange={(e) => setInput(e.target.value.toUpperCase())}
-          onKeyDown={(e) => e.key === "Enter" && setTicker(input)}
-          placeholder="Ticker…" style={{ ...INPUT, width: 120 }} />
-        <button onClick={() => setTicker(input)} style={BTN("cyan")}>Load Chain</button>
-        {expiries.length > 0 && (
-          <select value={selExp} onChange={(e) => handleExpChange(e.target.value)} style={{ ...INPUT, cursor: "pointer" }}>
-            {expiries.map((ex) => <option key={ex} value={ex}>{fmtDate(ex)}</option>)}
-          </select>
-        )}
-        {ticker && <button onClick={() => loadAll(ticker)} style={BTN("gray")}>↻ Refresh</button>}
-      </div>
-
-      <div style={{ background: "rgba(6,182,212,0.06)", border: "1px solid rgba(6,182,212,0.15)", borderRadius: 8, padding: "8px 16px", marginBottom: 14, fontSize: 13, color: "#67e8f9" }}>
-        Unusual Whales · NBBO bid/ask · IV · Volume breakdown per strike
-      </div>
-
-      {loading && <Spinner />}
-      {error   && <ErrorBox message={error} />}
-
-      {!loading && !error && rows.length === 0 && (
-        <div style={{ textAlign: "center", padding: 48, color: "#475569", fontSize: 15 }}>
-          Enter a ticker and click Load Chain.
-        </div>
-      )}
-
-      {!loading && !error && rows.length > 0 && (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ borderBottom: "2px solid rgba(255,255,255,0.1)" }}>
-                <th style={{ ...TH_C, color: "#10b981" }}>Call Bid</th>
-                <th style={{ ...TH_C, color: "#10b981" }}>Call Ask</th>
-                <th style={{ ...TH_C, color: "#10b981" }}>Call IV</th>
-                <th style={{ ...TH_C, color: "#10b981" }}>Call Vol</th>
-                <th style={{ ...TH_C, background: "rgba(255,255,255,0.04)", color: "#e2e8f0", fontSize: 15 }}>STRIKE</th>
-                <th style={{ ...TH_C, color: "#ef4444" }}>Put Vol</th>
-                <th style={{ ...TH_C, color: "#ef4444" }}>Put IV</th>
-                <th style={{ ...TH_C, color: "#ef4444" }}>Put Bid</th>
-                <th style={{ ...TH_C, color: "#ef4444" }}>Put Ask</th>
-                <th style={{ ...TH_C, color: "#64748b" }}>OI</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r, i) => {
-                const callVol = safeNum(r.call?.volume, 0);
-                const putVol  = safeNum(r.put?.volume,  0);
-                const oi      = safeNum(r.call?.open_interest ?? r.put?.open_interest, 0);
-                return (
-                  <tr key={r.strike} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)", background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.015)" }}>
-                    <td style={{ ...TD_MONO_C, color: "#10b981" }}>{fmtChainBid(r.call)}</td>
-                    <td style={{ ...TD_MONO_C, color: "#10b981" }}>{fmtChainAsk(r.call)}</td>
-                    <td style={{ ...TD_MONO_C, color: "#10b981" }}>{fmtChainIV(r.call)}</td>
-                    <td style={{ ...TD_MONO_C, color: "#10b981" }}>{callVol > 0 ? callVol.toLocaleString() : "—"}</td>
-                    <td style={{ ...TD_MONO_C, fontWeight: 700, color: "#e2e8f0", background: "rgba(255,255,255,0.04)", fontSize: 17 }}>${r.strike}</td>
-                    <td style={{ ...TD_MONO_C, color: "#ef4444" }}>{putVol > 0 ? putVol.toLocaleString() : "—"}</td>
-                    <td style={{ ...TD_MONO_C, color: "#ef4444" }}>{fmtChainIV(r.put)}</td>
-                    <td style={{ ...TD_MONO_C, color: "#ef4444" }}>{fmtChainBid(r.put)}</td>
-                    <td style={{ ...TD_MONO_C, color: "#ef4444" }}>{fmtChainAsk(r.put)}</td>
-                    <td style={{ ...TD_MONO_C, color: "#64748b" }}>{oi > 0 ? oi.toLocaleString() : "—"}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // ALERTS
 // ═══════════════════════════════════════════════════════════════════════════
 function AlertsTab() {
@@ -876,7 +579,7 @@ function AlertsTab() {
     { name: "XAI_API_KEY",              note: "Grok API key" },
     { name: "TELEGRAM_BOT_TOKEN",       note: "From @BotFather" },
     { name: "TELEGRAM_CHAT_ID",         note: "Your chat ID" },
-    { name: "UNUSUAL_WHALES_API_TOKEN", note: "Unusual Whales" },
+    { name: "FLOW_WATCHLIST",           note: "Optional ticker list for the flow scan" },
     { name: "SCHWAB_CLIENT_ID",         note: "Sensitive · Market Data app key" },
     { name: "SCHWAB_CLIENT_SECRET",     note: "Sensitive · Market Data secret" },
     { name: "SCHWAB_REDIRECT_URI",      note: "Sensitive · must match the callback URL" },
@@ -896,11 +599,11 @@ function AlertsTab() {
       <div style={{ background: "rgba(6,182,212,0.06)", border: "1px solid rgba(6,182,212,0.15)", borderRadius: 8, padding: "14px 18px", marginBottom: 20 }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: "#06b6d4", marginBottom: 10 }}>How it works</div>
         {[
-          "Every 15 min on weekdays, from 8:30am to 3:00pm Central, the scanner fetches fresh flow alerts. Outside that window it exits.",
-          "Filters to sweeps ≥ $100K that are opening + ask-side (≥ 65%)",
-          "Cross-checks each ticker's vol arb signal — only proceeds on BUY FRIENDLY or BUY VOL",
-          "Sends the setup to Grok to screen for red flags (earnings, FDA, news)",
-          "If clean → fires a Telegram alert to @PeachClawbot with full setup details",
+          "Every 15 min on weekdays, from 8:30am to 3:00pm Central, the scanner reads Schwab chains for the watchlist. Outside that window it exits.",
+          "Alerts only on contracts that pass the gate liquidity filters: open interest at least 500, volume at least 100, and spread at most 5% of mid. Notional still has to clear ALERT_MIN_PREMIUM.",
+          "Side is estimated from the last price versus the bid and ask. This is not a sweep.",
+          "Cross-checks the ticker's vol arb signal and asks Grok to screen for red flags (earnings, FDA, news).",
+          "If it is still a candidate, sends a Telegram alert that says the flow is estimated.",
         ].map((step, i) => (
           <div key={i} style={{ display: "flex", gap: 10, marginBottom: 6, fontSize: 14, color: "#94a3b8" }}>
             <span style={{ color: "#06b6d4", fontWeight: 700, minWidth: 20 }}>{i + 1}.</span>
@@ -967,7 +670,11 @@ function ResearchTab() {
     (async () => {
       try {
         const [flowData, ...volData] = await Promise.allSettled([
-          uw({ action: "flow", limit: "20", min_premium: "50000" }),
+          fetch("/api/flow?limit=20&minPremium=50000").then(async (res) => {
+            const json = await res.json();
+            if (!res.ok || json.connected === false) return [];
+            return json.data ?? [];
+          }),
           ...["SPY","QQQ","AAPL","MSFT","NVDA","TSLA"].map((t) =>
             tt({ action: "volatility", symbol: t })
               .then((d: any) => ({
@@ -1029,7 +736,7 @@ function ResearchTab() {
     "What's the most notable flow in the scanner right now?",
     "Which watchlist ticker has the best options buying setup?",
     "Explain the vol arb signals I'm seeing today",
-    "What does a call sweep mean vs a regular block trade?",
+    "How should I read estimated flow from volume and open interest?",
   ];
 
   return (
@@ -1043,7 +750,7 @@ function ResearchTab() {
         {ctxLoaded && (
           <>
             <span style={{ background: "rgba(6,182,212,0.08)", border: "1px solid rgba(6,182,212,0.2)", color: "#06b6d4", padding: "3px 10px", borderRadius: 4, fontSize: 12 }}>
-              {flows.length} flow alerts loaded
+              {flows.length} estimated flow rows loaded
             </span>
             <span style={{ background: "rgba(16,185,129,0.08)", border: "1px solid rgba(16,185,129,0.2)", color: "#10b981", padding: "3px 10px", borderRadius: 4, fontSize: 12 }}>
               {volRows.length} vol arb rows loaded
@@ -1132,11 +839,9 @@ function ResearchTab() {
 // ═══════════════════════════════════════════════════════════════════════════
 const TABS = [
   { id: "flow",     label: "⊕ Flow Scanner" },
-  { id: "darkpool", label: "◈ Dark Pool"    },
   { id: "volArb",   label: "◇ Vol Arb"      },
   { id: "account",  label: "⊞ Account"      },
   { id: "kelly",    label: "△ Kelly (retired)" },
-  { id: "chain",    label: "≡ Chain"         },
   { id: "research", label: "◆ Research"      },
   { id: "alerts",   label: "⏰ Alerts"       },
 ];
@@ -1159,7 +864,7 @@ export default function OptionsEdgeScanner() {
               <span style={{ color: "#06b6d4" }}>◆</span> OPTIONS EDGE SCANNER
             </h1>
             <p style={{ margin: "3px 0 0", color: "#475569", fontSize: 14 }}>
-              Flow · Dark Pool · Vol Arb · Account · Trade Gate · Chain · Research
+              Estimated flow · Vol Arb · Account · Trade Gate · Research
             </p>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1195,18 +900,16 @@ export default function OptionsEdgeScanner() {
       <div style={{ padding: 24 }}>
         <SchwabBanner />
         {tab === "flow"     && <FlowTab     />}
-        {tab === "darkpool" && <DarkPoolTab />}
         {tab === "volArb"   && <VolArbTab   />}
         {tab === "account"  && <AccountTab  />}
         {tab === "kelly"    && <KellyTab    />}
-        {tab === "chain"    && <ChainTab    />}
         {tab === "research" && <ResearchTab />}
         {tab === "alerts"   && <AlertsTab   />}
       </div>
 
       <div style={{ padding: "12px 24px", borderTop: "1px solid rgba(255,255,255,0.05)", display: "flex", justifyContent: "space-between", color: "#334155", fontSize: 12 }}>
         <span>Options Edge Scanner · Not financial advice · Read-only · never places orders</span>
-        <span>Schwab market data · Tastytrade · Unusual Whales</span>
+        <span>Schwab market data · Tastytrade</span>
       </div>
     </div>
   );

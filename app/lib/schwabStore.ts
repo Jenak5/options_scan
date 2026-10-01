@@ -2,6 +2,7 @@ import { BlobPreconditionFailedError, del, get, put } from "@vercel/blob";
 import type { StoredTokens } from "@/app/lib/schwabParse";
 import {
   SCHWAB_BLOB_CACHE_CONTROL_MAX_AGE,
+  SCHWAB_BLOB_FLOW_PATH,
   SCHWAB_BLOB_TOKEN_ENV,
   SCHWAB_BLOB_TOKEN_PATH,
   SCHWAB_KV_TOKEN_ENV,
@@ -39,11 +40,23 @@ export type StoreKind = SchwabStoreKind;
 
 const TOKEN_KEY = "oes:schwab:tokens";
 const ALERT_KEY = "oes:schwab:alerts";
+const FLOW_SNAPSHOT_KEY = "oes:flow:snapshots";
 const BLOB_WRITE_ATTEMPTS = 4;
+const FLOW_SNAPSHOT_MAX_TICKERS = 40;
+const FLOW_SNAPSHOT_MAX_CONTRACTS = 500;
+
+export interface FlowVolumeSnapshot {
+  scannedAt: number;
+  volumes: Record<string, number>;
+}
+
+/** Prior option volume by ticker. Separate from the token envelope. */
+export type FlowSnapshotBook = Record<string, FlowVolumeSnapshot>;
 
 interface MemoryBag {
   tokens: StoredTokens | null;
   alerts: AlertMeta;
+  flowSnapshots: FlowSnapshotBook;
 }
 
 interface TokenEnvelope {
@@ -116,14 +129,16 @@ export function setSchwabBlobClientForTests(next: SchwabBlobClient | null): void
 function memoryBag(): MemoryBag {
   const g = globalThis as typeof globalThis & { __oesSchwabMemory?: MemoryBag };
   if (!g.__oesSchwabMemory) {
-    g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS } };
+    g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {} };
+  } else if (!g.__oesSchwabMemory.flowSnapshots) {
+    g.__oesSchwabMemory.flowSnapshots = {};
   }
   return g.__oesSchwabMemory;
 }
 
 export function clearMemoryStoreForTests(): void {
   const g = globalThis as typeof globalThis & { __oesSchwabMemory?: MemoryBag };
-  g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS } };
+  g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {} };
 }
 
 function envPair(urlName: string, tokenName: string): { url: string; token: string } | null {
@@ -260,6 +275,47 @@ export async function readAlertMeta(): Promise<AlertMeta> {
     return parseAlerts(raw);
   } catch {
     return { ...EMPTY_ALERTS };
+  }
+}
+
+export async function readFlowSnapshots(): Promise<FlowSnapshotBook> {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") return {};
+  if (kind === "memory") return cloneFlowBook(memoryBag().flowSnapshots);
+  if (kind === "blob") return readBlobFlowSnapshots();
+  try {
+    const raw = await kvCommand(["GET", FLOW_SNAPSHOT_KEY]);
+    if (typeof raw !== "string" || raw.length === 0) return {};
+    return parseFlowBook(raw);
+  } catch {
+    console.error("Flow snapshot store could not be read");
+    return {};
+  }
+}
+
+/**
+ * Merge volume snapshots for the tickers in `patch`.
+ * Other tickers already stored are left in place. A failed write does not throw:
+ * the scan can still return, and the next poll treats the jump as unknown.
+ */
+export async function writeFlowSnapshots(patch: FlowSnapshotBook): Promise<void> {
+  const clean = sanitizeFlowBook(patch);
+  if (Object.keys(clean).length === 0) return;
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") return;
+  if (kind === "memory") {
+    memoryBag().flowSnapshots = trimFlowBook({ ...memoryBag().flowSnapshots, ...clean });
+    return;
+  }
+  if (kind === "blob") {
+    await writeBlobFlowSnapshots(clean);
+    return;
+  }
+  try {
+    const current = await readFlowSnapshots();
+    await kvCommand(["SET", FLOW_SNAPSHOT_KEY, JSON.stringify(trimFlowBook({ ...current, ...clean }))]);
+  } catch {
+    console.error("Flow snapshot store could not be written");
   }
 }
 
@@ -407,6 +463,121 @@ function blobToken(): string {
 
 function isPreconditionFailed(err: unknown): boolean {
   return err instanceof BlobPreconditionFailedError;
+}
+
+async function readBlobFlowSnapshots(): Promise<FlowSnapshotBook> {
+  const token = blobToken();
+  if (!token) return {};
+  const read = await readBlobJson(SCHWAB_BLOB_FLOW_PATH, token);
+  if (read.state !== "ok") return {};
+  return parseFlowBook(read.text);
+}
+
+async function writeBlobFlowSnapshots(patch: FlowSnapshotBook): Promise<void> {
+  const token = blobToken();
+  if (!token) return;
+  for (let attempt = 0; attempt < BLOB_WRITE_ATTEMPTS; attempt++) {
+    const read = await readBlobJson(SCHWAB_BLOB_FLOW_PATH, token);
+    if (read.state === "error") {
+      console.error("Flow snapshot store could not be read");
+      return;
+    }
+    const current = read.state === "ok" ? parseFlowBook(read.text) : {};
+    try {
+      await blobClient.put(SCHWAB_BLOB_FLOW_PATH, JSON.stringify(trimFlowBook({ ...current, ...patch })), {
+        access: "private",
+        allowOverwrite: true,
+        addRandomSuffix: false,
+        cacheControlMaxAge: SCHWAB_BLOB_CACHE_CONTROL_MAX_AGE,
+        contentType: "application/json",
+        token,
+        ...(read.state === "ok" ? { ifMatch: read.etag } : {}),
+      });
+      return;
+    } catch (err) {
+      if (!isPreconditionFailed(err) || attempt === BLOB_WRITE_ATTEMPTS - 1) {
+        console.error("Flow snapshot store could not be written");
+        return;
+      }
+    }
+  }
+}
+
+async function readBlobJson(pathname: string, token: string): Promise<
+  | { state: "missing" }
+  | { state: "error" }
+  | { state: "ok"; etag: string; text: string }
+> {
+  let result: SchwabBlobGetResult | null;
+  try {
+    result = await blobClient.get(pathname, {
+      access: "private",
+      useCache: false,
+      token,
+    });
+  } catch {
+    return { state: "error" };
+  }
+  if (!result || result.statusCode === 404) return { state: "missing" };
+  if (result.statusCode !== 200 || !result.stream) return { state: "error" };
+  try {
+    const text = await new Response(result.stream).text();
+    return { state: "ok", etag: result.blob.etag, text };
+  } catch {
+    return { state: "error" };
+  }
+}
+
+function cloneFlowBook(book: FlowSnapshotBook): FlowSnapshotBook {
+  return parseFlowBook(JSON.stringify(book));
+}
+
+function parseFlowBook(text: string): FlowSnapshotBook {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return {};
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  return sanitizeFlowBook(parsed as FlowSnapshotBook);
+}
+
+function sanitizeFlowBook(patch: FlowSnapshotBook): FlowSnapshotBook {
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) return {};
+  const out: FlowSnapshotBook = {};
+  const tickers = Object.keys(patch);
+  for (let i = 0; i < tickers.length; i++) {
+    const ticker = tickers[i].trim().toUpperCase();
+    if (!/^[A-Z][A-Z0-9.\-]{0,9}$/.test(ticker)) continue;
+    const row = patch[tickers[i]];
+    if (!row || typeof row !== "object") continue;
+    const scannedAt = row.scannedAt;
+    if (typeof scannedAt !== "number" || !Number.isFinite(scannedAt)) continue;
+    const volumes: Record<string, number> = {};
+    const source = row.volumes;
+    if (source && typeof source === "object" && !Array.isArray(source)) {
+      const keys = Object.keys(source);
+      for (let j = 0; j < keys.length && Object.keys(volumes).length < FLOW_SNAPSHOT_MAX_CONTRACTS; j++) {
+        const key = keys[j];
+        if (key.length === 0 || key.length > 80) continue;
+        const volume = source[key];
+        if (typeof volume !== "number" || !Number.isFinite(volume) || volume < 0) continue;
+        volumes[key] = volume;
+      }
+    }
+    out[ticker] = { scannedAt, volumes };
+  }
+  return trimFlowBook(out);
+}
+
+function trimFlowBook(book: FlowSnapshotBook): FlowSnapshotBook {
+  const tickers = Object.keys(book);
+  if (tickers.length <= FLOW_SNAPSHOT_MAX_TICKERS) return book;
+  const ranked = tickers.sort((a, b) => book[b].scannedAt - book[a].scannedAt);
+  const kept: FlowSnapshotBook = {};
+  for (let i = 0; i < FLOW_SNAPSHOT_MAX_TICKERS; i++) kept[ranked[i]] = book[ranked[i]];
+  return kept;
 }
 
 function parseEnvelope(text: string): TokenEnvelope | null {
