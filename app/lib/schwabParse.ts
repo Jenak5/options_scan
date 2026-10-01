@@ -32,23 +32,25 @@ export interface SchwabPublicStatus {
   message: string;
 }
 
-const CHAIN_OR_QUOTES = new Set(["chains", "quotes"]);
+const MARKET_DATA_READS = new Set(["chains", "quotes", "pricehistory"]);
+
+export const MARKET_DATA_ONLY_ERROR = "Schwab client only reads option chains, quotes, and price history";
 
 /**
- * Only the two market-data GETs this app uses.
+ * Market-data GETs this app uses: chains, quotes, and price history.
  * Trader, account, and order paths are rejected.
  */
 export function marketDataGetUrl(path: string, query: URLSearchParams): string {
-  if (!CHAIN_OR_QUOTES.has(path) || path.includes("/") || path.includes(".")) {
-    throw new Error("Schwab client only reads option chains and quotes");
+  if (!MARKET_DATA_READS.has(path) || path.includes("/") || path.includes(".")) {
+    throw new Error(MARKET_DATA_ONLY_ERROR);
   }
   const url = `${MARKET_DATA_ORIGIN}/marketdata/v1/${path}?${query.toString()}`;
   const parsed = new URL(url);
   if (parsed.origin !== MARKET_DATA_ORIGIN) {
-    throw new Error("Schwab client only reads option chains and quotes");
+    throw new Error(MARKET_DATA_ONLY_ERROR);
   }
   if (!parsed.pathname.startsWith("/marketdata/v1/")) {
-    throw new Error("Schwab client only reads option chains and quotes");
+    throw new Error(MARKET_DATA_ONLY_ERROR);
   }
   return url;
 }
@@ -225,6 +227,46 @@ export function parseOptionChain(payload: unknown): ChainParseResult {
     delayed: root?.isDelayed === true,
     underlyingPrice,
   };
+}
+
+export interface PriceCandle {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  /** Epoch milliseconds. */
+  datetime: number;
+}
+
+/** Candles from the price-history endpoint. Invalid rows are dropped. */
+export function parsePriceHistory(payload: unknown): PriceCandle[] {
+  const root = asRecord(payload);
+  const rows = root?.candles;
+  if (!Array.isArray(rows)) return [];
+  const out: PriceCandle[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = asRecord(rows[i]);
+    if (!row) continue;
+    const open = num(row.open);
+    const high = num(row.high);
+    const low = num(row.low);
+    const close = num(row.close);
+    const volume = num(row.volume);
+    const datetime = num(row.datetime);
+    if (open == null || high == null || low == null || close == null || volume == null || datetime == null) continue;
+    if (low <= 0 || high < low || datetime <= 0) continue;
+    out.push({
+      open,
+      high,
+      low,
+      close,
+      volume: Math.max(0, volume),
+      datetime,
+    });
+  }
+  out.sort((a, b) => a.datetime - b.datetime);
+  return out;
 }
 
 /** Option quotes become contracts. Equity and index quotes are skipped. */

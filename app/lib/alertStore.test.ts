@@ -72,6 +72,7 @@ function row(over: Partial<FlowRow> = {}): FlowRow {
     liquidityPasses: true,
     delayed: false,
     underlyingPrice: 100,
+    levels: null,
     score: 55,
     ...over,
   };

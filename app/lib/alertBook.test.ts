@@ -40,7 +40,8 @@ function alert(over: Partial<StoredAlert> = {}): StoredAlert {
     grade: "B",
     reasons: ["Liquidity passes.", "Two contracts fit."],
     note: "Rules checklist only.",
-    levelsNote: "Support and resistance are not checked yet.",
+    levels: null,
+    levelsNote: "Support and resistance were not available, so the grade stops at B.",
     maxContracts: 2,
     checkpoints: {
       m15: emptyCheckpoint(),
@@ -169,6 +170,28 @@ describe("alert book parsing", () => {
     expect(lossCountForDay(again, "2026-10-01")).toBe(2);
     expect(lossCountForDay(again, "2026-10-02")).toBeNull();
     expect(parseAlertBook("not json").records).toEqual([]);
+    expect(again.records[0].levels).toBeNull();
+  });
+
+  it("keeps stored support and resistance and ignores a record that never had them", () => {
+    const withLevels = alert({
+      id: "leveled",
+      levels: {
+        supportPrice: 99,
+        supportLabel: "prior day low",
+        supportDistance: 0.01,
+        resistancePrice: 102,
+        resistanceLabel: "session high",
+        resistanceDistance: 0.02,
+      },
+    });
+    const raw = JSON.parse(JSON.stringify(addRecord(emptyBook(), withLevels))) as { records: Record<string, unknown>[] };
+    delete raw.records[0].levels;
+    raw.records.push(JSON.parse(JSON.stringify(withLevels)));
+    const parsed = parseAlertBook(JSON.stringify(raw));
+    expect(parsed.records[0].levels).toBeNull();
+    expect(parsed.records[1].levels?.supportPrice).toBe(99);
+    expect(parsed.records[1].levels?.resistanceLabel).toBe("session high");
   });
 
   it("keeps only the newest records when the book is over the cap", () => {

@@ -4,12 +4,14 @@ import {
   marketDataGetUrl,
   alertDue,
   parseOptionChain,
+  parsePriceHistory,
   parseQuotes,
   parseTokenResponse,
   publicTokenStatus,
   refreshWarnSoon,
   TOKEN_URL,
   type ChainParseResult,
+  type PriceCandle,
   type SchwabPublicStatus,
   type StoredTokens,
 } from "@/app/lib/schwabParse";
@@ -29,6 +31,7 @@ import { sendTelegramAlert, telegramConfigured } from "@/app/lib/telegram";
  * - POST https://api.schwabapi.com/v1/oauth/token
  * - GET  https://api.schwabapi.com/marketdata/v1/chains
  * - GET  https://api.schwabapi.com/marketdata/v1/quotes
+ * - GET  https://api.schwabapi.com/marketdata/v1/pricehistory
  *
  * It never calls the trader API and never places an order.
  * Tokens stay in the server store. Do not put them in a response or a log.
@@ -131,6 +134,39 @@ export async function getOptionChain(input: {
   return parseOptionChain(payload);
 }
 
+const PRICE_HISTORY_SYMBOL = /^[A-Z][A-Z0-9.\-]{0,9}$/;
+
+/**
+ * Daily or intraday candles. Read-only price history. No orders.
+ * Callers pass period and frequency. The symbol is the only free-form field.
+ */
+export async function getPriceHistory(input: {
+  symbol: string;
+  periodType: "day" | "month";
+  period: number;
+  frequencyType: "minute" | "daily";
+  frequency: number;
+  needExtendedHoursData?: boolean;
+}): Promise<PriceCandle[]> {
+  const symbol = input.symbol.trim().toUpperCase();
+  if (!PRICE_HISTORY_SYMBOL.test(symbol)) throw new Error("Schwab market data request failed");
+  if (!Number.isInteger(input.period) || input.period < 1 || input.period > 10) {
+    throw new Error("Schwab market data request failed");
+  }
+  if (!Number.isInteger(input.frequency) || input.frequency < 1 || input.frequency > 30) {
+    throw new Error("Schwab market data request failed");
+  }
+  const query = new URLSearchParams();
+  query.set("symbol", symbol);
+  query.set("periodType", input.periodType);
+  query.set("period", String(input.period));
+  query.set("frequencyType", input.frequencyType);
+  query.set("frequency", String(input.frequency));
+  query.set("needExtendedHoursData", input.needExtendedHoursData ? "true" : "false");
+  const payload = await marketDataGet("pricehistory", query);
+  return parsePriceHistory(payload);
+}
+
 export async function getQuotes(symbols: string[]): Promise<OptionContract[]> {
   const cleaned = symbols.map((symbol) => symbol.trim()).filter((symbol) => symbol.length > 0);
   if (cleaned.length === 0) return [];
@@ -216,7 +252,7 @@ async function refreshStored(stored: StoredTokens, now: number, depth = 0): Prom
   }
 }
 
-async function marketDataGet(path: "chains" | "quotes", query: URLSearchParams): Promise<unknown> {
+async function marketDataGet(path: "chains" | "quotes" | "pricehistory", query: URLSearchParams): Promise<unknown> {
   const url = marketDataGetUrl(path, query);
   const token = await getAccessToken();
   const res = await fetch(url, {
