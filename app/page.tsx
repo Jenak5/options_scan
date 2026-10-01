@@ -6,6 +6,7 @@ import type { AlertSummary, StoredAlert } from "@/app/lib/alertBook";
 import { FLOW_DISCLAIMER, gateCheckHref, type FlowRow } from "@/app/lib/flow";
 import { formatLevelsSummary } from "@/app/lib/levels";
 import { ACCOUNT_SIZE_DOLLARS, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
+import { VOL_DEFINITIONS, VOL_DISCLAIMER, compareVolReadings, type VolArbReading } from "@/app/lib/volArb";
 import type { AlertVerdict } from "@/app/lib/verdict";
 
 // ─── API helpers ───────────────────────────────────────────────────────────
@@ -337,56 +338,128 @@ function FlowTab() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// VOL ARB
+// VOL ARB  — Schwab chain IV vs Schwab realized vol. Research only.
 // ═══════════════════════════════════════════════════════════════════════════
-interface VolRow { ticker: string; iv: number; hv: number; ivRank: number; spread: number; }
-
 const DEFAULT_WATCHLIST = ["SPY","QQQ","AAPL","MSFT","NVDA","TSLA","AMZN","META","GOOGL","AMD","SMCI","COIN","MSTR","PLTR","ARM"];
+const VOL_TICKER = /^[A-Z][A-Z0-9.\-]{0,9}$/;
+const VOL_CHUNK = 4;
 
-function volSignal(ivRank: number, spread: number) {
-  if (ivRank < 25 && spread < 10)  return { label: "BUY FRIENDLY", color: "green"  as BadgeColor, bc: "#10b981", tip: "Low IV Rank + tight spread — best risk/reward for long calls/puts." };
-  if (ivRank < 25 && spread >= 10) return { label: "CAUTION",      color: "amber"  as BadgeColor, bc: "#f59e0b", tip: "IV Rank low but spread wide — cheap vs history, expensive vs moves." };
-  if (spread < 0)                  return { label: "BUY VOL",      color: "cyan"   as BadgeColor, bc: "#06b6d4", tip: "Options underpriced vs realized vol — rare edge, act fast." };
-  if (spread > 20)                 return { label: "EXPENSIVE",    color: "red"    as BadgeColor, bc: "#ef4444", tip: "High spread — overpaying for volatility. Skip or sell." };
-  return                                  { label: "NEUTRAL",      color: "blue"   as BadgeColor, bc: "#3b82f6", tip: "No strong signal. Wait for flow confirmation before entering." };
+interface VolProblem { symbol: string; message: string; }
+
+function volDefinition(label: string): string {
+  return VOL_DEFINITIONS.find((item) => item.label === label)?.text ?? "";
+}
+
+function volPct(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return `${value.toFixed(1)}%`;
+}
+
+function volPoints(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return `${value > 0 ? "+" : ""}${value.toFixed(1)}`;
+}
+
+function volBadge(signal: VolArbReading["signal"]): { label: string; color: BadgeColor; bc: string } {
+  if (signal === "CHEAP") return { label: "CHEAP", color: "green", bc: "#10b981" };
+  if (signal === "RICH") return { label: "RICH", color: "red", bc: "#ef4444" };
+  if (signal === "NEUTRAL") return { label: "NEUTRAL", color: "blue", bc: "#3b82f6" };
+  return { label: "NO READ", color: "gray", bc: "#64748b" };
+}
+
+function spreadColor(value: number | null): string {
+  if (value == null) return "#94a3b8";
+  if (value <= -5) return "#10b981";
+  if (value >= 8) return "#ef4444";
+  return "#f59e0b";
 }
 
 function VolArbTab() {
-  const [rows, setRows]           = useState<VolRow[]>([]);
-  const [loading, setLoading]     = useState(true);
-  const [error, setError]         = useState<string | null>(null);
+  const [rows, setRows] = useState<VolArbReading[]>([]);
+  const [problems, setProblems] = useState<VolProblem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [disconnected, setDisconnected] = useState(false);
+  const [reconnect, setReconnect] = useState("/api/schwab/connect");
   const [watchlist, setWatchlist] = useState<string[]>(DEFAULT_WATCHLIST);
   const [newTicker, setNewTicker] = useState("");
+  const [tickerNote, setTickerNote] = useState<string | null>(null);
+  const requestId = React.useRef(0);
 
   const addTicker = () => {
     const t = newTicker.trim().toUpperCase();
-    if (t && !watchlist.includes(t)) setWatchlist((prev) => [...prev, t]);
+    if (!t) return;
+    if (!VOL_TICKER.test(t)) {
+      setTickerNote("Use a ticker like HOOD.");
+      return;
+    }
+    if (watchlist.length >= 20) {
+      setTickerNote("The list holds 20 tickers.");
+      return;
+    }
+    setTickerNote(null);
+    if (!watchlist.includes(t)) setWatchlist((prev) => [...prev, t]);
     setNewTicker("");
   };
   const removeTicker = (t: string) => setWatchlist((prev) => prev.filter((x) => x !== t));
 
-  const load = useCallback(async () => {
-    setLoading(true); setError(null);
+  const load = useCallback(async (fresh = false) => {
+    const id = ++requestId.current;
+    setLoading(true);
+    setError(null);
+    setDisconnected(false);
+    setProblems([]);
+    if (watchlist.length === 0) {
+      setRows([]);
+      setLoading(false);
+      return;
+    }
+    const collected: VolArbReading[] = [];
+    const found: VolProblem[] = [];
     try {
-      const results: VolRow[] = [];
-      for (const ticker of watchlist) {
-        try {
-          const d = await tt({ action: "volatility", symbol: ticker });
-          const iv = safeNum(d["implied-volatility-30-day"] ?? d["implied-volatility-index"], 0);
-          const hv = safeNum(d["historical-volatility-30-day"] ?? d["historical-volatility-60-day"], 0);
-          const ivRankRaw = safeNum(d["implied-volatility-index-rank"] ?? d["tw-implied-volatility-index-rank"] ?? d["iv-rank"], 0.5);
-          const ivRank = ivRankRaw <= 1 ? ivRankRaw * 100 : ivRankRaw;
-          const spread = safeNum(d["iv-hv-30-day-difference"] ?? 0, iv - hv);
-          results.push({ ticker, iv, hv, ivRank, spread });
-        } catch { /* skip */ }
+      for (let i = 0; i < watchlist.length; i += VOL_CHUNK) {
+        const slice = watchlist.slice(i, i + VOL_CHUNK);
+        const url = new URL("/api/vol", window.location.origin);
+        url.searchParams.set("symbols", slice.join(","));
+        if (fresh) url.searchParams.set("fresh", "true");
+        const res = await fetch(url.toString());
+        const json = await res.json();
+        if (requestId.current !== id) return;
+        if (json.connected === false || res.status === 409 || res.status === 503) {
+          setDisconnected(true);
+          setReconnect(typeof json.reconnect === "string" ? json.reconnect : "");
+          setError(typeof json.error === "string" ? json.error : "Schwab is not connected. Use Reconnect Schwab.");
+          setRows([]);
+          return;
+        }
+        if (!res.ok) throw new Error(typeof json.error === "string" ? json.error : "Vol scan failed");
+        if (Array.isArray(json.rows)) collected.push(...json.rows);
+        if (Array.isArray(json.errors)) {
+          for (const item of json.errors) {
+            if (!item || typeof item.symbol !== "string") continue;
+            found.push({
+              symbol: item.symbol,
+              message: typeof item.message === "string" ? item.message : "Schwab market data request failed",
+            });
+          }
+        }
       }
-      results.sort((a, b) => a.ivRank - b.ivRank);
-      setRows(results);
-    } catch (e: any) { setError(e.message); }
-    finally { setLoading(false); }
+      if (requestId.current !== id) return;
+      collected.sort(compareVolReadings);
+      setRows(collected);
+      setProblems(found);
+    } catch (e: unknown) {
+      if (requestId.current !== id) return;
+      collected.sort(compareVolReadings);
+      setRows(collected);
+      setProblems(found);
+      setError(e instanceof Error ? e.message : "Vol scan failed");
+    } finally {
+      if (requestId.current === id) setLoading(false);
+    }
   }, [watchlist]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(false); }, [load]);
 
   return (
     <div>
@@ -397,8 +470,8 @@ function VolArbTab() {
             onKeyDown={(e) => e.key === "Enter" && addTicker()}
             style={{ ...INPUT, width: 180 }} />
           <button onClick={addTicker} style={BTN("cyan")}>+ Add</button>
-          <button onClick={load}      style={BTN("gray")}>↻ Refresh</button>
-          <button onClick={() => setWatchlist(DEFAULT_WATCHLIST)} style={BTN("ghost")}>Reset</button>
+          <button onClick={() => load(true)} style={BTN("gray")}>↻ Refresh</button>
+          <button onClick={() => { setTickerNote(null); setWatchlist(DEFAULT_WATCHLIST); }} style={BTN("ghost")}>Reset</button>
         </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {watchlist.map((t) => (
@@ -408,43 +481,103 @@ function VolArbTab() {
             </div>
           ))}
         </div>
+        {tickerNote && <div style={{ color: "#f59e0b", fontSize: 13, marginTop: 8 }}>{tickerNote}</div>}
       </div>
-      <div style={{ background: "rgba(16,185,129,0.06)", border: "1px solid rgba(16,185,129,0.15)", borderRadius: 8, padding: "10px 16px", marginBottom: 16, fontSize: 14, color: "#6ee7b7" }}>
-        ✓ Cash Account Mode — long calls &amp; puts only. Sorted by IV Rank (lowest = best buying opportunity first).
+      <div style={{ background: "rgba(6,182,212,0.06)", border: "1px solid rgba(6,182,212,0.18)", borderRadius: 8, padding: "12px 16px", marginBottom: 16, fontSize: 13, color: "#94a3b8", lineHeight: 1.45 }}>
+        <div style={{ color: "#e2e8f0", fontWeight: 700, marginBottom: 6 }}>{VOL_DISCLAIMER}</div>
+        {VOL_DEFINITIONS.map((item) => (
+          <div key={item.label} style={{ marginTop: 4 }}>
+            <span style={{ color: "#e2e8f0", fontWeight: 700 }}>{item.label}. </span>
+            {item.text}
+          </div>
+        ))}
       </div>
+      {disconnected && (
+        <div style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.35)", borderRadius: 8, padding: "16px 18px", marginBottom: 12 }}>
+          <div style={{ color: "#fbbf24", fontSize: 15, fontWeight: 700, marginBottom: 8 }}>{error}</div>
+          <div style={{ color: "#94a3b8", fontSize: 13, marginBottom: reconnect ? 8 : 0 }}>Vol Arb needs a live Schwab chain. Nothing is estimated from a delayed feed.</div>
+          {reconnect && <a href={reconnect} style={{ color: "#06b6d4", fontWeight: 700 }}>Reconnect Schwab</a>}
+        </div>
+      )}
       {loading && <Spinner />}
-      {error   && <ErrorBox message={error} onRetry={load} />}
-      {!loading && !error && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(215px, 1fr))", gap: 12 }}>
+      {!disconnected && error && <ErrorBox message={error} onRetry={() => load(true)} />}
+      {!loading && !disconnected && problems.length > 0 && (
+        <div style={{ color: "#f59e0b", fontSize: 13, marginBottom: 8 }}>
+          Some tickers did not load: {problems.map((item) => `${item.symbol} (${item.message})`).join(" · ")}
+        </div>
+      )}
+      {!loading && !disconnected && !error && watchlist.length === 0 && (
+        <div style={{ color: "#94a3b8", fontSize: 14 }}>Add a ticker. Vol Arb reads that symbol from Schwab.</div>
+      )}
+      {!loading && !disconnected && !error && watchlist.length > 0 && rows.length === 0 && (
+        <div style={{ color: "#94a3b8", fontSize: 14 }}>No vol readings came back. Check the ticker or use Refresh.</div>
+      )}
+      {!loading && !disconnected && rows.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12 }}>
           {rows.map((r) => {
-            const sig = volSignal(r.ivRank, r.spread);
+            const sig = volBadge(r.signal);
+            const skewHow = r.skewMethod === "25-delta" ? "near 25 delta" : r.skewMethod === "otm" ? "about 5% from the stock" : "";
             return (
-              <div key={r.ticker} style={{ background: "rgba(255,255,255,0.035)", border: `2px solid ${sig.bc}44`, borderRadius: 10, padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontWeight: 700, fontSize: 18, color: "#e2e8f0", fontFamily: "monospace" }}>{r.ticker}</span>
+              <div key={r.symbol} style={{ background: "rgba(255,255,255,0.035)", border: `2px solid ${sig.bc}44`, borderRadius: 10, padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontWeight: 700, fontSize: 18, color: "#e2e8f0", fontFamily: "monospace" }}>{r.symbol}</span>
                   <Badge color={sig.color}>{sig.label}</Badge>
                 </div>
+                {(r.underlyingPrice != null || r.atmExpiration) && (
+                  <div style={{ color: "#64748b", fontSize: 12 }}>
+                    {[
+                      r.underlyingPrice != null ? `Stock $${r.underlyingPrice.toFixed(2)}` : null,
+                      r.atmExpiration ? `ATM exp ${fmtDate(r.atmExpiration)} · ${r.atmDte ?? "—"}d` : null,
+                    ].filter(Boolean).join(" · ")}
+                  </div>
+                )}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, fontSize: 14 }}>
                   {[
-                    { label: "IV 30d", val: `${fmt(r.iv, 1)}%`,  color: "#a855f7" },
-                    { label: "HV 30d", val: `${fmt(r.hv, 1)}%`,  color: "#3b82f6" },
-                    { label: "Spread", val: `${r.spread > 0 ? "+" : ""}${fmt(r.spread, 1)}%`, color: r.spread < 0 ? "#10b981" : r.spread > 15 ? "#ef4444" : "#f59e0b" },
+                    { label: "ATM IV (~30d)", val: volPct(r.atmIv30), color: "#a855f7" },
+                    { label: "RV 20d", val: volPct(r.rv20), color: "#3b82f6" },
+                    { label: "IV − RV", val: volPoints(r.ivRvSpread), color: spreadColor(r.ivRvSpread) },
                   ].map(({ label, val, color }) => (
-                    <div key={label}>
-                      <div style={{ color: "#475569", marginBottom: 2 }}>{label}</div>
+                    <div key={label} title={volDefinition(label)}>
+                      <div style={{ color: "#475569", marginBottom: 2, fontSize: 12 }}>{label}</div>
                       <div style={{ color, fontWeight: 700, fontFamily: "monospace" }}>{val}</div>
                     </div>
                   ))}
                 </div>
-                <div>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "#475569", marginBottom: 3 }}>
-                    <span>IV Rank</span><span>{fmt(r.ivRank, 0)}%</span>
-                  </div>
-                  <div style={{ height: 5, background: "rgba(255,255,255,0.06)", borderRadius: 3, overflow: "hidden" }}>
-                    <div style={{ width: `${Math.min(r.ivRank, 100)}%`, height: "100%", borderRadius: 3, background: r.ivRank < 25 ? "#10b981" : r.ivRank > 75 ? "#ef4444" : "#f59e0b" }} />
+                <div title={volDefinition("RV 10d")} style={{ color: "#64748b", fontSize: 12 }}>RV 10d {volPct(r.rv10)} — last 10 sessions</div>
+                <div title={volDefinition("Term")} style={{ fontSize: 13, color: "#cbd5e1" }}>
+                  <span style={{ color: "#475569" }}>Term </span>
+                  <span style={{ fontFamily: "monospace", fontWeight: 700 }}>{volPoints(r.termSlope)}</span>
+                  <div style={{ color: "#64748b", fontSize: 12 }}>
+                    {r.frontDte != null && r.backDte != null
+                      ? `${r.frontDte}d ${volPct(r.frontAtmIv)} → ${r.backDte}d ${volPct(r.backAtmIv)}`
+                      : "Needs two expirations at least 7 days out."}
                   </div>
                 </div>
-                <div style={{ color: "#64748b", fontSize: 13, borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 8 }}>{sig.tip}</div>
+                <div title={volDefinition("Skew")} style={{ fontSize: 13, color: "#cbd5e1" }}>
+                  <span style={{ color: "#475569" }}>Skew </span>
+                  <span style={{ fontFamily: "monospace", fontWeight: 700 }}>{volPoints(r.skew)}</span>
+                  <div style={{ color: "#64748b", fontSize: 12 }}>
+                    {r.skewPutStrike != null && r.skewCallStrike != null
+                      ? `${r.skewPutStrike}P ${volPct(r.skewPutIv)} vs ${r.skewCallStrike}C ${volPct(r.skewCallIv)}${skewHow ? ` · ${skewHow}` : ""}`
+                      : "Not enough strikes to compare put and call IV."}
+                  </div>
+                </div>
+                {r.status === "ok" && (
+                  <div title={volDefinition("Cheap / rich strikes")}>
+                    <div style={{ color: "#475569", fontSize: 12, marginBottom: 4 }}>Cheap / rich strikes</div>
+                    {r.notable.length === 0 && (
+                      <div style={{ color: "#64748b", fontSize: 12 }}>None far from this expiration&apos;s ATM IV.</div>
+                    )}
+                    {r.notable.map((item) => (
+                      <div key={`${item.expiration}-${item.strike}-${item.putCall}`} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 13, fontFamily: "monospace", color: "#cbd5e1" }}>
+                        <span>{item.strike}{item.putCall === "call" ? "C" : "P"}</span>
+                        <span>{item.ivPercent.toFixed(1)}%</span>
+                        <span style={{ color: item.label === "CHEAP" ? "#10b981" : "#ef4444" }}>{item.label} {item.versusAtm > 0 ? "+" : ""}{item.versusAtm.toFixed(1)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div style={{ color: "#64748b", fontSize: 13, borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 8 }}>{r.signalNote}</div>
               </div>
             );
           })}

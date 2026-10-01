@@ -255,7 +255,7 @@ export function parsePriceHistory(payload: unknown): PriceCandle[] {
     const volume = num(row.volume);
     const datetime = num(row.datetime);
     if (open == null || high == null || low == null || close == null || volume == null || datetime == null) continue;
-    if (low <= 0 || high < low || datetime <= 0) continue;
+    if (low <= 0 || high < low || close <= 0 || datetime <= 0) continue;
     out.push({
       open,
       high,

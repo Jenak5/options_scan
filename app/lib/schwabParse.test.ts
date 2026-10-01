@@ -27,12 +27,15 @@ describe("market-data URL guard", () => {
     expect(chain.startsWith("https://api.schwabapi.com/marketdata/v1/chains?")).toBe(true);
     expect(quotes.startsWith("https://api.schwabapi.com/marketdata/v1/quotes?")).toBe(true);
     expect(history.startsWith("https://api.schwabapi.com/marketdata/v1/pricehistory?")).toBe(true);
+    expect(history.includes("symbol=SPY")).toBe(true);
     expect(history.includes("periodType=day")).toBe(true);
     expect(chain.includes("/orders")).toBe(false);
+    expect(history.includes("/trader")).toBe(false);
     expect(() => marketDataGetUrl("orders", new URLSearchParams())).toThrow(/price history/);
     expect(() => marketDataGetUrl("trader/v1/accounts", new URLSearchParams())).toThrow(/price history/);
     expect(() => marketDataGetUrl("../trader/v1/orders", new URLSearchParams())).toThrow(/price history/);
     expect(() => marketDataGetUrl("chains/../orders", new URLSearchParams())).toThrow(/price history/);
+    expect(() => marketDataGetUrl("pricehistory/../orders", new URLSearchParams())).toThrow(/price history/);
   });
 });
 
@@ -283,6 +286,7 @@ describe("price history candles", () => {
         { open: 10, high: 11, low: 9, close: 10.5, volume: 100, datetime: 2000 },
         { open: 8, high: 9, low: 7, close: 8, volume: 50, datetime: 1000 },
         { open: 1, high: 1, low: 2, close: 1, volume: 1, datetime: 3000 },
+        { open: 5, high: 6, low: 4, close: 0, volume: 10, datetime: 4000 },
         { foo: "bar" },
       ],
     });
