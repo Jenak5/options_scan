@@ -21,6 +21,7 @@ import {
   volumeSinceLastScan,
   type FlowRow,
 } from "@/app/lib/flow";
+import { EMPTY_PRINTS } from "@/app/lib/prints";
 import { parseOptionChain } from "@/app/lib/schwabParse";
 
 const NOW = new Date("2026-10-01T15:00:00Z");
@@ -362,6 +363,7 @@ function fakeRow(over: Partial<FlowRow>): FlowRow {
     delayed: false,
     underlyingPrice: 100,
     levels: null,
+    prints: EMPTY_PRINTS,
     score: 50,
     ...over,
   };

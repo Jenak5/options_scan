@@ -243,6 +243,39 @@ describe("quote and chain normalization", () => {
       strike: 570,
       expiration: "2026-10-16",
       putCall: "call",
+      lastSize: null,
+      tradeTime: null,
+    });
+  });
+
+  it("reads last size and trade time from a chain row", () => {
+    const parsed = parseOptionChain({
+      callExpDateMap: {
+        "2026-10-16:10": {
+          "100.0": [{
+            putCall: "CALL",
+            bid: 1.2,
+            ask: 1.3,
+            last: 1.3,
+            lastSize: 40,
+            bidSize: 10,
+            askSize: 12,
+            totalVolume: 80,
+            openInterest: 500,
+            tradeTimeInLong: 1_760_000_000_000,
+            quoteTimeInLong: 1_760_000_000_500,
+            volatility: 20,
+            strikePrice: 100,
+          }],
+        },
+      },
+    });
+    expect(parsed.contracts[0]).toMatchObject({
+      lastSize: 40,
+      bidSize: 10,
+      askSize: 12,
+      tradeTime: 1_760_000_000_000,
+      quoteTime: 1_760_000_000_500,
     });
   });
 

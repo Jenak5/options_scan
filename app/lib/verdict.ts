@@ -75,6 +75,7 @@ export interface SetupInput {
   underlyingPrice: number | null;
   consecutiveLosses: number | null;
   levels: KeyLevels | null;
+  printSummary?: string | null;
 }
 
 const GRADE_RANK: LetterGrade[] = ["A", "B", "C", "D"];
@@ -100,6 +101,7 @@ export function gradeFlowRow(row: FlowRow, consecutiveLosses: number | null): Al
     underlyingPrice: row.underlyingPrice,
     consecutiveLosses: knownLosses(consecutiveLosses),
     levels: row.levels,
+    printSummary: row.prints?.summary ?? null,
   });
 }
 
@@ -192,7 +194,7 @@ export function gradeSetup(input: SetupInput): AlertVerdict {
     verdictLabel: verdict === "STOP" ? "STOP for today" : verdict,
     grade,
     uncappedGrade: uncapped,
-    reasons: buildReasons(input, market, signals.length, verdict, expired, levelsRead.sentence),
+    reasons: buildReasons(input, market, signals.length, verdict, expired, levelsRead.sentence, input.printSummary ?? null),
     note: ALERT_RULES.note,
     levels: toStoredLevels(input.levels),
     levelsNote,
@@ -313,6 +315,7 @@ function buildReasons(
   verdict: VerdictName,
   expired: boolean,
   levelSentenceText: string,
+  printSummary: string | null,
 ): string[] {
   const head: string[] = [];
   if (expired) head.push("This expiration has already passed.");
@@ -341,10 +344,12 @@ function buildReasons(
     if (!line || unique.indexOf(line) !== -1) continue;
     unique.push(line);
   }
-  const rest = unique.filter((line) => line !== levelSentenceText);
+  const printText = printSummary?.trim() ?? "";
+  const rest = unique.filter((line) => line !== levelSentenceText && line !== printText);
   const picked: string[] = [];
   if (rest.length > 0) picked.push(rest[0]);
   if (levelSentenceText.trim()) picked.push(levelSentenceText.trim());
+  if (printText) picked.push(printText);
   for (let i = 1; i < rest.length && picked.length < 4; i++) picked.push(rest[i]);
   if (picked.length < 2) picked.push(ALERT_RULES.note);
   return picked.slice(0, 4);

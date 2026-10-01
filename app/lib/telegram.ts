@@ -72,6 +72,7 @@ export function formatFlowAlert(flow: {
   otm: boolean | null;
   volumeExceedsOi: boolean;
   volOiRatio: number | null;
+  prints?: { summary: string | null } | null;
   verdict?: {
     grade: string;
     verdictLabel: string;
@@ -107,6 +108,7 @@ export function formatFlowAlert(flow: {
     `📍 $${flow.strike} strike · ${escapeHtml(flow.expiration)}`,
     `📊 Vol: ${flow.volume.toLocaleString()} · OI: ${flow.openInterest.toLocaleString()} · IV: ${ivPct}`,
     `🧭 ${escapeHtml(flow.side)} · ${ratio}`,
+    flow.prints?.summary ? escapeHtml(flow.prints.summary) : "",
     flags ? `🏷 ${flags}` : "",
     ``,
     `⏰ ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZoneName: "short" })}`,

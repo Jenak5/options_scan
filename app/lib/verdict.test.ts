@@ -238,4 +238,16 @@ describe("alert checklist", () => {
     expect(html).toContain("5 &lt; 6 &amp; more");
     expect(html.includes("<script>")).toBe(false);
   });
+
+  it("puts a quote-derived print on the checklist without calling it an exchange sweep", () => {
+    const summary = "Detected from Schwab quotes: block print, 100 contracts at the ask (about $20K). Not an exchange-reported sweep.";
+    const result = gradeSetup(setup({ printSummary: summary }));
+    expect(result.verdict).toBe("TAKE");
+    expect(result.reasons).toContain(summary);
+    expect(result.reasons.length).toBeLessThanOrEqual(4);
+    expect(result.reasons.join(" ").includes("exchange-reported sweep")).toBe(true);
+    expect(result.reasons.join(" ").includes("Not an exchange-reported sweep")).toBe(true);
+    const html = formatVerdictHtml(result);
+    expect(html).toContain("Not an exchange-reported sweep.");
+  });
 });

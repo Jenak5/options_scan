@@ -1,6 +1,13 @@
 import type { OptionContract, PutCall } from "@/app/lib/contract";
 import type { KeyLevels } from "@/app/lib/levels";
+import { PRINT_RULES } from "@/app/lib/alertConfig";
 import { checkBidAskSpread, openInterestPasses, volumePasses } from "@/app/lib/gate";
+import {
+  detectPrints,
+  quotePointFromContract,
+  type FlowQuotePoint,
+  type PrintRead,
+} from "@/app/lib/prints";
 import {
   MAX_BID_ASK_SPREAD_OF_MID,
   MIN_CONTRACT_VOLUME,
@@ -61,6 +68,8 @@ export interface EstimatedSide {
 export interface FlowVolumeSnapshot {
   scannedAt: number;
   volumes: Record<string, number>;
+  /** Recent quote points per contract, oldest first. Missing on older snapshots. */
+  quotes?: Record<string, FlowQuotePoint[]>;
 }
 
 export interface FlowRow {
@@ -101,6 +110,8 @@ export interface FlowRow {
   underlyingPrice: number | null;
   /** Support and resistance for this ticker. Null until a history read fills them. */
   levels: KeyLevels | null;
+  /** Quote-derived prints. Null summary when no new trade was seen. */
+  prints: PrintRead;
   score: number;
 }
 
@@ -315,6 +326,8 @@ export function scoreChain(input: {
   previous: FlowVolumeSnapshot | null;
   now: Date;
   maxExpirations?: number;
+  /** Quote points from this scan, including any short follow-up reads. */
+  livePoints?: Record<string, FlowQuotePoint[]>;
 }): FlowRow[] {
   const today = newYorkDate(input.now);
   const limited = keepNearestExpirations(
@@ -342,6 +355,7 @@ export function scoreChain(input: {
       previous: input.previous,
       now: input.now,
       dte,
+      livePoints: input.livePoints?.[key] ?? null,
     }));
   });
   rows.sort((a, b) => b.score - a.score || (b.notionalPremium ?? 0) - (a.notionalPremium ?? 0));
@@ -356,6 +370,19 @@ export function snapshotFromRows(rows: FlowRow[], scannedAt: number): FlowVolume
     volumes[flowContractKey(row)] = row.volume;
   }
   return { scannedAt, volumes };
+}
+
+export function sameDayQuotePoints(points: FlowQuotePoint[] | undefined, now: Date): FlowQuotePoint[] {
+  if (!points) return [];
+  const today = newYorkDate(now);
+  const kept: FlowQuotePoint[] = [];
+  for (let i = 0; i < points.length; i++) {
+    const point = points[i];
+    if (!Number.isFinite(point.at)) continue;
+    if (newYorkDate(new Date(point.at)) !== today) continue;
+    kept.push(point);
+  }
+  return kept.slice(-PRINT_RULES.historyPoints);
 }
 
 export function filterFlowRows(rows: FlowRow[], filter: FlowFilter): FlowRow[] {
@@ -415,6 +442,9 @@ export function flowScore(input: {
   dte: number | null;
   spreadQuality: SpreadQuality;
   side: EstimatedSideLabel;
+  block?: boolean;
+  sweepLike?: boolean;
+  printDetected?: boolean;
 }): number {
   let score = 0;
   if (input.notionalPremium != null && input.notionalPremium > 0) {
@@ -436,6 +466,9 @@ export function flowScore(input: {
   else if (input.spreadQuality === "wide") score -= 10;
   if (input.side === "estimated at ask") score += 6;
   else if (input.side === "estimated mid") score += 2;
+  if (input.printDetected) score += PRINT_RULES.printScore;
+  if (input.block) score += PRINT_RULES.blockScore;
+  if (input.sweepLike) score += PRINT_RULES.sweepScore;
   return Math.round(score * 10) / 10;
 }
 
@@ -448,6 +481,7 @@ function scoreContract(input: {
   previous: FlowVolumeSnapshot | null;
   now: Date;
   dte: number;
+  livePoints: FlowQuotePoint[] | null;
 }): FlowRow {
   const contract = input.contract;
   const liquidity = liquidityOf(contract);
@@ -459,6 +493,11 @@ function scoreContract(input: {
   const quality = spreadQualityOf(liquidity.spreadFraction, liquidity.spread);
   const notional = notionalPremium(contract.volume, liquidity.mid);
   const exceeds = oiJump != null && oiJump > 0;
+  const priorPoints = sameDayQuotePoints(input.previous?.quotes?.[input.key], input.now);
+  const live = input.livePoints && input.livePoints.length > 0
+    ? input.livePoints
+    : [quotePointFromContract(contract, input.now.getTime())];
+  const prints = detectPrints({ points: priorPoints.concat(live), delayed: input.delayed });
   const score = flowScore({
     notionalPremium: notional,
     volOiRatio: ratio,
@@ -468,6 +507,9 @@ function scoreContract(input: {
     dte: input.dte,
     spreadQuality: quality,
     side: side.label,
+    block: prints.block,
+    sweepLike: prints.sweepLike,
+    printDetected: prints.summary != null,
   });
   return {
     id: `${input.ticker}|${input.key}`,
@@ -502,6 +544,7 @@ function scoreContract(input: {
     delayed: input.delayed,
     underlyingPrice: input.underlyingPrice,
     levels: null,
+    prints,
     score,
   };
 }
