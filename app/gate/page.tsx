@@ -5,6 +5,7 @@ import { SchwabBanner } from "@/app/components/SchwabBanner";
 import type { OptionContract } from "@/app/lib/contract";
 import type { GateCheck } from "@/app/lib/gate";
 import { formatLevelsSummary } from "@/app/lib/levels";
+import { defaultProfitRule, defaultTimeStop, type ExitPlan } from "@/app/lib/exits";
 import type { AlertVerdict } from "@/app/lib/verdict";
 import {
   ACCOUNT_SIZE_DOLLARS,
@@ -22,6 +23,10 @@ interface GateResponse {
   maxLoss: number | null;
   contract: OptionContract | null;
   verdict?: AlertVerdict | null;
+  dailyStop?: boolean;
+  weeklyNote?: string | null;
+  exits?: ExitPlan | null;
+  exitDefaults?: string;
   error?: string;
   reconnect?: string;
 }
@@ -47,9 +52,9 @@ export default function GatePage() {
   const [plannedEntry, setPlannedEntry] = useState("");
   const [debitSpreadWidth, setDebitSpreadWidth] = useState("");
   const [underlyingStop, setUnderlyingStop] = useState("");
-  const [timeStop, setTimeStop] = useState("");
-  const [profitRule, setProfitRule] = useState("");
-  const [consecutiveLosses, setConsecutiveLosses] = useState("0");
+  const [timeStop, setTimeStop] = useState(defaultTimeStop);
+  const [profitRule, setProfitRule] = useState(defaultProfitRule);
+  const [statusNote, setStatusNote] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reconnect, setReconnect] = useState<string | null>(null);
@@ -68,6 +73,18 @@ export default function GatePage() {
     const nextEntry = params.get("plannedEntry");
     if (nextEntry && Number.isFinite(Number(nextEntry)) && Number(nextEntry) > 0) setPlannedEntry(nextEntry);
   }, []);
+
+  useEffect(() => {
+    fetch("/api/trades")
+      .then((res) => res.json())
+      .then((json) => {
+        const bits: string[] = [];
+        if (json.stop?.dailyStop) bits.push(`Daily stop is on. ${json.stop.consecutiveLosses} closed losses in a row today.`);
+        if (typeof json.weeklyNote === "string" && json.weeklyNote) bits.push(json.weeklyNote);
+        setStatusNote(bits.length > 0 ? bits.join(" ") : null);
+      })
+      .catch(() => setStatusNote(null));
+  }, [result]);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -90,7 +107,6 @@ export default function GatePage() {
           underlyingStop,
           timeStop,
           profitRule,
-          consecutiveLosses: numberOrBlank(consecutiveLosses),
         }),
       });
       const json = await res.json();
@@ -133,12 +149,18 @@ export default function GatePage() {
       <div style={{ padding: 24, maxWidth: 760 }}>
         <SchwabBanner />
 
+        {statusNote && (
+          <div style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.28)", borderRadius: 8, padding: "10px 14px", marginBottom: 12, color: "#fbbf24", fontSize: 14 }}>
+            {statusNote}
+          </div>
+        )}
+
         <p style={{ color: "#94a3b8", fontSize: 14, lineHeight: 1.5, marginTop: 0 }}>
           Open interest at least {MIN_OPEN_INTEREST}, volume at least {MIN_CONTRACT_VOLUME} today,
           bid-ask spread at most {spreadPct}% of mid, and max loss at most ${MAX_LOSS_DOLLARS}.
           A long option uses contracts × ask × 100. A debit spread uses contracts × strike width × 100,
           which is the most that spread can be worth. Any failed check is an overall NO.
-          Two losses in a row stops the day. The loss count is typed in for now.
+          Two losing closes in a row, from the trade log, stop the day. There is no weekly loss limit.
         </p>
 
         <form onSubmit={onSubmit} className="gate-form">
@@ -165,9 +187,6 @@ export default function GatePage() {
           </Field>
           <Field label="Debit spread width (points, optional)">
             <input value={debitSpreadWidth} onChange={(e) => setDebitSpreadWidth(e.target.value)} inputMode="decimal" placeholder="Blank for a single option" style={INPUT} />
-          </Field>
-          <Field label="Consecutive losses today">
-            <input value={consecutiveLosses} onChange={(e) => setConsecutiveLosses(e.target.value)} inputMode="numeric" style={INPUT} />
           </Field>
           <Field label="Underlying stop" wide>
             <input value={underlyingStop} onChange={(e) => setUnderlyingStop(e.target.value)} placeholder="Exit if the underlying trades through…" style={INPUT} />
@@ -234,6 +253,12 @@ export default function GatePage() {
                 {result.verdict.eventLine && (
                   <div style={{ color: "#fbbf24", fontSize: 13, marginTop: 8 }}>{result.verdict.eventLine}</div>
                 )}
+              </div>
+            )}
+            {result.exits && (
+              <div style={{ color: "#94a3b8", fontSize: 13, marginBottom: 14, lineHeight: 1.45 }}>
+                {result.exits.lines.map((line) => <div key={line}>{line}</div>)}
+                <div style={{ color: "#64748b", marginTop: 4 }}>{result.exits.note}</div>
               </div>
             )}
             <div style={{

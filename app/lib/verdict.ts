@@ -32,7 +32,7 @@ import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 /**
  * Alert-time checklist. TAKE, WATCH, or SKIP, plus a letter grade.
  * Liquidity failures and a single contract over the loss cap are SKIP.
- * Two losses in a row, when that count is known, turns TAKE into STOP for today.
+ * Two losing closes in a row today turn TAKE into STOP for today.
  * A computed support and resistance can leave the grade at A.
  * Missing price history keeps the grade at B.
  * An unknown earnings date also keeps the grade at B.
@@ -381,7 +381,7 @@ function buildReasons(
   if (market.exceedsCap) tail.push(capSentence(input.ask));
   else tail.push(sizingSentence(market.maxContracts, input.ask));
   if (verdict === "STOP" && input.consecutiveLosses != null) {
-    tail.push(`${input.consecutiveLosses} losses in a row. The daily stop is on, so this is STOP for today instead of TAKE.`);
+    tail.push(`${input.consecutiveLosses} closed losses in a row today. The daily stop is on, so this is STOP for today instead of TAKE.`);
   } else if (input.consecutiveLosses != null && !dailyStopPasses(input.consecutiveLosses) && verdict === "WATCH") {
     tail.push("The daily stop is on, so this is not a TAKE.");
   }

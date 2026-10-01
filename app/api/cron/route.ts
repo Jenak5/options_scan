@@ -7,6 +7,7 @@ import { selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow"
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import { isChicagoMarketHours, isChicagoMinuteWindow } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
+import { planExitsForAsk } from "@/app/lib/exits";
 import { formatVerdictHtml } from "@/app/lib/telegram";
 import { gradeFlowRow, type AlertVerdict } from "@/app/lib/verdict";
 import { formatVolArbSummary, type VolArbReading, type VolSignal } from "@/app/lib/volArb";
@@ -114,11 +115,17 @@ Estimated flow from Schwab volume/open interest, not a sweep.
 💰 <b>${premStr}</b> notional
 🎯 Strike <b>$${row.strike}</b> · Exp <b>${row.expiration}</b>
 📊 ${escapeHtml(row.side)} · ${ratio} · IV ${iv} · OI ${oi}
-${row.prints?.summary ? `🖨 ${escapeHtml(row.prints.summary)}\n` : ""}📈 Vol Arb: <b>${escapeHtml(volSummary)}</b> — ${conviction.note}
+${row.prints?.summary ? `🖨 ${escapeHtml(row.prints.summary)}\n` : ""}${exitText(row.ask, verdict.maxContracts)}📈 Vol Arb: <b>${escapeHtml(volSummary)}</b> — ${conviction.note}
 
 🤖 <i>${escapeHtml(grokNote)}</i>
 
 <b>Options Edge Scanner</b>`;
+}
+
+function exitText(ask: number, maxContracts: number | null): string {
+  const plan = planExitsForAsk(ask, maxContracts);
+  if (!plan) return "";
+  return `${plan.lines.concat(plan.note).map((line) => escapeHtml(line)).join("\n")}\n`;
 }
 
 function escapeHtml(value: string): string {

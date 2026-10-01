@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { PutCall } from "@/app/lib/contract";
-import { rememberDailyLoss } from "@/app/lib/alertStore";
+import { loadRiskStatus } from "@/app/lib/alertStore";
+import { exitDefaultsSummary, planExits } from "@/app/lib/exits";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import { evaluateGate, findContract } from "@/app/lib/gate";
 import { earningsForTicker } from "@/app/lib/earnings";
@@ -37,6 +38,9 @@ export async function POST(request: NextRequest) {
       strike: parsed.value.strike,
       putCall: parsed.value.putCall,
     });
+    const now = new Date();
+    const risk = await loadRiskStatus(now);
+    const losses = risk.stop.consecutiveLosses;
     const result = evaluateGate({
       contract,
       contracts: parsed.value.contracts,
@@ -45,14 +49,9 @@ export async function POST(request: NextRequest) {
       underlyingStop: parsed.value.underlyingStop,
       timeStop: parsed.value.timeStop,
       profitRule: parsed.value.profitRule,
-      consecutiveLosses: parsed.value.consecutiveLosses,
+      consecutiveLosses: losses,
       delayed: chain.delayed,
     });
-    const losses = parsed.value.consecutiveLosses;
-    if (Number.isInteger(losses) && losses >= 0) {
-      await rememberDailyLoss(losses, new Date());
-    }
-    const now = new Date();
     const levels = await keyLevelsForTicker({
       ticker: parsed.value.ticker,
       spot: chain.underlyingPrice,
@@ -81,6 +80,11 @@ export async function POST(request: NextRequest) {
       delayed: chain.delayed,
       contract: result.contract,
       verdict,
+      dailyStop: risk.stop.dailyStop,
+      consecutiveLosses: losses,
+      weeklyNote: risk.weeklyNote,
+      exits: exitPlan(parsed.value, contract?.ask ?? null),
+      exitDefaults: exitDefaultsSummary(),
     });
   } catch (err) {
     if (err instanceof SchwabNotConnectedError) {
@@ -105,7 +109,6 @@ interface GateBody {
   underlyingStop: string;
   timeStop: string;
   profitRule: string;
-  consecutiveLosses: number;
 }
 
 function parseGateBody(body: unknown): { ok: true; value: GateBody } | { ok: false; error: string } {
@@ -126,7 +129,6 @@ function parseGateBody(body: unknown): { ok: true; value: GateBody } | { ok: fal
 
   const contracts = asNumber(row.contracts);
   const plannedEntry = asNumber(row.plannedEntry);
-  const consecutiveLosses = asNumber(row.consecutiveLosses);
   const widthRaw = row.debitSpreadWidth;
   let debitSpreadWidth: number | null = null;
   if (widthRaw !== null && widthRaw !== undefined && widthRaw !== "") {
@@ -148,7 +150,6 @@ function parseGateBody(body: unknown): { ok: true; value: GateBody } | { ok: fal
       underlyingStop: clip(row.underlyingStop),
       timeStop: clip(row.timeStop),
       profitRule: clip(row.profitRule),
-      consecutiveLosses: consecutiveLosses ?? Number.NaN,
     },
   };
 }
@@ -195,6 +196,17 @@ function asNumber(value: unknown): number | null {
 function clip(value: unknown): string {
   if (typeof value !== "string") return "";
   return value.trim().slice(0, MAX_RULE);
+}
+
+function exitPlan(input: GateBody, ask: number | null) {
+  const premium = Number.isFinite(input.plannedEntry) && input.plannedEntry > 0
+    ? input.plannedEntry
+    : ask != null && ask > 0
+      ? ask
+      : 0;
+  const contracts = Number.isInteger(input.contracts) && input.contracts >= 1 ? input.contracts : 1;
+  const structure = input.debitSpreadWidth != null && input.debitSpreadWidth > 0 ? "debit-spread" as const : "single" as const;
+  return planExits({ premium, contracts, structure });
 }
 
 function safeMessage(message: string): string {

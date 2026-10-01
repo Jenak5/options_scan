@@ -149,7 +149,7 @@ export interface QuoteChecks {
 
 /**
  * Liquidity, quote timing, and the single-contract cap.
- * Exit rules and the typed loss count stay in evaluateGate.
+ * Exit text and the trade-log loss count stay in evaluateGate.
  */
 export function evaluateQuoteChecks(contract: OptionContract | null, delayed: boolean): QuoteChecks {
   const checks: GateCheck[] = [
@@ -355,7 +355,7 @@ function dailyStopCheck(consecutiveLosses: number): GateCheck {
       id: "dailyStop",
       label: "Daily stop",
       status: "FAIL",
-      detail: "Enter how many losses in a row you have today, as a whole number.",
+      detail: "The daily stop needs a whole-number loss count from the trade log.",
     };
   }
   if (!dailyStopPasses(consecutiveLosses)) {
@@ -363,14 +363,14 @@ function dailyStopCheck(consecutiveLosses: number): GateCheck {
       id: "dailyStop",
       label: "Daily stop",
       status: "FAIL",
-      detail: `${consecutiveLosses} losses in a row. The daily stop is ${DAILY_STOP_CONSECUTIVE_LOSSES}.`,
+      detail: `${consecutiveLosses} closed losses in a row today. The daily stop is ${DAILY_STOP_CONSECUTIVE_LOSSES}.`,
     };
   }
   return {
     id: "dailyStop",
     label: "Daily stop",
     status: "PASS",
-    detail: `${consecutiveLosses} losses in a row. The daily stop is ${DAILY_STOP_CONSECUTIVE_LOSSES}.`,
+    detail: `${consecutiveLosses} closed losses in a row today. The daily stop is ${DAILY_STOP_CONSECUTIVE_LOSSES}.`,
   };
 }
 

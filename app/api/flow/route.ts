@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verdictBanner } from "@/app/lib/alertConfig";
-import { currentDailyLoss } from "@/app/lib/alertStore";
+import { loadRiskStatus } from "@/app/lib/alertStore";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import {
   FLOW_DISCLAIMER,
@@ -10,7 +10,6 @@ import {
   watchlistFromEnv,
 } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
-import { DAILY_STOP_CONSECUTIVE_LOSSES } from "@/app/lib/risk";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { gradeFlowRow } from "@/app/lib/verdict";
 
@@ -42,7 +41,8 @@ export async function GET(request: NextRequest) {
 
   try {
     const scan = await scanEstimatedFlow({ tickers, bypassCache: fresh });
-    const losses = await currentDailyLoss(new Date());
+    const risk = await loadRiskStatus(new Date());
+    const losses = risk.stop.consecutiveLosses;
     const data = filterFlowRows(scan.rows, { minPremium, otmOnly, liquidOnly, limit })
       .map((row) => ({ ...row, verdict: gradeFlowRow(row, losses) }));
     return NextResponse.json({
@@ -50,7 +50,8 @@ export async function GET(request: NextRequest) {
       disclaimer: FLOW_DISCLAIMER,
       verdictBanner: verdictBanner(),
       consecutiveLosses: losses,
-      dailyStop: losses != null && losses >= DAILY_STOP_CONSECUTIVE_LOSSES,
+      dailyStop: risk.stop.dailyStop,
+      weeklyNote: risk.weeklyNote,
       connected: true,
       cached: scan.cached,
       scannedAt: scan.scannedAt,

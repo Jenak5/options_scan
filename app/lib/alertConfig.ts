@@ -118,6 +118,34 @@ export const PRINT_RULES = {
   sweepScore: 12,
 };
 
+/**
+ * Exit rules and the manual trade log.
+ * These are starting defaults. Change a number here to tune them.
+ * Nothing here places an order.
+ */
+export const TRADE_RULES = {
+  /** Take this fraction of the contracts off at the profit target. 0.5 is half. */
+  scaleOutFraction: 0.5,
+  /** Profit target as a fraction of the debit paid. 0.30 is +30%. */
+  profitTargetFraction: 0.30,
+  /** Stop as a fraction of the debit paid, before the dollar cap. 0.25 is -25%. */
+  stopLossFraction: 0.25,
+  /** Be out by this Chicago clock time on a quick trade. 15:00 is the cash close. */
+  flatByMinutes: 15 * 60,
+  /** Also get out if the trade is still flat after this many minutes. */
+  flatAfterMinutes: 60,
+  /** A closed trade whose dollar P&L is inside this band is flat. */
+  flatAbsDollars: 1,
+  /** Information-only flag when the week's closed P&L is down this fraction of the account. */
+  weeklyDrawdownFraction: 0.25,
+  /** Same contract ceiling as the Gate. */
+  maxContracts: 100,
+  maxNoteLength: 240,
+  maxStoredTrades: 500,
+  note: "Starting defaults. Change these numbers to tune the exits. They are not a broker order.",
+  sampleNote: "The sample is small until many trades are closed. A win rate on a handful of trades is not a track record.",
+};
+
 export const SMALL_SAMPLE_NOTE =
   "The sample is small until many alerts are graded. A hit rate on a handful of names is not a track record.";
 

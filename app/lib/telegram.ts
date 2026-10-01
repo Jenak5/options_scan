@@ -1,3 +1,4 @@
+import { planExitsForAsk } from "@/app/lib/exits";
 import { formatLevelsSummary, type StoredPriceLevels } from "@/app/lib/levels";
 
 const TG_API = "https://api.telegram.org/bot";
@@ -66,6 +67,7 @@ export function formatFlowAlert(flow: {
   putCall: "call" | "put";
   strike: number;
   expiration: string;
+  ask: number;
   notionalPremium: number | null;
   volume: number;
   openInterest: number;
@@ -83,6 +85,7 @@ export function formatFlowAlert(flow: {
     levels: StoredPriceLevels | null;
     levelsNote: string | null;
     eventLine?: string | null;
+    maxContracts?: number | null;
   } | null;
 }): string {
   const emoji = flow.putCall === "call" ? "🟢" : "🔴";
@@ -112,10 +115,17 @@ export function formatFlowAlert(flow: {
     `📊 Vol: ${flow.volume.toLocaleString()} · OI: ${flow.openInterest.toLocaleString()} · IV: ${ivPct}`,
     `🧭 ${escapeHtml(flow.side)} · ${ratio}`,
     flow.prints?.summary ? escapeHtml(flow.prints.summary) : "",
+    exitBlock(flow.ask, flow.verdict?.maxContracts),
     flags ? `🏷 ${flags}` : "",
     ``,
     `⏰ ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZoneName: "short" })}`,
   ].filter(Boolean).join("\n");
+}
+
+function exitBlock(ask: number, maxContracts: number | null | undefined): string {
+  const plan = planExitsForAsk(ask, maxContracts);
+  if (!plan) return "";
+  return plan.lines.concat(plan.note).map((line) => escapeHtml(line)).join("\n");
 }
 
 function escapeHtml(value: string): string {

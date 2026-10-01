@@ -5,6 +5,7 @@ import { SchwabBanner } from "@/app/components/SchwabBanner";
 import type { AlertSummary, StoredAlert } from "@/app/lib/alertBook";
 import { FLOW_DISCLAIMER, gateCheckHref, type FlowRow } from "@/app/lib/flow";
 import { formatLevelsSummary } from "@/app/lib/levels";
+import { planExitsForAsk } from "@/app/lib/exits";
 import { ACCOUNT_SIZE_DOLLARS, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import { VOL_DEFINITIONS, VOL_DISCLAIMER, compareVolReadings, type VolArbReading } from "@/app/lib/volArb";
 import type { AlertVerdict } from "@/app/lib/verdict";
@@ -117,6 +118,16 @@ const BTN = (color: "cyan" | "gray" | "ghost"): React.CSSProperties => {
   return { background: map.bg, color: map.fg, border: `1px solid ${map.border}`, borderRadius: 6, padding: "8px 16px", fontSize: 15, cursor: "pointer" };
 };
 
+function ExitLines({ ask, maxContracts }: { ask: number; maxContracts: number | null }) {
+  const plan = planExitsForAsk(ask, maxContracts);
+  if (!plan) return null;
+  return (
+    <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 4, lineHeight: 1.4 }}>
+      {plan.lines.map((line) => <div key={line}>{line}</div>)}
+    </div>
+  );
+}
+
 function verdictColor(verdict: AlertVerdict["verdict"]): BadgeColor {
   if (verdict === "TAKE") return "green";
   if (verdict === "WATCH") return "amber";
@@ -166,6 +177,7 @@ function FlowTab() {
   const [disclaimer, setDisclaimer] = useState(FLOW_DISCLAIMER);
   const [verdictNote, setVerdictNote] = useState("");
   const [dailyStop, setDailyStop] = useState(false);
+  const [weeklyNote, setWeeklyNote] = useState<string | null>(null);
   const [partial, setPartial] = useState<string[]>([]);
   const [filters, setFilters] = useState({ ticker: "", minPremium: "50000", otmOnly: false, liquidOnly: true });
 
@@ -184,6 +196,7 @@ function FlowTab() {
       if (typeof json.disclaimer === "string") setDisclaimer(json.disclaimer);
       setVerdictNote(typeof json.verdictBanner === "string" ? json.verdictBanner : "");
       setDailyStop(json.dailyStop === true);
+      setWeeklyNote(typeof json.weeklyNote === "string" && json.weeklyNote ? json.weeklyNote : null);
       if (json.connected === false || res.status === 409 || res.status === 503) {
         setDisconnected(true);
         setReconnect(typeof json.reconnect === "string" ? json.reconnect : "");
@@ -213,7 +226,12 @@ function FlowTab() {
       )}
       {dailyStop && (
         <div style={{ background: "rgba(168,85,247,0.1)", border: "1px solid rgba(168,85,247,0.35)", borderRadius: 8, padding: "10px 14px", marginBottom: 12, color: "#d8b4fe", fontSize: 14 }}>
-          Daily stop is on. A setup that would have been TAKE shows STOP for today.
+          Daily stop is on. Two closed trades lost in a row today, so a setup that would have been TAKE shows STOP for today.
+        </div>
+      )}
+      {weeklyNote && (
+        <div style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.28)", borderRadius: 8, padding: "10px 14px", marginBottom: 12, color: "#fbbf24", fontSize: 14 }}>
+          {weeklyNote}
         </div>
       )}
 
@@ -300,6 +318,7 @@ function FlowTab() {
                           {f.verdict.eventLine && (
                             <div style={{ color: "#fbbf24", fontSize: 12, marginTop: 4 }}>{f.verdict.eventLine}</div>
                           )}
+                          <ExitLines ask={f.ask} maxContracts={f.verdict.maxContracts} />
                         </div>
                       ) : "—"}
                     </td>
@@ -808,7 +827,7 @@ function AlertsTab() {
           "Alerts only on contracts that pass the gate liquidity filters: open interest at least 500, volume at least 100, and spread at most 5% of mid. Notional still has to clear ALERT_MIN_PREMIUM.",
           "Side is estimated from the last price versus the bid and ask. This is not a sweep.",
           "Cross-checks the ticker's vol arb signal and asks Grok to screen for red flags (earnings, FDA, news).",
-          "If it is still a candidate, sends a Telegram alert with a TAKE, WATCH, or SKIP checklist grade. Two losses in a row, when that count was typed into the Gate today, shows STOP for today instead of TAKE.",
+          "If it is still a candidate, sends a Telegram alert with a TAKE, WATCH, or SKIP checklist grade, plus the exit defaults. Two losing closes in a row in the trade log today show STOP for today instead of TAKE.",
           "The same cron later re-quotes the mid at about 15 minutes, 1 hour, and the close. Alert Report compares those mids. That is an estimate, not a fill.",
         ].map((step, i) => (
           <div key={i} style={{ display: "flex", gap: 10, marginBottom: 6, fontSize: 14, color: "#94a3b8" }}>
@@ -1212,6 +1231,7 @@ function AlertReportTab() {
                       {alert.eventLine && (
                         <div style={{ color: "#fbbf24", fontSize: 12, marginTop: 4 }}>{alert.eventLine}</div>
                       )}
+                      <ExitLines ask={alert.ask} maxContracts={alert.maxContracts} />
                     </td>
                     {(["m15", "h1", "close"] as const).map((name) => (
                       <td key={name} style={{ ...TD_MONO, color: "#e2e8f0" }} title={checkpointTitle(alert.checkpoints[name])}>
@@ -1286,7 +1306,7 @@ export default function OptionsEdgeScanner() {
               <span style={{ color: "#06b6d4" }}>◆</span> OPTIONS EDGE SCANNER
             </h1>
             <p style={{ margin: "3px 0 0", color: "#475569", fontSize: 14 }}>
-              Estimated flow · Verdict · Alert Report · Trade Gate
+              Estimated flow · Verdict · Alert Report · Trade Gate · Trade log
             </p>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1302,6 +1322,10 @@ export default function OptionsEdgeScanner() {
           </div>
         </div>
         <div style={{ display: "flex", overflowX: "auto", padding: "0 24px" }}>
+          <a href="/trades" style={{
+            padding: "12px 18px", fontSize: 14, fontWeight: 600,
+            color: "#475569", letterSpacing: "0.03em", whiteSpace: "nowrap", textDecoration: "none",
+          }}>▣ Trades</a>
           <a href="/gate" style={{
             padding: "12px 18px", fontSize: 14, fontWeight: 600,
             color: "#475569", letterSpacing: "0.03em", whiteSpace: "nowrap", textDecoration: "none",
