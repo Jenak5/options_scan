@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { denyIfUnauthorized } from "@/app/lib/auth";
 import {
   getPositions,
   getBalances,
@@ -10,7 +11,11 @@ import {
   getLiveOrders,
 } from "@/app/lib/tastytrade";
 
+// Read-only. There is no POST/PUT/DELETE on this route, and no order placement.
 export async function GET(request: NextRequest) {
+  const denied = await denyIfUnauthorized(request);
+  if (denied) return denied;
+
   const action = request.nextUrl.searchParams.get("action");
   const symbol = request.nextUrl.searchParams.get("symbol");
 

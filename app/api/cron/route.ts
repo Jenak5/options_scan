@@ -1,17 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
+import { hasValidBearer } from "@/app/lib/auth";
+import { isChicagoMarketHours } from "@/app/lib/marketHours";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // AUTOMATED ALERT CRON  — /api/cron
-// Runs every 15 minutes via Vercel cron (see vercel.json)
-// Only processes during market hours: 9:30am–4:00pm ET, Mon–Fri
+// Vercel cron hits this every 15 minutes from 13:30 through 21:00 UTC on
+// weekdays (see vercel.json). That window covers Central market hours in
+// both daylight and standard time. This handler then keeps only
+// 8:30am–3:00pm America/Chicago, Monday–Friday.
 //
-// Required Vercel environment variables:
-//   UNUSUAL_WHALES_API_TOKEN  — UW API key
-//   TASTYTRADE_*              — already configured
+// Auth is Authorization: Bearer <CRON_SECRET> only. A query secret is ignored.
+//
+// Required Vercel environment variables (store secrets as Sensitive):
+//   UNUSUAL_WHALES_API_TOKEN
+//   TASTYTRADE_CLIENT_SECRET, TASTYTRADE_REFRESH_TOKEN  — OAuth, read-only
 //   XAI_API_KEY               — Grok for screening
-//   TELEGRAM_BOT_TOKEN        — from @BotFather
-//   TELEGRAM_CHAT_ID          — your chat ID with @PeachClawbot
-//   CRON_SECRET               — any random string, protects the endpoint
+//   TELEGRAM_BOT_TOKEN
+//   TELEGRAM_CHAT_ID
+//   CRON_SECRET
 // ═══════════════════════════════════════════════════════════════════════════
 
 const UW_BASE = "https://api.unusualwhales.com/api";
@@ -22,17 +28,6 @@ const TG_API  = (token: string) => `https://api.telegram.org/bot${token}`;
 // Best-effort in-memory dedup. Vercel cold starts reset this, so we use
 // a combo of ID tracking + Grok screening to avoid repeat alerts.
 const alertedIds = new Set<string>();
-
-// ── Market hours check (ET) ───────────────────────────────────────────────
-function isMarketHours(): boolean {
-  const now = new Date();
-  const day = now.getUTCDay();
-  if (day === 0 || day === 6) return false;
-  const month  = now.getUTCMonth() + 1;
-  const offset = (month >= 3 && month <= 11) ? 4 : 5;
-  const etTime = (now.getUTCHours() - offset) * 60 + now.getUTCMinutes();
-  return etTime >= 570 && etTime < 960; // 9:30–4:00
-}
 
 // ── UW API helper ─────────────────────────────────────────────────────────
 async function uwFetch(path: string, params?: Record<string, string>) {
@@ -66,12 +61,11 @@ async function getTTToken(): Promise<{ token: string | null; error: string }> {
       }),
     });
     if (!res.ok) {
-      const err = await res.text();
-      return { token: null, error: `TT token HTTP ${res.status}: ${err.slice(0, 100)}` };
+      return { token: null, error: `TT token HTTP ${res.status}` };
     }
     const data = await res.json();
     const token = data["access-token"] ?? data.access_token ?? null;
-    if (!token) return { token: null, error: `TT token response missing access-token field: ${JSON.stringify(data).slice(0,100)}` };
+    if (!token) return { token: null, error: "TT token response missing access-token field" };
     return { token, error: "" };
   } catch (e: any) {
     return { token: null, error: `TT token exception: ${e.message}` };
@@ -223,15 +217,17 @@ async function sendTelegram(message: string): Promise<boolean> {
 
 // ── Main handler ──────────────────────────────────────────────────────────
 export async function GET(request: NextRequest) {
-  const secret = request.headers.get("x-cron-secret") ??
-                 request.nextUrl.searchParams.get("secret");
-  if (secret !== process.env.CRON_SECRET) {
+  // Bearer only. Do not read ?secret= or x-cron-secret — those leak into logs.
+  if (!(await hasValidBearer(request))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   const isManual = request.nextUrl.searchParams.get("manual") === "true";
-  if (!isMarketHours() && !isManual) {
-    return NextResponse.json({ skipped: true, reason: "Outside market hours" });
+  if (!isChicagoMarketHours() && !isManual) {
+    return NextResponse.json({
+      skipped: true,
+      reason: "Outside Central market hours (8:30–15:00 America/Chicago)",
+    });
   }
 
   const log: string[] = [];
