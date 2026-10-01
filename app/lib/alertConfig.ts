@@ -13,10 +13,9 @@ export type LetterGrade = "A" | "B" | "C" | "D";
 
 export const ALERT_RULES = {
   /**
-   * Support and resistance are not built yet.
-   * While this is false, a checklist that would be an A is shown as B.
+   * Letter withheld when price history did not produce support and resistance.
+   * A computed level set removes this cap for that alert.
    */
-  levelsChecked: false,
   maxGradeUntilLevels: "B" as LetterGrade,
 
   /** Volume / open interest at or above this is one flow signal. */
@@ -42,6 +41,26 @@ export const ALERT_RULES = {
   maxItmFraction: 0.03,
 
   note: "Rules checklist only. This is not a prediction of profit.",
+};
+
+/**
+ * How nearby price levels change the checklist.
+ * These are distances, not a forecast. 0.004 means 0.4% of the underlying.
+ */
+export const LEVEL_RULES = {
+  /** At or inside this fraction, price is sitting on the next level. */
+  pinnedFraction: 0.0015,
+  /** Room to the next level at or above this is enough for that side. */
+  minRoomFraction: 0.004,
+  /** Reward distance divided by the distance the other way. Below this, the grade drops. */
+  minRewardToRisk: 1,
+  /** Daily candles used for swing highs and lows. */
+  dailyBars: 20,
+  swingWing: 2,
+  /** First minutes of the regular session treated as the open range. */
+  openRangeMinutes: 30,
+  /** Shared candle cache so a scan and the Gate do not each pull history. */
+  cacheMs: 3 * 60 * 1000,
 };
 
 export const OUTCOME_RULES = {
@@ -70,9 +89,6 @@ export const SMALL_SAMPLE_NOTE =
   "The sample is small until many alerts are graded. A hit rate on a handful of names is not a track record.";
 
 export function verdictBanner(): string {
-  const cap = ALERT_RULES.levelsChecked ? "A" : ALERT_RULES.maxGradeUntilLevels;
-  const levels = ALERT_RULES.levelsChecked
-    ? "Support and resistance are included in the grade."
-    : `Support and resistance are not checked yet, so a grade cannot be higher than ${cap}.`;
-  return `Checklist for a $${ACCOUNT_SIZE_DOLLARS.toLocaleString("en-US")} account with a $${MAX_LOSS_DOLLARS} loss cap. Not a prediction of profit. ${levels}`;
+  const cap = ALERT_RULES.maxGradeUntilLevels;
+  return `Checklist for a $${ACCOUNT_SIZE_DOLLARS.toLocaleString("en-US")} account with a $${MAX_LOSS_DOLLARS} loss cap. Not a prediction of profit. The grade can be an A when support and resistance are computed for that ticker. If price history is unavailable, the grade stops at ${cap}.`;
 }

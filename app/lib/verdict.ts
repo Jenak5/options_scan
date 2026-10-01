@@ -1,5 +1,13 @@
 import type { OptionContract, PutCall } from "@/app/lib/contract";
-import { ALERT_RULES, type LetterGrade } from "@/app/lib/alertConfig";
+import { ALERT_RULES, LEVEL_RULES, type LetterGrade } from "@/app/lib/alertConfig";
+import {
+  formatLevelDistance,
+  formatPrice,
+  toStoredLevels,
+  type KeyLevels,
+  type LevelPoint,
+  type StoredPriceLevels,
+} from "@/app/lib/levels";
 import {
   calendarDaysBetween,
   estimateSide,
@@ -24,7 +32,8 @@ import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
  * Alert-time checklist. TAKE, WATCH, or SKIP, plus a letter grade.
  * Liquidity failures and a single contract over the loss cap are SKIP.
  * Two losses in a row, when that count is known, turns TAKE into STOP for today.
- * Grades stop at B until support and resistance exist.
+ * A computed support and resistance can leave the grade at A.
+ * Missing price history keeps the grade at B.
  */
 
 export type VerdictName = "TAKE" | "WATCH" | "SKIP" | "STOP";
@@ -33,10 +42,11 @@ export interface AlertVerdict {
   verdict: VerdictName;
   verdictLabel: string;
   grade: LetterGrade;
-  /** Grade before the levels cap. A is withheld while levels are unchecked. */
+  /** Grade before the missing-levels cap. A level penalty is already applied. */
   uncappedGrade: LetterGrade;
   reasons: string[];
   note: string;
+  levels: StoredPriceLevels | null;
   levelsNote: string | null;
   maxContracts: number | null;
   singleContractExceedsCap: boolean;
@@ -64,6 +74,7 @@ export interface SetupInput {
   putCall: PutCall;
   underlyingPrice: number | null;
   consecutiveLosses: number | null;
+  levels: KeyLevels | null;
 }
 
 const GRADE_RANK: LetterGrade[] = ["A", "B", "C", "D"];
@@ -88,6 +99,7 @@ export function gradeFlowRow(row: FlowRow, consecutiveLosses: number | null): Al
     putCall: row.putCall,
     underlyingPrice: row.underlyingPrice,
     consecutiveLosses: knownLosses(consecutiveLosses),
+    levels: row.levels,
   });
 }
 
@@ -98,6 +110,7 @@ export function gradeContract(input: {
   now: Date;
   consecutiveLosses: number | null;
   volumeJump?: number | null;
+  levels?: KeyLevels | null;
 }): AlertVerdict {
   const contract = input.contract;
   const spread = checkBidAskSpread(contract.bid, contract.ask);
@@ -123,6 +136,7 @@ export function gradeContract(input: {
     putCall: contract.putCall,
     underlyingPrice: input.underlyingPrice,
     consecutiveLosses: knownLosses(input.consecutiveLosses),
+    levels: input.levels ?? null,
   });
 }
 
@@ -157,19 +171,30 @@ export function gradeSetup(input: SetupInput): AlertVerdict {
     uncapped = "D";
   }
 
-  const grade = capGrade(uncapped);
+  const levelsRead = assessLevels(input);
+  if (levelsRead.poor && !hardSkip) {
+    if (checklist === "TAKE") {
+      checklist = "WATCH";
+      uncapped = "C";
+    } else if (uncapped === "C") {
+      uncapped = "D";
+    }
+  }
+
+  const grade = capGrade(uncapped, levelsRead.checked);
   const verdict: VerdictName = dailyStop && checklist === "TAKE" ? "STOP" : checklist;
-  const levelsNote = ALERT_RULES.levelsChecked
+  const levelsNote = levelsRead.checked
     ? null
-    : `Support and resistance are not checked yet, so the grade stops at ${ALERT_RULES.maxGradeUntilLevels}.`;
+    : `Support and resistance were not available, so the grade stops at ${ALERT_RULES.maxGradeUntilLevels}.`;
 
   return {
     verdict,
     verdictLabel: verdict === "STOP" ? "STOP for today" : verdict,
     grade,
     uncappedGrade: uncapped,
-    reasons: buildReasons(input, market, signals.length, verdict, expired),
+    reasons: buildReasons(input, market, signals.length, verdict, expired, levelsRead.sentence),
     note: ALERT_RULES.note,
+    levels: toStoredLevels(input.levels),
     levelsNote,
     maxContracts: market.maxContracts,
     singleContractExceedsCap: market.exceedsCap,
@@ -232,10 +257,53 @@ function dteClass(dte: number | null): "ideal" | "acceptable" | "poor" {
   return "poor";
 }
 
-function capGrade(grade: LetterGrade): LetterGrade {
-  if (ALERT_RULES.levelsChecked) return grade;
+function capGrade(grade: LetterGrade, levelsChecked: boolean): LetterGrade {
+  if (levelsChecked) return grade;
   const cap = ALERT_RULES.maxGradeUntilLevels;
   return GRADE_RANK.indexOf(grade) < GRADE_RANK.indexOf(cap) ? cap : grade;
+}
+
+function assessLevels(input: SetupInput): { checked: boolean; poor: boolean; sentence: string } {
+  const unavailable = `Support and resistance were not available, so the grade stops at ${ALERT_RULES.maxGradeUntilLevels}.`;
+  const levels = input.levels;
+  if (!levels?.checked || !levels.support || !levels.resistance) {
+    return { checked: false, poor: false, sentence: unavailable };
+  }
+  const call = input.putCall === "call";
+  const reward = call ? levels.resistance : levels.support;
+  const risk = call ? levels.support : levels.resistance;
+  const rr = risk.distance > 0 ? reward.distance / risk.distance : Number.POSITIVE_INFINITY;
+  const pinned = reward.distance <= LEVEL_RULES.pinnedFraction;
+  const tight = reward.distance < LEVEL_RULES.minRoomFraction;
+  const poor = pinned || tight || rr < LEVEL_RULES.minRewardToRisk;
+  return {
+    checked: true,
+    poor,
+    sentence: levelSentence(input.putCall, levels.support, levels.resistance, pinned, tight, poor),
+  };
+}
+
+function levelSentence(
+  putCall: PutCall,
+  support: LevelPoint,
+  resistance: LevelPoint,
+  pinned: boolean,
+  tight: boolean,
+  poor: boolean,
+): string {
+  const side = putCall === "call" ? "call" : "put";
+  const next = putCall === "call" ? resistance : support;
+  const toward = putCall === "call" ? "under resistance" : "above support";
+  if (poor && pinned) {
+    return `Price is ${formatLevelDistance(next.distance)} ${toward} at ${formatPrice(next.price)} (${next.label}). That is tight for a ${side}, so the grade is lower.`;
+  }
+  if (poor && tight) {
+    return `Price is only ${formatLevelDistance(next.distance)} from ${formatPrice(next.price)} (${next.label}). That is tight for a ${side}, so the grade is lower.`;
+  }
+  if (poor) {
+    return `Resistance is ${formatLevelDistance(resistance.distance)} above and support is ${formatLevelDistance(support.distance)} below. The reward to the next level is poor for a ${side}, so the grade is lower.`;
+  }
+  return `Support ${formatPrice(support.price)} (${support.label}) is ${formatLevelDistance(support.distance)} below, and resistance ${formatPrice(resistance.price)} (${resistance.label}) is ${formatLevelDistance(resistance.distance)} above. There is room for a ${side}.`;
 }
 
 function buildReasons(
@@ -244,6 +312,7 @@ function buildReasons(
   signalCount: number,
   verdict: VerdictName,
   expired: boolean,
+  levelSentenceText: string,
 ): string[] {
   const head: string[] = [];
   if (expired) head.push("This expiration has already passed.");
@@ -262,8 +331,8 @@ function buildReasons(
   } else if (input.consecutiveLosses != null && !dailyStopPasses(input.consecutiveLosses) && verdict === "WATCH") {
     tail.push("The daily stop is on, so this is not a TAKE.");
   }
-  tail.push(flowSentence(input, signalCount));
   tail.push(timeSentence(input));
+  tail.push(flowSentence(input, signalCount));
 
   const unique: string[] = [];
   const merged = head.concat(tail);
@@ -272,9 +341,12 @@ function buildReasons(
     if (!line || unique.indexOf(line) !== -1) continue;
     unique.push(line);
   }
-  const picked = unique.slice(0, 4);
-  if (picked.length >= 2) return picked;
-  picked.push(ALERT_RULES.note);
+  const rest = unique.filter((line) => line !== levelSentenceText);
+  const picked: string[] = [];
+  if (rest.length > 0) picked.push(rest[0]);
+  if (levelSentenceText.trim()) picked.push(levelSentenceText.trim());
+  for (let i = 1; i < rest.length && picked.length < 4; i++) picked.push(rest[i]);
+  if (picked.length < 2) picked.push(ALERT_RULES.note);
   return picked.slice(0, 4);
 }
 

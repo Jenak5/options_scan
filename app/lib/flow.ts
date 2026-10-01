@@ -1,4 +1,5 @@
 import type { OptionContract, PutCall } from "@/app/lib/contract";
+import type { KeyLevels } from "@/app/lib/levels";
 import { checkBidAskSpread, openInterestPasses, volumePasses } from "@/app/lib/gate";
 import {
   MAX_BID_ASK_SPREAD_OF_MID,
@@ -98,6 +99,8 @@ export interface FlowRow {
   liquidityPasses: boolean;
   delayed: boolean;
   underlyingPrice: number | null;
+  /** Support and resistance for this ticker. Null until a history read fills them. */
+  levels: KeyLevels | null;
   score: number;
 }
 
@@ -498,6 +501,7 @@ function scoreContract(input: {
     liquidityPasses: liquidity.passes,
     delayed: input.delayed,
     underlyingPrice: input.underlyingPrice,
+    levels: null,
     score,
   };
 }

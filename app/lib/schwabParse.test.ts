@@ -6,6 +6,7 @@ import {
   buildAuthorizeUrl,
   marketDataGetUrl,
   parseOptionChain,
+  parsePriceHistory,
   parseQuotes,
   parseTokenResponse,
   publicTokenStatus,
@@ -19,16 +20,19 @@ afterEach(() => {
 });
 
 describe("market-data URL guard", () => {
-  it("allows chains and quotes and refuses everything else", () => {
+  it("allows chains, quotes, and price history and refuses everything else", () => {
     const chain = marketDataGetUrl("chains", new URLSearchParams({ symbol: "SPY" }));
     const quotes = marketDataGetUrl("quotes", new URLSearchParams({ symbols: "SPY" }));
+    const history = marketDataGetUrl("pricehistory", new URLSearchParams({ symbol: "SPY", periodType: "day" }));
     expect(chain.startsWith("https://api.schwabapi.com/marketdata/v1/chains?")).toBe(true);
     expect(quotes.startsWith("https://api.schwabapi.com/marketdata/v1/quotes?")).toBe(true);
+    expect(history.startsWith("https://api.schwabapi.com/marketdata/v1/pricehistory?")).toBe(true);
+    expect(history.includes("periodType=day")).toBe(true);
     expect(chain.includes("/orders")).toBe(false);
-    expect(() => marketDataGetUrl("orders", new URLSearchParams())).toThrow(/chains and quotes/);
-    expect(() => marketDataGetUrl("trader/v1/accounts", new URLSearchParams())).toThrow(/chains and quotes/);
-    expect(() => marketDataGetUrl("../trader/v1/orders", new URLSearchParams())).toThrow(/chains and quotes/);
-    expect(() => marketDataGetUrl("chains/../orders", new URLSearchParams())).toThrow(/chains and quotes/);
+    expect(() => marketDataGetUrl("orders", new URLSearchParams())).toThrow(/price history/);
+    expect(() => marketDataGetUrl("trader/v1/accounts", new URLSearchParams())).toThrow(/price history/);
+    expect(() => marketDataGetUrl("../trader/v1/orders", new URLSearchParams())).toThrow(/price history/);
+    expect(() => marketDataGetUrl("chains/../orders", new URLSearchParams())).toThrow(/price history/);
   });
 });
 
@@ -269,6 +273,23 @@ describe("quote and chain normalization", () => {
     });
     parseOptionChain({ callExpDateMap: {}, putExpDateMap: {} });
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("price history candles", () => {
+  it("keeps valid candles in time order and drops a broken one", () => {
+    const candles = parsePriceHistory({
+      candles: [
+        { open: 10, high: 11, low: 9, close: 10.5, volume: 100, datetime: 2000 },
+        { open: 8, high: 9, low: 7, close: 8, volume: 50, datetime: 1000 },
+        { open: 1, high: 1, low: 2, close: 1, volume: 1, datetime: 3000 },
+        { foo: "bar" },
+      ],
+    });
+    expect(candles.map((candle) => candle.datetime)).toEqual([1000, 2000]);
+    expect(candles[1].close).toBe(10.5);
+    expect(parsePriceHistory({ empty: true }).length).toBe(0);
+    expect(parsePriceHistory(null).length).toBe(0);
   });
 });
 

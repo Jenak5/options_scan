@@ -361,6 +361,7 @@ function fakeRow(over: Partial<FlowRow>): FlowRow {
     liquidityPasses: true,
     delayed: false,
     underlyingPrice: 100,
+    levels: null,
     score: 50,
     ...over,
   };

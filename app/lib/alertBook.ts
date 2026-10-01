@@ -1,6 +1,7 @@
 import { OUTCOME_RULES, type LetterGrade } from "@/app/lib/alertConfig";
 import { chicagoClock, chicagoDate } from "@/app/lib/marketHours";
 import type { EstimatedSideLabel, FlowRow } from "@/app/lib/flow";
+import type { StoredPriceLevels } from "@/app/lib/levels";
 import type { AlertVerdict, VerdictName } from "@/app/lib/verdict";
 
 /**
@@ -44,6 +45,8 @@ export interface StoredAlert {
   grade: LetterGrade;
   reasons: string[];
   note: string;
+  /** Nearest support and resistance at send time. Null when history was missing. */
+  levels: StoredPriceLevels | null;
   levelsNote: string | null;
   maxContracts: number | null;
   checkpoints: Record<CheckpointName, CheckpointQuote>;
@@ -140,6 +143,7 @@ export function buildStoredAlert(row: FlowRow, verdict: AlertVerdict, now: Date)
     grade: verdict.grade,
     reasons: verdict.reasons.slice(0, 4),
     note: verdict.note,
+    levels: verdict.levels,
     levelsNote: verdict.levelsNote,
     maxContracts: verdict.maxContracts,
     checkpoints: {
@@ -483,6 +487,7 @@ function parseAlert(value: unknown): StoredAlert | null {
     grade: row.grade,
     reasons,
     note: typeof row.note === "string" ? row.note.slice(0, 240) : "",
+    levels: parseStoredLevels(row.levels),
     levelsNote: typeof row.levelsNote === "string" ? row.levelsNote.slice(0, 240) : null,
     maxContracts: optionalCount(row.maxContracts),
     checkpoints,
@@ -520,6 +525,44 @@ function checkpointStatus(value: unknown): CheckpointStatus {
     return value;
   }
   return "pending";
+}
+
+function parseStoredLevels(value: unknown): StoredPriceLevels | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Partial<StoredPriceLevels>;
+  const supportPrice = positivePrice(row.supportPrice);
+  const resistancePrice = positivePrice(row.resistancePrice);
+  const supportDistance = levelDistance(row.supportDistance);
+  const resistanceDistance = levelDistance(row.resistanceDistance);
+  const supportLabel = levelLabel(row.supportLabel);
+  const resistanceLabel = levelLabel(row.resistanceLabel);
+  if (supportPrice == null || resistancePrice == null || supportDistance == null || resistanceDistance == null) return null;
+  if (!supportLabel || !resistanceLabel) return null;
+  return {
+    supportPrice,
+    supportLabel,
+    supportDistance,
+    resistancePrice,
+    resistanceLabel,
+    resistanceDistance,
+  };
+}
+
+function positivePrice(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 1_000_000) return null;
+  return value;
+}
+
+function levelDistance(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 5) return null;
+  return value;
+}
+
+function levelLabel(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (text.length < 2 || text.length > 40) return null;
+  return text;
 }
 
 function optionalNumber(value: unknown): number | null {

@@ -151,7 +151,7 @@ Each contract gets:
 
 The default watchlist is SPY, QQQ, IWM, AAPL, NVDA, TSLA, AMD, AMZN, MSFT, META, GOOGL, PLTR, SOFI, NFLX, and COIN. Set `FLOW_WATCHLIST` to replace it. A ticker typed into the filter scans that symbol instead.
 
-Requests stay on the chains endpoint, with `range=NTM`, `strikeCount=6`, and a date window of 35 days. Schwab has no parameter for "four expirations," so after the response the scorer keeps the nearest four. Scans run in batches of three and stay under about 120 chain reads per minute. Results are cached for about 60 seconds.
+Chain requests stay on the chains endpoint, with `range=NTM`, `strikeCount=6`, and a date window of 35 days. Each ticker also gets two price-history reads: about a month of daily candles, and today's 5-minute candles with the extended session. Those history reads are cached per ticker for a few minutes. Schwab has no parameter for "four expirations," so after the response the scorer keeps the nearest four. Scans run in batches of three. Chain reads stay under about 100 per minute, and price-history reads stay under about 60 per minute. Chain results are cached for about 60 seconds.
 
 Illiquid contracts are hidden by default: open interest at least 500, volume at least 100, and bid-ask spread at most 5% of the midpoint. Those are the same bars as the Gate. The Flow tab has a checkbox to show the rest. Each row has **Check in Gate**, which opens `/gate` with the ticker, expiration, strike, call or put, and the midpoint as the planned entry.
 
@@ -165,7 +165,9 @@ Every Flow row, Telegram alert, and Alert Report row carries a checklist verdict
 
 The checklist uses the Gate for open interest (at least 500), volume today (at least 100), spread (at most 5% of mid), and the $450 loss cap. One contract over $450 is an automatic **SKIP**, and the reason points at a debit spread. A failed liquidity check is also an automatic **SKIP**. Flow strength, days to expiration, and distance from the money decide TAKE versus WATCH. The message includes how many contracts fit under $450 at the ask.
 
-Support and resistance are not checked yet, so a grade cannot be higher than **B**. The wording says this is a rules checklist, not a prediction of profit.
+Support and resistance come from that Schwab price history plus high-open-interest strikes on the chain already fetched (a call wall and a put wall). Prior day high, low, and close, the pre-market range, the open, the session high and low so far, an open-range window, a candle VWAP when volume is present, recent swing highs and lows, and nearby round numbers are the other levels. VWAP is the volume-weighted typical price of the candles, not a tick print. The nearest support and resistance, and the distance to each, show on the Flow row, the Gate result, the Telegram alert, and the Alert Report. Those two levels are stored on the alert. No new environment variable.
+
+A call is favored when price is above support with room to the next resistance. A put is the mirror. The grade drops when a call is tight under resistance, a put is tight on support, or the reward to the next level is poor compared with the distance the other way. The letter can be an **A** only when those levels were computed. If price history is unavailable, the grade still stops at **B** and the checklist says so. Round numbers alone do not lift that cap. This is still a rules checklist, not a prediction of profit.
 
 If she types a loss count into the Gate, that count is kept for the Chicago session. Two losses in a row turns a TAKE into **STOP for today**. There is no broker fill log.
 

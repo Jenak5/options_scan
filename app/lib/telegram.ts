@@ -1,3 +1,5 @@
+import { formatLevelsSummary, type StoredPriceLevels } from "@/app/lib/levels";
+
 const TG_API = "https://api.telegram.org/bot";
 
 export function telegramConfigured(): boolean {
@@ -44,6 +46,7 @@ export function formatVerdictHtml(verdict: {
   verdictLabel: string;
   note: string;
   reasons: string[];
+  levels: StoredPriceLevels | null;
   levelsNote: string | null;
 }): string {
   const lines = [
@@ -51,6 +54,7 @@ export function formatVerdictHtml(verdict: {
     escapeHtml(verdict.note),
     ...verdict.reasons.map((reason) => `• ${escapeHtml(reason)}`),
   ];
+  if (verdict.levels) lines.push(escapeHtml(formatLevelsSummary(verdict.levels)));
   if (verdict.levelsNote) lines.push(escapeHtml(verdict.levelsNote));
   return lines.join("\n");
 }
@@ -73,6 +77,7 @@ export function formatFlowAlert(flow: {
     verdictLabel: string;
     note: string;
     reasons: string[];
+    levels: StoredPriceLevels | null;
     levelsNote: string | null;
   } | null;
 }): string {
