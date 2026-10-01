@@ -13,6 +13,12 @@ export const SCHWAB_BLOB_TOKEN_ENV = "BLOB_READ_WRITE_TOKEN";
 export const SCHWAB_BLOB_TOKEN_PATH = "schwab/tokens.json";
 
 /**
+ * Separate private-blob pathname for estimated-flow volume snapshots.
+ * Small JSON of prior contract volume. Not a token and not encrypted.
+ */
+export const SCHWAB_BLOB_FLOW_PATH = "schwab/flow-snapshots.json";
+
+/**
  * Shortest cache lifetime the Blob SDK accepts (60 seconds).
  * Token reads still bypass the CDN with useCache: false.
  */

@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { hasValidBearer } from "@/app/lib/auth";
+import { selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
+import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import { isChicagoMarketHours } from "@/app/lib/marketHours";
+import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // AUTOMATED ALERT CRON  — /api/cron
@@ -12,37 +15,21 @@ import { isChicagoMarketHours } from "@/app/lib/marketHours";
 // Auth is Authorization: Bearer <CRON_SECRET> only. A query secret is ignored.
 //
 // Required Vercel environment variables (store secrets as Sensitive):
-//   UNUSUAL_WHALES_API_TOKEN
 //   TASTYTRADE_CLIENT_SECRET, TASTYTRADE_REFRESH_TOKEN  — OAuth, read-only
 //   XAI_API_KEY               — Grok for screening
 //   TELEGRAM_BOT_TOKEN
 //   TELEGRAM_CHAT_ID
 //   CRON_SECRET
+//   Schwab market data + token store (already used by the Gate)
 // ═══════════════════════════════════════════════════════════════════════════
 
-const UW_BASE = "https://api.unusualwhales.com/api";
 const XAI_API = "https://api.x.ai/v1/chat/completions";
 const TG_API  = (token: string) => `https://api.telegram.org/bot${token}`;
 
-// ── Deduplication ─────────────────────────────────────────────────────────
-// Best-effort in-memory dedup. Vercel cold starts reset this, so we use
-// a combo of ID tracking + Grok screening to avoid repeat alerts.
+// Best-effort in-memory dedup. A cold start can repeat an alert.
 const alertedIds = new Set<string>();
 
-// ── UW API helper ─────────────────────────────────────────────────────────
-async function uwFetch(path: string, params?: Record<string, string>) {
-  const url = new URL(`${UW_BASE}${path}`);
-  if (params) Object.entries(params).forEach(([k, v]) => { if (v) url.searchParams.set(k, v); });
-  const res = await fetch(url.toString(), {
-    headers: {
-      Authorization: `Bearer ${process.env.UNUSUAL_WHALES_API_TOKEN}`,
-      "UW-CLIENT-API-ID": "100001",
-      Accept: "application/json",
-    },
-  });
-  if (!res.ok) throw new Error(`UW API (${res.status})`);
-  return res.json();
-}
+const INDEX_ETFS = new Set(["SPY", "QQQ", "IWM", "DIA", "XSP", "SPXW", "SPX", "VIX", "NDX", "RUT"]);
 
 // ── Tastytrade token (fetched once per cron run) ──────────────────────────
 async function getTTToken(): Promise<{ token: string | null; error: string }> {
@@ -67,8 +54,9 @@ async function getTTToken(): Promise<{ token: string | null; error: string }> {
     const token = data["access-token"] ?? data.access_token ?? null;
     if (!token) return { token: null, error: "TT token response missing access-token field" };
     return { token, error: "" };
-  } catch (e: any) {
-    return { token: null, error: `TT token exception: ${e.message}` };
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "TT token exception";
+    return { token: null, error: `TT token exception: ${message}` };
   }
 }
 
@@ -78,7 +66,7 @@ async function getVolSignal(ticker: string, token: string): Promise<string> {
     const ttBase = process.env.TASTYTRADE_ENV === "production"
       ? "https://api.tastyworks.com"
       : "https://api.cert.tastyworks.com";
-    const metricsRes = await fetch(`${ttBase}/market-metrics?symbols=${ticker}`, {
+    const metricsRes = await fetch(`${ttBase}/market-metrics?symbols=${encodeURIComponent(ticker)}`, {
       headers: {
         Authorization: `Bearer ${token}`,
         "User-Agent": "options-edge-scanner/1.0",
@@ -106,24 +94,20 @@ async function getVolSignal(ticker: string, token: string): Promise<string> {
 }
 
 // ── Grok screening ────────────────────────────────────────────────────────
-async function screenWithGrok(alert: any, volSignal: string): Promise<{ clean: boolean; reason: string }> {
+async function screenWithGrok(row: FlowRow, volSignal: string): Promise<{ clean: boolean; reason: string }> {
   const apiKey = process.env.XAI_API_KEY;
   if (!apiKey) return { clean: true, reason: "No XAI key — skipping screen" };
 
-  const premium = parseFloat(alert.total_premium ?? "0");
+  const premium = row.notionalPremium ?? 0;
   const premStr = premium >= 1_000_000
     ? `$${(premium / 1_000_000).toFixed(1)}M`
     : `$${(premium / 1_000).toFixed(0)}K`;
 
-  const askPrem = parseFloat(alert.total_ask_side_prem ?? "0");
-  const bidPrem = parseFloat(alert.total_bid_side_prem ?? "0");
-  const ratioStr = (askPrem + bidPrem) > 0
-    ? `${((askPrem / (askPrem + bidPrem)) * 100).toFixed(0)}%`
-    : "unknown";
-
-  const prompt = `A ${(alert.type ?? "").toUpperCase()} sweep just hit on ${alert.ticker}:
-- Strike: $${alert.strike}, Expiry: ${alert.expiry}
-- Premium: ${premStr}, Ask-side ratio: ${ratioStr}
+  const prompt = `Estimated options flow (not a sweep) on ${row.ticker} ${(row.putCall).toUpperCase()}:
+- Strike: $${row.strike}, Expiry: ${row.expiration}
+- Notional (volume × mid × 100): ${premStr}
+- Estimated side: ${row.side}
+- Vol/OI: ${row.volOiRatio != null ? row.volOiRatio.toFixed(2) : "n/a"}
 - Vol Arb signal: ${volSignal}
 
 In 1-2 sentences: are there any obvious red flags RIGHT NOW? (earnings tomorrow, FDA decision, halted, major news, stock in freefall) If no red flags, say "No red flags."`;
@@ -155,50 +139,45 @@ In 1-2 sentences: are there any obvious red flags RIGHT NOW? (earnings tomorrow,
   }
 }
 
-// ── Format Telegram message ───────────────────────────────────────────────
-function formatAlert(alert: any, volSignal: string, grokNote: string): string {
-  const premium = parseFloat(alert.total_premium ?? "0");
+function formatAlert(row: FlowRow, volSignal: string, grokNote: string): string {
+  const premium = row.notionalPremium ?? 0;
   const premStr = premium >= 1_000_000
     ? `$${(premium / 1_000_000).toFixed(1)}M`
     : `$${(premium / 1_000).toFixed(0)}K`;
-
-  const askPrem = parseFloat(alert.total_ask_side_prem ?? "0");
-  const bidPrem = parseFloat(alert.total_bid_side_prem ?? "0");
-  const ratio   = (askPrem + bidPrem) > 0
-    ? `${((askPrem / (askPrem + bidPrem)) * 100).toFixed(0)}% ask-side`
-    : "side unknown";
-
-  const typeEmoji = (alert.type ?? "").toLowerCase() === "call" ? "🟢" : "🔴";
-
-  // Index ETFs (SPY, QQQ, IWM) may be hedges — flag them
-  const isIndexETF = ["SPY","QQQ","IWM","DIA","XSP"].includes((alert.ticker ?? "").toUpperCase());
+  const typeEmoji = row.putCall === "call" ? "🟢" : "🔴";
+  const isIndexETF = INDEX_ETFS.has(row.ticker);
 
   const conviction =
-    isIndexETF               ? { emoji: "⚠️",  tier: "POSSIBLE HEDGE",   note: "Index ETF — could be portfolio hedge, not directional. Verify before trading." } :
-    volSignal === "BUY FRIENDLY" ? { emoji: "✅", tier: "HIGH CONVICTION",  note: "Sweep + cheap vol — best setup" } :
-    volSignal === "BUY VOL"      ? { emoji: "⚡", tier: "HIGH CONVICTION",  note: "Sweep + underpriced vol — rare edge" } :
-    volSignal === "CAUTION"      ? { emoji: "⚠️",  tier: "MEDIUM",           note: "Good sweep but vol not cheap — size smaller" } :
-    volSignal === "NEUTRAL"      ? { emoji: "🔵", tier: "MEDIUM",           note: "Good sweep, neutral vol — use flow as primary signal" } :
-    volSignal === "EXPENSIVE"    ? { emoji: "🔴", tier: "LOW — SKIP",       note: "Overpaying for vol — flow looks good but options are pricey" } :
-                                   { emoji: "❓", tier: "UNSCORED",          note: "Vol data unavailable" };
+    isIndexETF                   ? { emoji: "⚠️", tier: "POSSIBLE HEDGE",  note: "Index ETF — could be a portfolio hedge, not directional. Verify before trading." } :
+    volSignal === "BUY FRIENDLY" ? { emoji: "✅", tier: "HIGH CONVICTION", note: "Estimated flow + cheap vol" } :
+    volSignal === "BUY VOL"      ? { emoji: "⚡", tier: "HIGH CONVICTION", note: "Estimated flow + underpriced vol" } :
+    volSignal === "CAUTION"      ? { emoji: "⚠️", tier: "MEDIUM",          note: "Flow estimate is active but vol is not cheap" } :
+    volSignal === "NEUTRAL"      ? { emoji: "🔵", tier: "MEDIUM",          note: "Neutral vol — the volume estimate is the signal" } :
+    volSignal === "EXPENSIVE"    ? { emoji: "🔴", tier: "LOW — SKIP",      note: "Options look expensive versus realized vol" } :
+                                   { emoji: "❓", tier: "UNSCORED",         note: "Vol data unavailable" };
 
-  const iv = alert.iv_start ? `${(parseFloat(alert.iv_start) * 100).toFixed(0)}%` : "—";
-  const oi  = alert.open_interest ? Number(alert.open_interest).toLocaleString() : "—";
+  const iv = row.iv != null ? `${(row.iv * 100).toFixed(0)}%` : "—";
+  const oi = Number.isFinite(row.openInterest) ? row.openInterest.toLocaleString() : "—";
+  const ratio = row.volOiRatio != null ? `${row.volOiRatio.toFixed(2)}x vol/OI` : "vol/OI n/a";
 
-  return `${typeEmoji} <b>${alert.ticker} ${(alert.type ?? "").toUpperCase()} SWEEP</b>
+  return `${typeEmoji} <b>${row.ticker} ${row.putCall.toUpperCase()}</b>
 ${conviction.emoji} <b>${conviction.tier}</b>
+Estimated flow from Schwab volume/open interest, not a sweep.
 
-💰 <b>${premStr}</b> premium
-🎯 Strike <b>$${alert.strike}</b> · Exp <b>${alert.expiry ?? "?"}</b>
-📊 ${ratio} · IV ${iv} · OI ${oi}
-📈 Vol Arb: <b>${volSignal}</b> — ${conviction.note}
+💰 <b>${premStr}</b> notional
+🎯 Strike <b>$${row.strike}</b> · Exp <b>${row.expiration}</b>
+📊 ${escapeHtml(row.side)} · ${ratio} · IV ${iv} · OI ${oi}
+📈 Vol Arb: <b>${escapeHtml(volSignal)}</b> — ${conviction.note}
 
-🤖 <i>${grokNote}</i>
+🤖 <i>${escapeHtml(grokNote)}</i>
 
 <b>Options Edge Scanner</b>`;
 }
 
-// ── Telegram sender ───────────────────────────────────────────────────────
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 async function sendTelegram(message: string): Promise<boolean> {
   const token  = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -217,7 +196,7 @@ async function sendTelegram(message: string): Promise<boolean> {
 
 // ── Main handler ──────────────────────────────────────────────────────────
 export async function GET(request: NextRequest) {
-  // Bearer only. Do not read ?secret= or x-cron-secret — those leak into logs.
+  // Step 1 auth: Bearer only. Do not read ?secret= or x-cron-secret.
   if (!(await hasValidBearer(request))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -234,118 +213,68 @@ export async function GET(request: NextRequest) {
   let alertsSent = 0;
 
   try {
-    // ── 1. Fetch flow — two pools so individual stocks aren't crowded out ──
-    // Pool A: individual stocks only (exclude known index products)
-    // Pool B: index ETFs (SPY, QQQ) for macro context, capped small
-    const INDEX_ETFS = new Set(["SPY","QQQ","IWM","DIA","XSP","SPXW","SPX","VIX","NDX","RUT"]);
-
-    const [stockData, indexData] = await Promise.all([
-      uwFetch("/option-trades/flow-alerts", { limit: "50", min_premium: "50000" }),
-      uwFetch("/option-trades/flow-alerts", { limit: "20", min_premium: "100000", ticker_symbol: "SPY" }),
-    ]);
-
-    const stockAlerts: any[] = (stockData.data ?? [])
-      .filter((f: any) => !INDEX_ETFS.has((f.ticker ?? "").toUpperCase()));
-    const indexAlerts: any[] = (indexData.data ?? []).slice(0, 3);
-    const allAlerts: any[] = [...stockAlerts, ...indexAlerts];
-
-    log.push(`Fetched ${stockAlerts.length} individual stock alerts + ${indexAlerts.length} index alerts`);
-
-    // ── 2. Filter: sweep + opening + ask-side ─────────────────────────────
-    // Debug mode: pass ?debug=true to see why each alert was filtered
-    const isDebug = request.nextUrl.searchParams.get("debug") === "true";
-    let notSweep = 0, isClosing = 0, bidSide = 0, duped = 0;
-
-    const candidates = allAlerts.filter((f) => {
-      const id = f.id ?? `${f.ticker}-${f.strike}-${f.expiry}-${f.total_premium}`;
-      if (alertedIds.has(id)) { duped++; return false; }
-
-      // Accept sweeps AND repeated hits (equal conviction — repeated fills at same strike)
-      const rule = (f.alert_rule ?? "").toLowerCase();
-      const isSweep = f.has_sweep || f.is_sweep ||
-                      rule.includes("sweep") ||
-                      rule.includes("repeatedhits") ||
-                      rule.includes("repeated_hits");
-      if (!isSweep) { notSweep++; return false; }
-
-      // Only block if explicitly closing AND vol/OI confirms it (ratio < 0.5)
-      // null opening = unknown = let it through
-      const volOi = parseFloat(f.volume_oi_ratio ?? "1");
-      if (f.all_opening_trades === false && volOi < 0.5) { isClosing++; return false; }
-
-      const askP = parseFloat(f.total_ask_side_prem ?? "0");
-      const bidP = parseFloat(f.total_bid_side_prem ?? "0");
-      const sum  = askP + bidP;
-      if (sum > 0 && (askP / sum) < 0.65) { bidSide++; return false; }
-
-      return true;
+    const scan = await scanEstimatedFlow({
+      tickers: watchlistFromEnv(process.env.FLOW_WATCHLIST),
     });
-
-    log.push(`Filter breakdown — not a sweep: ${notSweep} | closing: ${isClosing} | bid-side: ${bidSide} | duped: ${duped} | passed: ${candidates.length}`);
-
-    if (isDebug && candidates.length === 0) {
-      // Show sample of raw alerts so we can see actual field values
-      const sample = allAlerts.slice(0, 3).map(f => {
-        const askP = parseFloat(f.total_ask_side_prem ?? "0");
-        const bidP = parseFloat(f.total_bid_side_prem ?? "0");
-        const sum  = askP + bidP;
-        const ratio = sum > 0 ? ((askP/sum)*100).toFixed(0)+"%" : "no split data";
-        const isSweep = f.has_sweep || f.is_sweep || (f.alert_rule ?? "").toLowerCase().includes("sweep");
-        return `${f.ticker} ${(f.type??"")} $${f.strike} | sweep:${isSweep} opening:${f.all_opening_trades} ask-side:${ratio} rule:${f.alert_rule??"-"}`;
-      });
-      log.push("Sample alerts: " + sample.join(" || "));
+    if (scan.errors.length > 0) {
+      log.push(`Chain errors: ${scan.errors.map((item) => item.ticker).join(", ")}`);
     }
+    log.push(`Scored ${scan.rows.length} contracts across ${scan.watchlist.length} tickers${scan.cached ? " (cached)" : ""}`);
 
-    // ── 3. Vol arb + Grok screen + alert ─────────────────────────────────
-    // Fetch Tastytrade token once — reuse for all candidates this run
+    const minPremium = Number(process.env.ALERT_MIN_PREMIUM || "100000");
+    const otmOnly = process.env.ALERT_OTM_ONLY === "true";
+    const candidates = selectAlertRows(scan.rows, {
+      minPremium: Number.isFinite(minPremium) ? minPremium : 100_000,
+      otmOnly,
+      limit: 40,
+    }).filter((row) => !alertedIds.has(row.id));
+
+    log.push(`Liquidity + premium filter passed ${candidates.length}`);
+
     const { token: ttToken, error: ttError } = await getTTToken();
     if (!ttToken) log.push(`Warning: Tastytrade token failed — ${ttError}`);
     else log.push("Tastytrade token OK");
 
-    // Per-run ticker dedup — only one alert per ticker per scan
     const alertedThisRun = new Set<string>();
 
-    for (const alert of candidates.slice(0, 8)) {
-      const id = alert.id ?? `${alert.ticker}-${alert.strike}-${alert.expiry}-${alert.total_premium}`;
-      const ticker = (alert.ticker ?? "").toUpperCase();
-
-      // Skip if we already alerted this ticker in this run
-      if (alertedThisRun.has(ticker)) {
-        log.push(`${ticker}: skipped — already alerted this run`);
+    for (const row of candidates.slice(0, 8)) {
+      if (alertedThisRun.has(row.ticker)) {
+        log.push(`${row.ticker}: skipped — already alerted this run`);
         continue;
       }
 
-      // Vol arb — skip for index ETFs, use shared token for individual stocks
-      const isIdx = ["SPY","QQQ","IWM","DIA","XSP"].includes((alert.ticker ?? "").toUpperCase());
-      const volSignal = isIdx ? "INDEX ETF" : ttToken ? await getVolSignal(alert.ticker, ttToken) : "UNKNOWN";
-      log.push(`${alert.ticker}: vol signal ${volSignal}`);
+      const isIdx = INDEX_ETFS.has(row.ticker);
+      const volSignal = isIdx ? "INDEX ETF" : ttToken ? await getVolSignal(row.ticker, ttToken) : "UNKNOWN";
+      log.push(`${row.ticker}: vol signal ${volSignal}`);
 
-      // Grok red flag screen
-      const { clean, reason } = await screenWithGrok(alert, volSignal);
-      alertedIds.add(id);
+      const { clean, reason } = await screenWithGrok(row, volSignal);
+      alertedIds.add(row.id);
 
       if (!clean) {
-        log.push(`${alert.ticker}: Grok flagged — ${reason}`);
+        log.push(`${row.ticker}: Grok flagged — ${reason}`);
         continue;
       }
-      log.push(`${alert.ticker}: Grok clean — ${reason}`);
+      log.push(`${row.ticker}: Grok clean — ${reason}`);
 
-      // Send
-      const message = formatAlert(alert, volSignal, reason);
-      const sent    = await sendTelegram(message);
-
+      const sent = await sendTelegram(formatAlert(row, volSignal, reason));
       if (sent) {
         alertsSent++;
-        alertedThisRun.add(ticker);
-        log.push(`${alert.ticker}: ✅ Telegram alert sent`);
+        alertedThisRun.add(row.ticker);
+        log.push(`${row.ticker}: Telegram alert sent`);
       } else {
-        log.push(`${alert.ticker}: ❌ Telegram send failed — check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID`);
+        log.push(`${row.ticker}: Telegram send failed — check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID`);
       }
     }
-
-  } catch (err: any) {
-    log.push(`Error: ${err.message}`);
-    return NextResponse.json({ error: err.message, log }, { status: 500 });
+  } catch (err) {
+    if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) {
+      log.push(err.message);
+      return NextResponse.json({ alertsSent: 0, skipped: true, reason: err.message, log });
+    }
+    const message = err instanceof Error && err.message.startsWith("Schwab ")
+      ? err.message.slice(0, 180)
+      : "Estimated flow scan failed";
+    log.push(message);
+    return NextResponse.json({ error: message, log }, { status: 500 });
   }
 
   return NextResponse.json({ alertsSent, log });

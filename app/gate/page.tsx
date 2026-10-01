@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { SchwabBanner } from "@/app/components/SchwabBanner";
 import type { OptionContract } from "@/app/lib/contract";
 import type { GateCheck } from "@/app/lib/gate";
@@ -51,6 +51,20 @@ export default function GatePage() {
   const [error, setError] = useState<string | null>(null);
   const [reconnect, setReconnect] = useState<string | null>(null);
   const [result, setResult] = useState<GateResponse | null>(null);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const nextTicker = params.get("ticker");
+    if (nextTicker && /^[A-Za-z][A-Za-z0-9.\-]{0,9}$/.test(nextTicker)) setTicker(nextTicker.toUpperCase());
+    const nextExpiration = params.get("expiration");
+    if (nextExpiration && /^\d{4}-\d{2}-\d{2}$/.test(nextExpiration)) setExpiration(nextExpiration);
+    const nextStrike = params.get("strike");
+    if (nextStrike && Number.isFinite(Number(nextStrike)) && Number(nextStrike) > 0) setStrike(nextStrike);
+    const nextRight = params.get("putCall");
+    if (nextRight === "put" || nextRight === "call") setPutCall(nextRight);
+    const nextEntry = params.get("plannedEntry");
+    if (nextEntry && Number.isFinite(Number(nextEntry)) && Number(nextEntry) > 0) setPlannedEntry(nextEntry);
+  }, []);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
