@@ -64,14 +64,80 @@ async function sign(secret: string, data: string): Promise<string> {
   return bytesToBase64Url(new Uint8Array(signature));
 }
 
+/**
+ * Lax, not Strict: Schwab sends the browser back with a cross-site top-level GET.
+ * Strict cookies are omitted on that request, so the callback looked logged-out
+ * and middleware bounced her through /login forever.
+ * httpOnly and Secure stay on. The value is the signed session token.
+ */
 export function sessionCookieOptions(maxAge: number = SESSION_MAX_AGE_SECONDS) {
   return {
     httpOnly: true,
     secure: true,
-    sameSite: "strict" as const,
+    sameSite: "lax" as const,
     path: "/",
     maxAge,
   };
+}
+
+/** OAuth state lives only long enough to finish the Schwab redirect. */
+export const OAUTH_STATE_MAX_AGE_SECONDS = 60 * 10;
+
+/** Signed, httpOnly, Secure, SameSite=Lax. Same cross-site reason as the session cookie. */
+export function oauthStateCookieOptions(maxAge: number = OAUTH_STATE_MAX_AGE_SECONDS) {
+  return {
+    httpOnly: true,
+    secure: true,
+    sameSite: "lax" as const,
+    path: "/",
+    maxAge,
+  };
+}
+
+/**
+ * Cookie value is `v1.<payload>.<hmac>`, not the raw state.
+ * The payload carries the state and an expiry. SESSION_SECRET signs it.
+ */
+export async function createSignedOAuthState(
+  state: string,
+  nowSeconds: number = Math.floor(Date.now() / 1000),
+): Promise<string | null> {
+  const secret = readEnv("SESSION_SECRET");
+  if (!secret) return null;
+  if (state.length === 0 || state.length > 256) return null;
+  const exp = nowSeconds + OAUTH_STATE_MAX_AGE_SECONDS;
+  const payload = bytesToBase64Url(new TextEncoder().encode(JSON.stringify({ state, exp })));
+  const signature = await sign(secret, `oes-oauth-state.v1.${payload}`);
+  return `v1.${payload}.${signature}`;
+}
+
+/** True only when the cookie is signed, unexpired, and binds this exact state. */
+export async function verifySignedOAuthState(
+  cookieValue: string | undefined | null,
+  state: string,
+  nowSeconds: number = Math.floor(Date.now() / 1000),
+): Promise<boolean> {
+  const secret = readEnv("SESSION_SECRET");
+  if (!secret || !cookieValue || state.length === 0) return false;
+  const parts = cookieValue.split(".");
+  if (parts.length !== 3 || parts[0] !== "v1") return false;
+  const payload = parts[1];
+  const signature = parts[2];
+  if (!payload || !signature) return false;
+  const expected = await sign(secret, `oes-oauth-state.v1.${payload}`);
+  if (!(await timingSafeEqual(signature, expected))) return false;
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(base64UrlToBytes(payload))) as {
+      state?: unknown;
+      exp?: unknown;
+    };
+    if (typeof parsed.state !== "string" || parsed.state.length === 0) return false;
+    if (typeof parsed.exp !== "number" || !Number.isFinite(parsed.exp)) return false;
+    if (parsed.exp < nowSeconds) return false;
+    return timingSafeEqual(parsed.state, state);
+  } catch {
+    return false;
+  }
 }
 
 export function getCookie(request: Request, name: string): string | undefined {

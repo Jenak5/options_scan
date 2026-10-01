@@ -28,14 +28,17 @@ Vercel sends `Authorization: Bearer <CRON_SECRET>`. The route accepts that heade
 
 ## Sign-in
 
-`/login` checks `APP_PASSWORD` and sets an **httpOnly, Secure, SameSite=Strict** cookie signed with `SESSION_SECRET`. The cookie lasts 7 days.
+`/login` checks `APP_PASSWORD` and sets an **httpOnly, Secure, SameSite=Lax** cookie signed with `SESSION_SECRET`. The cookie lasts 7 days. Lax is required so the cookie is sent when Schwab redirects the browser back to this app. Strict cookies are dropped on that cross-site GET, which used to bounce her to `/login` in a loop.
+
+If a page needs a session and she is signed out, middleware sends her to `/login?next=<path>`. `next` is a same-origin path only (no other host, no protocol-relative URL, no `/login`). After a successful sign-in the browser returns to that path. `/api/schwab/connect` is one of those paths, so Reconnect Schwab resumes instead of dumping her on the dashboard.
 
 Middleware requires that cookie, or `Authorization: Bearer <CRON_SECRET>`, on every page and `/api` route except:
 
 - `/login` and `POST /api/auth/login`
 - `POST /api/auth/logout`
 - `GET /api/cron` (bearer check inside the route)
-- `GET /api/schwab/callback` (OAuth `state` cookie only — see Schwab below)
+
+`GET /api/schwab/callback` requires the app session. It is not a public route.
 
 `/api/tastytrade` and `/api/alerts` check again in the route: app session or bearer. `/api/alerts` POST only forwards text to Telegram. It does not talk to the broker.
 
@@ -51,7 +54,7 @@ Set every secret in Vercel as a **Sensitive** variable. Do not leave them readab
 |----------|-----------|---------|
 | `CRON_SECRET` | Yes | Bearer token Vercel cron sends |
 | `APP_PASSWORD` | Yes | Password for `/login` |
-| `SESSION_SECRET` | Yes | Signs the session cookie |
+| `SESSION_SECRET` | Yes | Signs the session cookie and the Schwab OAuth state cookie |
 | `TASTYTRADE_CLIENT_SECRET` | Yes | OAuth client secret |
 | `TASTYTRADE_REFRESH_TOKEN` | Yes | OAuth refresh token |
 | `TASTYTRADE_ACCOUNT_NUMBER` | Yes | Account to read |
@@ -63,10 +66,10 @@ Set every secret in Vercel as a **Sensitive** variable. Do not leave them readab
 | `SCHWAB_CLIENT_ID` | Yes | Schwab Market Data app key |
 | `SCHWAB_CLIENT_SECRET` | Yes | Schwab Market Data app secret |
 | `SCHWAB_REDIRECT_URI` | Yes | Must match the callback URL registered on the Schwab app |
-| `KV_REST_API_URL` | Yes | Vercel KV / Upstash REST URL for Schwab tokens. Optional locally. |
-| `KV_REST_API_TOKEN` | Yes | Vercel KV / Upstash REST token. Optional locally. |
-| `UPSTASH_REDIS_REST_URL` | Yes | Alternate token-store URL if Vercel KV vars are not set |
-| `UPSTASH_REDIS_REST_TOKEN` | Yes | Alternate token-store token if Vercel KV vars are not set |
+| `KV_REST_API_URL` | Yes | Vercel KV REST URL. Required in production unless the Upstash pair below is set. |
+| `KV_REST_API_TOKEN` | Yes | Vercel KV REST token. Required in production unless the Upstash pair below is set. |
+| `UPSTASH_REDIS_REST_URL` | Yes | Upstash Redis REST URL. Used when `KV_REST_API_URL` is not set. |
+| `UPSTASH_REDIS_REST_TOKEN` | Yes | Upstash Redis REST token. Used when `KV_REST_API_TOKEN` is not set. |
 | `ALERT_MIN_PREMIUM` | No | Alert filter |
 | `ALERT_SWEEPS_ONLY` | No | Alert filter |
 | `ALERT_OTM_ONLY` | No | Alert filter |
@@ -102,17 +105,26 @@ Set the same callback URL on the Schwab developer app. A mismatch is the usual r
 
 OAuth is the authorization-code flow. The access token lasts about **30 minutes** and is refreshed on the server. The refresh token lasts **7 days**, so she re-authorizes in the browser about once a week. The dashboard banner has **Reconnect Schwab**. When fewer than **2 days** are left, the banner warns and Telegram gets a note (same sender as the other alerts). A failed refresh sends a Telegram note too. Neither message contains a token.
 
-Sign in to the scanner first, then use Reconnect Schwab. Schwab sends the browser to `/api/schwab/callback`. The session cookie is `SameSite=Strict`, so it is not included on that cross-site redirect. The callback is allowed through middleware and is checked with a short-lived `SameSite=Lax` state cookie instead. The code is exchanged on the server. Tokens are not put in the redirect, the page, or the status JSON.
+Sign in to the scanner first, then use Reconnect Schwab. `/api/schwab/connect` stores a signed OAuth `state` in a short-lived **httpOnly, Secure, SameSite=Lax** cookie (`oes_schwab_oauth_state`, 10 minutes, HMAC-signed with `SESSION_SECRET`). Schwab sends the browser to `/api/schwab/callback`. That request must include both the app session and a `state` query value that matches the signed cookie. The code is exchanged on the server. Tokens are not put in the redirect, the page, or the status JSON.
+
+Success redirects to the dashboard (`/?schwab=connected`) and the banner says **Schwab connected**. A failed check, a denied approval, or a token exchange error redirects to the dashboard with a readable error. The app does not send her back to Schwab on its own.
+
+If the session cookie is missing on the callback, she goes to `/login?next=/api/schwab/callback?...` and returns there after sign-in. The state cookie is left in place so the check can still pass.
 
 ### Where the tokens live
 
-| Store | When |
-|-------|------|
-| Vercel KV | `KV_REST_API_URL` and `KV_REST_API_TOKEN` are set |
-| Upstash Redis | `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` are set, and the KV pair is not |
-| Process memory | Neither pair is set |
+Set **one** of these pairs. Names are exact:
 
-KV and Upstash are the right store on Vercel. The value written there is encrypted with a key derived from `SESSION_SECRET`. Process memory is the local fallback: a restart or a cold start drops the token, and she has to reconnect. Do not expect the memory fallback to survive in production.
+| Store | Environment variables |
+|-------|------------------------|
+| Vercel KV | `KV_REST_API_URL` and `KV_REST_API_TOKEN` |
+| Upstash Redis | `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` |
+
+If both pairs are set, `KV_REST_API_URL` and `KV_REST_API_TOKEN` are used. The value written there is encrypted with a key derived from `SESSION_SECRET`.
+
+If neither pair is set **in production** (including on Vercel), the app does **not** fall back to process memory. Memory does not survive across serverless instances, so a connection saved that way looks lost on the next request. The dashboard banner says storage is not configured and names `KV_REST_API_URL`, `KV_REST_API_TOKEN`, `UPSTASH_REDIS_REST_URL`, and `UPSTASH_REDIS_REST_TOKEN`. Connect and the callback refuse to save a token until one pair is set.
+
+Process memory is only for local development, when `NODE_ENV` is not `production` and `VERCEL` is not `1`. A restart drops that token.
 
 Status (`GET /api/schwab/status`, session required) reports connected, expired, and days left on the refresh token. It does not return the tokens.
 

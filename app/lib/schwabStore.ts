@@ -1,4 +1,10 @@
 import type { StoredTokens } from "@/app/lib/schwabParse";
+import {
+  SCHWAB_KV_TOKEN_ENV,
+  SCHWAB_KV_URL_ENV,
+  SCHWAB_UPSTASH_TOKEN_ENV,
+  SCHWAB_UPSTASH_URL_ENV,
+} from "@/app/lib/schwabStorage";
 
 /**
  * Server-side Schwab token store.
@@ -9,8 +15,9 @@ import type { StoredTokens } from "@/app/lib/schwabParse";
  * The token JSON is encrypted with a key derived from SESSION_SECRET
  * before it is written. Values are never logged.
  *
- * Fallback: process memory. That survives only as long as this server
- * process does. On Vercel it disappears at the next cold start, so set KV.
+ * Fallback: process memory, and only outside production. A serverless
+ * instance does not share that memory, so production without KV or Upstash
+ * reports storage as not configured and refuses to pretend a token was saved.
  */
 
 export interface AlertMeta {
@@ -18,7 +25,7 @@ export interface AlertMeta {
   refreshFailAlertAt: number | null;
 }
 
-export type StoreKind = "kv" | "memory";
+export type StoreKind = "kv" | "memory" | "unconfigured";
 
 const TOKEN_KEY = "oes:schwab:tokens";
 const ALERT_KEY = "oes:schwab:alerts";
@@ -44,18 +51,27 @@ export function clearMemoryStoreForTests(): void {
 }
 
 export function kvRestConfig(): { url: string; token: string } | null {
-  const url = firstEnv("KV_REST_API_URL", "UPSTASH_REDIS_REST_URL");
-  const token = firstEnv("KV_REST_API_TOKEN", "UPSTASH_REDIS_REST_TOKEN");
+  const url = firstEnv(SCHWAB_KV_URL_ENV, SCHWAB_UPSTASH_URL_ENV);
+  const token = firstEnv(SCHWAB_KV_TOKEN_ENV, SCHWAB_UPSTASH_TOKEN_ENV);
   if (!url || !token) return null;
   return { url: url.replace(/\/$/, ""), token };
 }
 
+/** Production and Vercel do not keep a durable process, so memory is not a store. */
+export function durableStoreRequired(): boolean {
+  return process.env.NODE_ENV === "production" || process.env.VERCEL === "1";
+}
+
 export function resolveStoreKind(): StoreKind {
-  return kvRestConfig() ? "kv" : "memory";
+  if (kvRestConfig()) return "kv";
+  if (durableStoreRequired()) return "unconfigured";
+  return "memory";
 }
 
 export async function readTokens(): Promise<StoredTokens | null> {
-  if (resolveStoreKind() === "memory") return memoryBag().tokens;
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") return null;
+  if (kind === "memory") return memoryBag().tokens;
   try {
     const raw = await kvCommand(["GET", TOKEN_KEY]);
     if (typeof raw !== "string" || raw.length === 0) return null;
@@ -71,7 +87,11 @@ export async function writeTokens(tokens: StoredTokens): Promise<void> {
   if (!tokens.accessToken || !tokens.refreshToken) {
     throw new Error("Refusing to store an empty Schwab token");
   }
-  if (resolveStoreKind() === "memory") {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") {
+    throw new Error("Schwab token storage is not configured");
+  }
+  if (kind === "memory") {
     memoryBag().tokens = tokens;
     return;
   }
@@ -80,7 +100,9 @@ export async function writeTokens(tokens: StoredTokens): Promise<void> {
 }
 
 export async function readAlertMeta(): Promise<AlertMeta> {
-  if (resolveStoreKind() === "memory") return memoryBag().alerts;
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") return { ...EMPTY_ALERTS };
+  if (kind === "memory") return memoryBag().alerts;
   try {
     const raw = await kvCommand(["GET", ALERT_KEY]);
     if (typeof raw !== "string" || raw.length === 0) return { ...EMPTY_ALERTS };
@@ -91,7 +113,9 @@ export async function readAlertMeta(): Promise<AlertMeta> {
 }
 
 export async function writeAlertMeta(meta: AlertMeta): Promise<void> {
-  if (resolveStoreKind() === "memory") {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") return;
+  if (kind === "memory") {
     memoryBag().alerts = meta;
     return;
   }

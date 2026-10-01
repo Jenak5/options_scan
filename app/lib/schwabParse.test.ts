@@ -178,6 +178,23 @@ describe("refresh window", () => {
     expect(absent.connected).toBe(false);
     expect(JSON.stringify(absent).includes("fixture")).toBe(false);
   });
+
+  it("names the KV and Upstash env vars when production storage is not configured", () => {
+    const status = publicTokenStatus({
+      configured: true,
+      storage: "unconfigured",
+      accessExpiresAt: now + DAY,
+      refreshExpiresAt: now + DAY,
+      now,
+    });
+    expect(status.connected).toBe(false);
+    expect(status.storageWarning).toContain("KV_REST_API_URL");
+    expect(status.storageWarning).toContain("KV_REST_API_TOKEN");
+    expect(status.storageWarning).toContain("UPSTASH_REDIS_REST_URL");
+    expect(status.storageWarning).toContain("UPSTASH_REDIS_REST_TOKEN");
+    expect(status.message).toContain("not configured");
+    expect(JSON.stringify(status).includes("fixture")).toBe(false);
+  });
 });
 
 describe("quote and chain normalization", () => {

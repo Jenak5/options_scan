@@ -1,15 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAuthorized } from "@/app/lib/auth";
+import { safeNextPath } from "@/app/lib/safeNext";
 
 const PUBLIC_PATHS = new Set(["/login", "/api/auth/login", "/api/auth/logout"]);
+
+/**
+ * These are full browser navigations, not fetch() calls.
+ * A missing session should land on /login and come back, including the
+ * Schwab callback (code + state) and Reconnect Schwab.
+ */
+const BROWSER_API_PATHS = new Set(["/api/schwab/callback", "/api/schwab/connect"]);
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // Vercel cron authenticates itself with Authorization: Bearer.
-  // The Schwab callback is a cross-site redirect, so the SameSite=Strict
-  // session cookie is not sent. The route checks the OAuth state cookie.
-  if (pathname === "/api/cron" || pathname === "/api/schwab/callback" || PUBLIC_PATHS.has(pathname)) {
+  // The Schwab callback is not public: SameSite=Lax sends the session cookie
+  // on Schwab's cross-site GET, and the route also checks that session.
+  if (pathname === "/api/cron" || PUBLIC_PATHS.has(pathname)) {
     return NextResponse.next();
   }
 
@@ -22,13 +30,15 @@ export async function middleware(request: NextRequest) {
 
   if (allowed) return NextResponse.next();
 
-  if (pathname.startsWith("/api/")) {
+  if (pathname.startsWith("/api/") && !BROWSER_API_PATHS.has(pathname)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const next = safeNextPath(`${pathname}${request.nextUrl.search}`);
   const loginUrl = request.nextUrl.clone();
   loginUrl.pathname = "/login";
   loginUrl.search = "";
+  if (next) loginUrl.searchParams.set("next", next);
   return NextResponse.redirect(loginUrl);
 }
 

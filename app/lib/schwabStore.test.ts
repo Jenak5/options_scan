@@ -65,6 +65,31 @@ describe("token store", () => {
     expect(resolveStoreKind()).toBe("kv");
   });
 
+  it("refuses in-memory storage in production when KV and Upstash are unset", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousVercel = process.env.VERCEL;
+    try {
+      process.env.NODE_ENV = "production";
+      delete process.env.VERCEL;
+      expect(resolveStoreKind()).toBe("unconfigured");
+      await expect(writeTokens(tokens)).rejects.toThrow(/storage is not configured/);
+      expect(await readTokens()).toBeNull();
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+
+      process.env.NODE_ENV = "test";
+      process.env.VERCEL = "1";
+      expect(resolveStoreKind()).toBe("unconfigured");
+
+      process.env.KV_REST_API_URL = "https://example.invalid";
+      process.env.KV_REST_API_TOKEN = "fixture-store-token";
+      expect(resolveStoreKind()).toBe("kv");
+    } finally {
+      process.env.NODE_ENV = previousNodeEnv;
+      if (previousVercel === undefined) delete process.env.VERCEL;
+      else process.env.VERCEL = previousVercel;
+    }
+  });
+
   it("encrypts the payload so the token text is not stored in the clear", async () => {
     process.env.SESSION_SECRET = "unit-test-session-secret";
     const json = JSON.stringify(tokens);
