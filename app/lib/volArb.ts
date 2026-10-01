@@ -155,6 +155,15 @@ export function realizedVol(closes: number[], window: number, tradingDays: numbe
   return Math.sqrt(variance) * Math.sqrt(tradingDays) * 100;
 }
 
+/** One alert line. Same signal and numbers as the Vol Arb tab. */
+export function formatVolArbSummary(reading: VolArbReading): string {
+  if (reading.atmIv30 == null || reading.rv20 == null || reading.ivRvSpread == null || reading.signal === "NO_READ") {
+    return reading.message ?? "Schwab did not return ATM IV and 20-day realized vol.";
+  }
+  const spread = `${reading.ivRvSpread > 0 ? "+" : ""}${reading.ivRvSpread.toFixed(1)}`;
+  return `${reading.signal} — ATM IV ${reading.atmIv30.toFixed(1)}% vs RV 20d ${reading.rv20.toFixed(1)}% (${spread})`;
+}
+
 export function compareVolReadings(a: VolArbReading, b: VolArbReading): number {
   if (a.ivRvSpread == null && b.ivRvSpread == null) return a.symbol.localeCompare(b.symbol);
   if (a.ivRvSpread == null) return 1;

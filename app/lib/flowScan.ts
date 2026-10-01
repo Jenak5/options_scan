@@ -8,12 +8,13 @@ import {
   watchlistFromEnv,
   type FlowRow,
 } from "@/app/lib/flow";
+import { keyLevelsForTicker } from "@/app/lib/levelScan";
 import { getOptionChain, getSchwabStatus, SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { readFlowSnapshots, writeFlowSnapshots } from "@/app/lib/schwabStore";
 
 /**
- * Reads Schwab chains and scores them.
- * Chains only. No orders. Results are cached for about 60 seconds.
+ * Reads Schwab chains and scores them, then attaches cached price levels.
+ * Chains and price history only. No orders. Chain results are cached for about 60 seconds.
  * Volume snapshots go to a separate store key so the next poll can show a jump.
  */
 
@@ -78,6 +79,12 @@ export async function scanEstimatedFlow(options?: {
       try {
         const request = flowChainRequest(ticker, asOf);
         const chain = await getOptionChain(request);
+        const levels = await keyLevelsForTicker({
+          ticker,
+          spot: chain.underlyingPrice,
+          contracts: chain.contracts,
+          now,
+        });
         const scored = scoreChain({
           ticker,
           contracts: chain.contracts,
@@ -85,7 +92,7 @@ export async function scanEstimatedFlow(options?: {
           delayed: chain.delayed,
           previous: previous[ticker] ?? null,
           now: asOf,
-        });
+        }).map((row) => ({ ...row, levels }));
         rows.push(...scored);
         updates[ticker] = snapshotFromRows(scored, now);
       } catch (err) {

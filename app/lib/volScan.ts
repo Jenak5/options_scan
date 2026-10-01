@@ -129,7 +129,14 @@ async function readSymbol(symbol: string, now: Date): Promise<VolArbReading> {
   let priceHistoryFailed = false;
   try {
     await pace(Date.now());
-    const bars = await getPriceHistory(symbol);
+    const bars = await getPriceHistory({
+      symbol,
+      periodType: "month",
+      period: 3,
+      frequencyType: "daily",
+      frequency: 1,
+      needExtendedHoursData: false,
+    });
     closes = bars.map((bar) => bar.close);
   } catch (err) {
     if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;

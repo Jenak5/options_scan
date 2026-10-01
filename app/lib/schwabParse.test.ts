@@ -23,11 +23,12 @@ describe("market-data URL guard", () => {
   it("allows chains, quotes, and price history and refuses everything else", () => {
     const chain = marketDataGetUrl("chains", new URLSearchParams({ symbol: "SPY" }));
     const quotes = marketDataGetUrl("quotes", new URLSearchParams({ symbols: "SPY" }));
-    const history = marketDataGetUrl("pricehistory", new URLSearchParams({ symbol: "SPY", periodType: "month" }));
+    const history = marketDataGetUrl("pricehistory", new URLSearchParams({ symbol: "SPY", periodType: "day" }));
     expect(chain.startsWith("https://api.schwabapi.com/marketdata/v1/chains?")).toBe(true);
     expect(quotes.startsWith("https://api.schwabapi.com/marketdata/v1/quotes?")).toBe(true);
     expect(history.startsWith("https://api.schwabapi.com/marketdata/v1/pricehistory?")).toBe(true);
     expect(history.includes("symbol=SPY")).toBe(true);
+    expect(history.includes("periodType=day")).toBe(true);
     expect(chain.includes("/orders")).toBe(false);
     expect(history.includes("/trader")).toBe(false);
     expect(() => marketDataGetUrl("orders", new URLSearchParams())).toThrow(/price history/);
@@ -278,25 +279,21 @@ describe("quote and chain normalization", () => {
   });
 });
 
-describe("price history", () => {
-  it("keeps positive closes in time order and drops the rest", () => {
-    expect(parsePriceHistory({
+describe("price history candles", () => {
+  it("keeps valid candles in time order and drops a broken one", () => {
+    const candles = parsePriceHistory({
       candles: [
-        { close: 10, datetime: 2_000 },
-        { close: 0, datetime: 3_000 },
-        { close: "11.5", datetime: 1_000 },
-        { open: 9 },
-        { close: -1, datetime: 4_000 },
+        { open: 10, high: 11, low: 9, close: 10.5, volume: 100, datetime: 2000 },
+        { open: 8, high: 9, low: 7, close: 8, volume: 50, datetime: 1000 },
+        { open: 1, high: 1, low: 2, close: 1, volume: 1, datetime: 3000 },
+        { open: 5, high: 6, low: 4, close: 0, volume: 10, datetime: 4000 },
+        { foo: "bar" },
       ],
-    })).toEqual([
-      { close: 11.5, datetime: 1_000 },
-      { close: 10, datetime: 2_000 },
-    ]);
-  });
-
-  it("returns an empty list when Schwab sends no candles", () => {
-    expect(parsePriceHistory({ empty: true })).toEqual([]);
-    expect(parsePriceHistory(null)).toEqual([]);
+    });
+    expect(candles.map((candle) => candle.datetime)).toEqual([1000, 2000]);
+    expect(candles[1].close).toBe(10.5);
+    expect(parsePriceHistory({ empty: true }).length).toBe(0);
+    expect(parsePriceHistory(null).length).toBe(0);
   });
 });
 

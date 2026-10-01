@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { SchwabBanner } from "@/app/components/SchwabBanner";
 import type { AlertSummary, StoredAlert } from "@/app/lib/alertBook";
 import { FLOW_DISCLAIMER, gateCheckHref, type FlowRow } from "@/app/lib/flow";
+import { formatLevelsSummary } from "@/app/lib/levels";
 import { ACCOUNT_SIZE_DOLLARS, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import { VOL_DEFINITIONS, VOL_DISCLAIMER, compareVolReadings, type VolArbReading } from "@/app/lib/volArb";
 import type { AlertVerdict } from "@/app/lib/verdict";
@@ -290,6 +291,9 @@ function FlowTab() {
                           <ul style={{ margin: 0, paddingLeft: 16, color: "#94a3b8", fontSize: 12, lineHeight: 1.4 }}>
                             {f.verdict.reasons.map((reason) => <li key={reason}>{reason}</li>)}
                           </ul>
+                          {f.verdict.levels && (
+                            <div style={{ color: "#cbd5e1", fontSize: 12, marginTop: 4 }}>{formatLevelsSummary(f.verdict.levels)}</div>
+                          )}
                           {f.verdict.levelsNote && (
                             <div style={{ color: "#64748b", fontSize: 12, marginTop: 4 }}>{f.verdict.levelsNote}</div>
                           )}
@@ -1193,6 +1197,9 @@ function AlertReportTab() {
                       <ul style={{ margin: 0, paddingLeft: 16, color: "#94a3b8", fontSize: 12, lineHeight: 1.4 }}>
                         {alert.reasons.map((reason) => <li key={reason}>{reason}</li>)}
                       </ul>
+                      {alert.levels && (
+                        <div style={{ color: "#cbd5e1", fontSize: 12, marginTop: 4 }}>{formatLevelsSummary(alert.levels)}</div>
+                      )}
                       {alert.levelsNote && (
                         <div style={{ color: "#64748b", fontSize: 12, marginTop: 4 }}>{alert.levelsNote}</div>
                       )}

@@ -137,19 +137,32 @@ export async function getOptionChain(input: {
 const PRICE_HISTORY_SYMBOL = /^[A-Z][A-Z0-9.\-]{0,9}$/;
 
 /**
- * Daily closes from Schwab price history. Same market-data token as chains.
- * Three months is enough for 20-session realized vol. No orders.
+ * Daily or intraday candles. Read-only price history. No orders.
+ * Callers pass period and frequency. The symbol is the only free-form field.
  */
-export async function getPriceHistory(symbol: string): Promise<PriceCandle[]> {
-  const ticker = symbol.trim().toUpperCase();
-  if (!PRICE_HISTORY_SYMBOL.test(ticker)) throw new Error("Schwab symbol was rejected");
+export async function getPriceHistory(input: {
+  symbol: string;
+  periodType: "day" | "month";
+  period: number;
+  frequencyType: "minute" | "daily";
+  frequency: number;
+  needExtendedHoursData?: boolean;
+}): Promise<PriceCandle[]> {
+  const symbol = input.symbol.trim().toUpperCase();
+  if (!PRICE_HISTORY_SYMBOL.test(symbol)) throw new Error("Schwab market data request failed");
+  if (!Number.isInteger(input.period) || input.period < 1 || input.period > 10) {
+    throw new Error("Schwab market data request failed");
+  }
+  if (!Number.isInteger(input.frequency) || input.frequency < 1 || input.frequency > 30) {
+    throw new Error("Schwab market data request failed");
+  }
   const query = new URLSearchParams();
-  query.set("symbol", ticker);
-  query.set("periodType", "month");
-  query.set("period", "3");
-  query.set("frequencyType", "daily");
-  query.set("frequency", "1");
-  query.set("needExtendedHoursData", "false");
+  query.set("symbol", symbol);
+  query.set("periodType", input.periodType);
+  query.set("period", String(input.period));
+  query.set("frequencyType", input.frequencyType);
+  query.set("frequency", String(input.frequency));
+  query.set("needExtendedHoursData", input.needExtendedHoursData ? "true" : "false");
   const payload = await marketDataGet("pricehistory", query);
   return parsePriceHistory(payload);
 }

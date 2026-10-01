@@ -4,6 +4,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { SchwabBanner } from "@/app/components/SchwabBanner";
 import type { OptionContract } from "@/app/lib/contract";
 import type { GateCheck } from "@/app/lib/gate";
+import { formatLevelsSummary } from "@/app/lib/levels";
 import type { AlertVerdict } from "@/app/lib/verdict";
 import {
   ACCOUNT_SIZE_DOLLARS,
@@ -224,6 +225,9 @@ export default function GatePage() {
                 <ul style={{ margin: 0, paddingLeft: 18, color: "#cbd5e1", fontSize: 14, lineHeight: 1.45 }}>
                   {result.verdict.reasons.map((reason) => <li key={reason}>{reason}</li>)}
                 </ul>
+                {result.verdict.levels && (
+                  <div style={{ color: "#e2e8f0", fontSize: 14, marginTop: 8 }}>{formatLevelsSummary(result.verdict.levels)}</div>
+                )}
                 {result.verdict.levelsNote && (
                   <div style={{ color: "#94a3b8", fontSize: 13, marginTop: 8 }}>{result.verdict.levelsNote}</div>
                 )}

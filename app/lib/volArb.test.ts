@@ -6,6 +6,7 @@ import {
   VOL_DEFINITIONS,
   VOL_DISCLAIMER,
   buildVolArbReading,
+  formatVolArbSummary,
   realizedVol,
   signalFromSpread,
 } from "@/app/lib/volArb";
@@ -305,6 +306,35 @@ describe("buildVolArbReading", () => {
     expect(noIv.atmIv30).toBeNull();
     expect(noIv.rv20).toBe(0);
     expect(noIv.message).toMatch(/no usable at-the-money implied vol/);
+  });
+
+  it("formats the alert line from the same IV and realized-vol numbers", () => {
+    const rich = buildVolArbReading({
+      symbol: "SPY",
+      asOf: AS_OF,
+      underlyingPrice: 100,
+      delayed: false,
+      contracts: [
+        side("2026-10-30", 100, "call", 0.21),
+        side("2026-10-30", 100, "put", 0.21),
+      ],
+      closes: Array(30).fill(100),
+    });
+    const line = formatVolArbSummary(rich);
+    expect(line).toBe("RICH — ATM IV 21.0% vs RV 20d 0.0% (+21.0)");
+    expect(line.includes("UNKNOWN")).toBe(false);
+
+    const withheld = buildVolArbReading({
+      symbol: "SPY",
+      asOf: AS_OF,
+      underlyingPrice: 100,
+      delayed: true,
+      contracts: [side("2026-10-30", 100, "call", 0.4)],
+      closes: Array(30).fill(100),
+    });
+    const missing = formatVolArbSummary(withheld);
+    expect(missing).toMatch(/delayed/);
+    expect(missing.includes("UNKNOWN")).toBe(false);
   });
 
   it("says what each published number is, and does not call it an IV rank", () => {

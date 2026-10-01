@@ -9,6 +9,8 @@ import { isChicagoMarketHours, isChicagoMinuteWindow } from "@/app/lib/marketHou
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { formatVerdictHtml } from "@/app/lib/telegram";
 import { gradeFlowRow, type AlertVerdict } from "@/app/lib/verdict";
+import { formatVolArbSummary, type VolArbReading, type VolSignal } from "@/app/lib/volArb";
+import { scanVolArb } from "@/app/lib/volScan";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // AUTOMATED ALERT CRON  — /api/cron
@@ -20,12 +22,11 @@ import { gradeFlowRow, type AlertVerdict } from "@/app/lib/verdict";
 // Auth is Authorization: Bearer <CRON_SECRET> only. A query secret is ignored.
 //
 // Required Vercel environment variables (store secrets as Sensitive):
-//   TASTYTRADE_CLIENT_SECRET, TASTYTRADE_REFRESH_TOKEN  — OAuth, read-only
 //   XAI_API_KEY               — Grok for screening
 //   TELEGRAM_BOT_TOKEN
 //   TELEGRAM_CHAT_ID
 //   CRON_SECRET
-//   Schwab market data + token store (already used by the Gate)
+//   Schwab market data + token store (chains, quotes, and price history)
 // ═══════════════════════════════════════════════════════════════════════════
 
 const XAI_API = "https://api.x.ai/v1/chat/completions";
@@ -35,68 +36,6 @@ const TG_API  = (token: string) => `https://api.telegram.org/bot${token}`;
 const alertedIds = new Set<string>();
 
 const INDEX_ETFS = new Set(["SPY", "QQQ", "IWM", "DIA", "XSP", "SPXW", "SPX", "VIX", "NDX", "RUT"]);
-
-// ── Tastytrade token (fetched once per cron run) ──────────────────────────
-async function getTTToken(): Promise<{ token: string | null; error: string }> {
-  try {
-    const ttBase = process.env.TASTYTRADE_ENV === "production"
-      ? "https://api.tastyworks.com"
-      : "https://api.cert.tastyworks.com";
-    const res = await fetch(`${ttBase}/oauth/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type:    "refresh_token",
-        refresh_token: process.env.TASTYTRADE_REFRESH_TOKEN ?? "",
-        client_id:     "tastytrade-web",
-        client_secret: process.env.TASTYTRADE_CLIENT_SECRET ?? "",
-      }),
-    });
-    if (!res.ok) {
-      return { token: null, error: `TT token HTTP ${res.status}` };
-    }
-    const data = await res.json();
-    const token = data["access-token"] ?? data.access_token ?? null;
-    if (!token) return { token: null, error: "TT token response missing access-token field" };
-    return { token, error: "" };
-  } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "TT token exception";
-    return { token: null, error: `TT token exception: ${message}` };
-  }
-}
-
-// ── Tastytrade vol arb helper ─────────────────────────────────────────────
-async function getVolSignal(ticker: string, token: string): Promise<string> {
-  try {
-    const ttBase = process.env.TASTYTRADE_ENV === "production"
-      ? "https://api.tastyworks.com"
-      : "https://api.cert.tastyworks.com";
-    const metricsRes = await fetch(`${ttBase}/market-metrics?symbols=${encodeURIComponent(ticker)}`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "User-Agent": "options-edge-scanner/1.0",
-      },
-    });
-    if (!metricsRes.ok) return "UNKNOWN";
-    const metricsData = await metricsRes.json();
-    const d = metricsData?.data?.items?.[0] ?? metricsData?.data?.[0];
-    if (!d) return "UNKNOWN";
-
-    const iv      = parseFloat(d["implied-volatility-30-day"] ?? "0");
-    const hv      = parseFloat(d["historical-volatility-30-day"] ?? "0");
-    const rankRaw = parseFloat(d["implied-volatility-index-rank"] ?? "0.5");
-    const ivRank  = rankRaw <= 1 ? rankRaw * 100 : rankRaw;
-    const spread  = parseFloat(d["iv-hv-30-day-difference"] ?? String(iv - hv));
-
-    if (ivRank < 25 && spread < 10)  return "BUY FRIENDLY";
-    if (ivRank < 25 && spread >= 10) return "CAUTION";
-    if (spread < 0)                  return "BUY VOL";
-    if (spread > 20)                 return "EXPENSIVE";
-    return "NEUTRAL";
-  } catch {
-    return "UNKNOWN";
-  }
-}
 
 // ── Grok screening ────────────────────────────────────────────────────────
 async function screenWithGrok(row: FlowRow, volSignal: string): Promise<{ clean: boolean; reason: string }> {
@@ -144,22 +83,23 @@ In 1-2 sentences: are there any obvious red flags RIGHT NOW? (earnings tomorrow,
   }
 }
 
-function formatAlert(row: FlowRow, volSignal: string, grokNote: string, verdict: AlertVerdict): string {
+function convictionFor(ticker: string, signal: VolSignal | null): { emoji: string; tier: string; note: string } {
+  if (INDEX_ETFS.has(ticker)) {
+    return { emoji: "⚠️", tier: "POSSIBLE HEDGE", note: "Index ETF — could be a portfolio hedge, not directional. Verify before trading." };
+  }
+  if (signal === "CHEAP") return { emoji: "✅", tier: "HIGH CONVICTION", note: "Estimated flow + cheap vol versus realized" };
+  if (signal === "RICH") return { emoji: "🔴", tier: "LOW — SKIP", note: "Options look expensive versus realized vol" };
+  if (signal === "NEUTRAL") return { emoji: "🔵", tier: "MEDIUM", note: "Neutral vol — the volume estimate is the signal" };
+  return { emoji: "❓", tier: "UNSCORED", note: "Schwab did not return ATM IV versus realized vol" };
+}
+
+function formatAlert(row: FlowRow, volSummary: string, signal: VolSignal | null, grokNote: string, verdict: AlertVerdict): string {
   const premium = row.notionalPremium ?? 0;
   const premStr = premium >= 1_000_000
     ? `$${(premium / 1_000_000).toFixed(1)}M`
     : `$${(premium / 1_000).toFixed(0)}K`;
   const typeEmoji = row.putCall === "call" ? "🟢" : "🔴";
-  const isIndexETF = INDEX_ETFS.has(row.ticker);
-
-  const conviction =
-    isIndexETF                   ? { emoji: "⚠️", tier: "POSSIBLE HEDGE",  note: "Index ETF — could be a portfolio hedge, not directional. Verify before trading." } :
-    volSignal === "BUY FRIENDLY" ? { emoji: "✅", tier: "HIGH CONVICTION", note: "Estimated flow + cheap vol" } :
-    volSignal === "BUY VOL"      ? { emoji: "⚡", tier: "HIGH CONVICTION", note: "Estimated flow + underpriced vol" } :
-    volSignal === "CAUTION"      ? { emoji: "⚠️", tier: "MEDIUM",          note: "Flow estimate is active but vol is not cheap" } :
-    volSignal === "NEUTRAL"      ? { emoji: "🔵", tier: "MEDIUM",          note: "Neutral vol — the volume estimate is the signal" } :
-    volSignal === "EXPENSIVE"    ? { emoji: "🔴", tier: "LOW — SKIP",      note: "Options look expensive versus realized vol" } :
-                                   { emoji: "❓", tier: "UNSCORED",         note: "Vol data unavailable" };
+  const conviction = convictionFor(row.ticker, signal);
 
   const iv = row.iv != null ? `${(row.iv * 100).toFixed(0)}%` : "—";
   const oi = Number.isFinite(row.openInterest) ? row.openInterest.toLocaleString() : "—";
@@ -174,7 +114,7 @@ Estimated flow from Schwab volume/open interest, not a sweep.
 💰 <b>${premStr}</b> notional
 🎯 Strike <b>$${row.strike}</b> · Exp <b>${row.expiration}</b>
 📊 ${escapeHtml(row.side)} · ${ratio} · IV ${iv} · OI ${oi}
-📈 Vol Arb: <b>${escapeHtml(volSignal)}</b> — ${conviction.note}
+📈 Vol Arb: <b>${escapeHtml(volSummary)}</b> — ${conviction.note}
 
 🤖 <i>${escapeHtml(grokNote)}</i>
 
@@ -259,13 +199,30 @@ export async function GET(request: NextRequest) {
 
     log.push(`Liquidity + premium filter passed ${candidates.length}`);
 
-    const { token: ttToken, error: ttError } = await getTTToken();
-    if (!ttToken) log.push(`Warning: Tastytrade token failed — ${ttError}`);
-    else log.push("Tastytrade token OK");
-
     const alertedThisRun = new Set<string>();
+    const queued = candidates.slice(0, 8);
+    const volByTicker = new Map<string, VolArbReading>();
+    const volMiss = new Map<string, string>();
+    const symbols: string[] = [];
+    const seenTickers = new Set<string>();
+    for (let i = 0; i < queued.length; i++) {
+      const ticker = queued[i].ticker;
+      if (seenTickers.has(ticker)) continue;
+      seenTickers.add(ticker);
+      symbols.push(ticker);
+    }
+    if (symbols.length > 0) {
+      try {
+        const vol = await scanVolArb({ symbols });
+        for (const reading of vol.rows) volByTicker.set(reading.symbol, reading);
+        for (const item of vol.errors) volMiss.set(item.symbol, item.message);
+      } catch (err) {
+        if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+        log.push("Vol Arb scan failed");
+      }
+    }
 
-    for (const row of candidates.slice(0, 8)) {
+    for (const row of queued) {
       if (alertedThisRun.has(row.ticker)) {
         log.push(`${row.ticker}: skipped — already alerted this run`);
         continue;
@@ -276,11 +233,14 @@ export async function GET(request: NextRequest) {
         continue;
       }
 
-      const isIdx = INDEX_ETFS.has(row.ticker);
-      const volSignal = isIdx ? "INDEX ETF" : ttToken ? await getVolSignal(row.ticker, ttToken) : "UNKNOWN";
-      log.push(`${row.ticker}: vol signal ${volSignal}`);
+      const reading = volByTicker.get(row.ticker) ?? null;
+      const volSummary = reading
+        ? formatVolArbSummary(reading)
+        : (volMiss.get(row.ticker) ?? "Schwab did not return a vol reading for this symbol.");
+      const signal = reading && reading.signal !== "NO_READ" ? reading.signal : null;
+      log.push(`${row.ticker}: vol ${volSummary}`);
 
-      const { clean, reason } = await screenWithGrok(row, volSignal);
+      const { clean, reason } = await screenWithGrok(row, volSummary);
       alertedIds.add(row.id);
 
       if (!clean) {
@@ -290,7 +250,7 @@ export async function GET(request: NextRequest) {
       log.push(`${row.ticker}: Grok clean — ${reason}`);
 
       const verdict = gradeFlowRow(row, losses);
-      const sent = await sendTelegram(formatAlert(row, volSignal, reason, verdict));
+      const sent = await sendTelegram(formatAlert(row, volSummary, signal, reason, verdict));
       if (sent) {
         alertsSent++;
         alertedThisRun.add(row.ticker);
