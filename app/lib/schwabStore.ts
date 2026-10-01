@@ -2,6 +2,7 @@ import { BlobPreconditionFailedError, del, get, put } from "@vercel/blob";
 import type { StoredTokens } from "@/app/lib/schwabParse";
 import {
   SCHWAB_BLOB_CACHE_CONTROL_MAX_AGE,
+  SCHWAB_BLOB_ALERT_BOOK_PATH,
   SCHWAB_BLOB_FLOW_PATH,
   SCHWAB_BLOB_TOKEN_ENV,
   SCHWAB_BLOB_TOKEN_PATH,
@@ -41,6 +42,7 @@ export type StoreKind = SchwabStoreKind;
 const TOKEN_KEY = "oes:schwab:tokens";
 const ALERT_KEY = "oes:schwab:alerts";
 const FLOW_SNAPSHOT_KEY = "oes:flow:snapshots";
+const ALERT_BOOK_KEY = "oes:alert:records";
 const BLOB_WRITE_ATTEMPTS = 4;
 const FLOW_SNAPSHOT_MAX_TICKERS = 40;
 const FLOW_SNAPSHOT_MAX_CONTRACTS = 500;
@@ -57,6 +59,7 @@ interface MemoryBag {
   tokens: StoredTokens | null;
   alerts: AlertMeta;
   flowSnapshots: FlowSnapshotBook;
+  alertBook: string | null;
 }
 
 interface TokenEnvelope {
@@ -129,16 +132,17 @@ export function setSchwabBlobClientForTests(next: SchwabBlobClient | null): void
 function memoryBag(): MemoryBag {
   const g = globalThis as typeof globalThis & { __oesSchwabMemory?: MemoryBag };
   if (!g.__oesSchwabMemory) {
-    g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {} };
+    g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null };
   } else if (!g.__oesSchwabMemory.flowSnapshots) {
     g.__oesSchwabMemory.flowSnapshots = {};
   }
+  if (g.__oesSchwabMemory.alertBook === undefined) g.__oesSchwabMemory.alertBook = null;
   return g.__oesSchwabMemory;
 }
 
 export function clearMemoryStoreForTests(): void {
   const g = globalThis as typeof globalThis & { __oesSchwabMemory?: MemoryBag };
-  g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {} };
+  g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null };
 }
 
 function envPair(urlName: string, tokenName: string): { url: string; token: string } | null {
@@ -317,6 +321,88 @@ export async function writeFlowSnapshots(patch: FlowSnapshotBook): Promise<void>
   } catch {
     console.error("Flow snapshot store could not be written");
   }
+}
+
+/**
+ * Sent-alert book. Same store order as tokens: KV, then Upstash, then private Blob.
+ * The JSON is alert records and the loss count typed into the Gate. It is not a token.
+ * A failed read does not overwrite the book.
+ */
+export async function readAlertBookText(): Promise<string | null> {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") return null;
+  if (kind === "memory") return memoryBag().alertBook;
+  if (kind === "blob") {
+    const token = blobToken();
+    if (!token) return null;
+    const read = await readBlobJson(SCHWAB_BLOB_ALERT_BOOK_PATH, token);
+    if (read.state !== "ok") return null;
+    return read.text;
+  }
+  try {
+    const raw = await kvCommand(["GET", ALERT_BOOK_KEY]);
+    return typeof raw === "string" && raw.length > 0 ? raw : null;
+  } catch {
+    console.error("Alert book could not be read");
+    return null;
+  }
+}
+
+export async function updateAlertBook(change: (current: string | null) => string): Promise<boolean> {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") return false;
+  if (kind === "memory") {
+    const bag = memoryBag();
+    bag.alertBook = change(bag.alertBook);
+    return true;
+  }
+  if (kind === "blob") return updateBlobAlertBook(change);
+  let current: string | null;
+  try {
+    const raw = await kvCommand(["GET", ALERT_BOOK_KEY]);
+    current = typeof raw === "string" && raw.length > 0 ? raw : null;
+  } catch {
+    console.error("Alert book could not be read");
+    return false;
+  }
+  try {
+    await kvCommand(["SET", ALERT_BOOK_KEY, change(current)]);
+    return true;
+  } catch {
+    console.error("Alert book could not be written");
+    return false;
+  }
+}
+
+async function updateBlobAlertBook(change: (current: string | null) => string): Promise<boolean> {
+  const token = blobToken();
+  if (!token) return false;
+  for (let attempt = 0; attempt < BLOB_WRITE_ATTEMPTS; attempt++) {
+    const read = await readBlobJson(SCHWAB_BLOB_ALERT_BOOK_PATH, token);
+    if (read.state === "error") {
+      console.error("Alert book could not be read");
+      return false;
+    }
+    const current = read.state === "ok" ? read.text : null;
+    try {
+      await blobClient.put(SCHWAB_BLOB_ALERT_BOOK_PATH, change(current), {
+        access: "private",
+        allowOverwrite: true,
+        addRandomSuffix: false,
+        cacheControlMaxAge: SCHWAB_BLOB_CACHE_CONTROL_MAX_AGE,
+        contentType: "application/json",
+        token,
+        ...(read.state === "ok" ? { ifMatch: read.etag } : {}),
+      });
+      return true;
+    } catch (err) {
+      if (!isPreconditionFailed(err) || attempt === BLOB_WRITE_ATTEMPTS - 1) {
+        console.error("Alert book could not be written");
+        return false;
+      }
+    }
+  }
+  return false;
 }
 
 export async function writeAlertMeta(meta: AlertMeta): Promise<void> {

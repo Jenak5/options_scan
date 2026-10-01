@@ -8,6 +8,7 @@ import {
   evaluateGate,
   findContract,
   longOptionMaxLoss,
+  maxLongContractsWithinCap,
   openInterestPasses,
   singleContractExceedsCap,
   volumePasses,
@@ -328,5 +329,16 @@ describe("fixture chain", () => {
     expect(result.overall).toBe("PASS");
     const thin = findContract(parsed.contracts, { expiration: "2026-10-16", strike: 575, putCall: "call" });
     expect(evaluateGate(input({ contract: thin })).overall).toBe("NO");
+  });
+});
+
+describe("contracts that fit the loss cap", () => {
+  it("counts whole contracts at the ask and returns zero when one contract is over the cap", () => {
+    expect(maxLongContractsWithinCap(2)).toBe(2);
+    expect(maxLongContractsWithinCap(4.5)).toBe(1);
+    expect(maxLongContractsWithinCap(4.51)).toBe(0);
+    expect(singleContractExceedsCap(4.5)).toBe(false);
+    expect(singleContractExceedsCap(4.51)).toBe(true);
+    expect(maxLongContractsWithinCap(0)).toBeNull();
   });
 });

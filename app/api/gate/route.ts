@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { PutCall } from "@/app/lib/contract";
+import { rememberDailyLoss } from "@/app/lib/alertStore";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import { evaluateGate, findContract } from "@/app/lib/gate";
 import { getOptionChain, SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
+import { gradeContract } from "@/app/lib/verdict";
 
 export const dynamic = "force-dynamic";
 
@@ -44,6 +46,19 @@ export async function POST(request: NextRequest) {
       consecutiveLosses: parsed.value.consecutiveLosses,
       delayed: chain.delayed,
     });
+    const losses = parsed.value.consecutiveLosses;
+    if (Number.isInteger(losses) && losses >= 0) {
+      await rememberDailyLoss(losses, new Date());
+    }
+    const verdict = contract
+      ? gradeContract({
+        contract,
+        underlyingPrice: chain.underlyingPrice,
+        delayed: chain.delayed,
+        now: new Date(),
+        consecutiveLosses: losses,
+      })
+      : null;
     return NextResponse.json({
       overall: result.overall,
       checks: result.checks,
@@ -52,6 +67,7 @@ export async function POST(request: NextRequest) {
       maxLoss: result.maxLoss,
       delayed: chain.delayed,
       contract: result.contract,
+      verdict,
     });
   } catch (err) {
     if (err instanceof SchwabNotConnectedError) {
