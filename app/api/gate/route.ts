@@ -3,6 +3,7 @@ import type { PutCall } from "@/app/lib/contract";
 import { rememberDailyLoss } from "@/app/lib/alertStore";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import { evaluateGate, findContract } from "@/app/lib/gate";
+import { earningsForTicker } from "@/app/lib/earnings";
 import { keyLevelsForTicker } from "@/app/lib/levelScan";
 import { getOptionChain, SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { gradeContract } from "@/app/lib/verdict";
@@ -51,19 +52,24 @@ export async function POST(request: NextRequest) {
     if (Number.isInteger(losses) && losses >= 0) {
       await rememberDailyLoss(losses, new Date());
     }
+    const now = new Date();
     const levels = await keyLevelsForTicker({
       ticker: parsed.value.ticker,
       spot: chain.underlyingPrice,
       contracts: chain.contracts,
     });
+    const earnings = await earningsForTicker(parsed.value.ticker, now.getTime());
+    const width = parsed.value.debitSpreadWidth;
     const verdict = contract
       ? gradeContract({
         contract,
         underlyingPrice: chain.underlyingPrice,
         delayed: chain.delayed,
-        now: new Date(),
+        now,
         consecutiveLosses: losses,
         levels,
+        earnings,
+        definedRiskSpread: width != null && Number.isFinite(width) && width > 0,
       })
       : null;
     return NextResponse.json({

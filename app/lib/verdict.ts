@@ -1,5 +1,6 @@
 import type { OptionContract, PutCall } from "@/app/lib/contract";
 import { ALERT_RULES, LEVEL_RULES, type LetterGrade } from "@/app/lib/alertConfig";
+import { assessEventRisk, type EarningsFact } from "@/app/lib/eventRisk";
 import {
   formatLevelDistance,
   formatPrice,
@@ -34,6 +35,8 @@ import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
  * Two losses in a row, when that count is known, turns TAKE into STOP for today.
  * A computed support and resistance can leave the grade at A.
  * Missing price history keeps the grade at B.
+ * An unknown earnings date also keeps the grade at B.
+ * Earnings on or before expiration, and a macro release in that window, each lower the grade.
  */
 
 export type VerdictName = "TAKE" | "WATCH" | "SKIP" | "STOP";
@@ -42,12 +45,14 @@ export interface AlertVerdict {
   verdict: VerdictName;
   verdictLabel: string;
   grade: LetterGrade;
-  /** Grade before the missing-levels cap. A level penalty is already applied. */
+  /** Grade before the missing-levels cap and the unknown-earnings cap. Level and event penalties are already applied. */
   uncappedGrade: LetterGrade;
   reasons: string[];
   note: string;
   levels: StoredPriceLevels | null;
   levelsNote: string | null;
+  /** Earnings date, session when known, and any macro release inside the contract. */
+  eventLine: string;
   maxContracts: number | null;
   singleContractExceedsCap: boolean;
   suggestion: string | null;
@@ -76,6 +81,11 @@ export interface SetupInput {
   consecutiveLosses: number | null;
   levels: KeyLevels | null;
   printSummary?: string | null;
+  /** Null when the lookup has not run. That is treated as unknown, not as safe. */
+  earnings: EarningsFact | null;
+  /** True only for a defined-risk spread. A single long option is not one. */
+  definedRiskSpread: boolean;
+  now: Date;
 }
 
 const GRADE_RANK: LetterGrade[] = ["A", "B", "C", "D"];
@@ -102,6 +112,9 @@ export function gradeFlowRow(row: FlowRow, consecutiveLosses: number | null): Al
     consecutiveLosses: knownLosses(consecutiveLosses),
     levels: row.levels,
     printSummary: row.prints?.summary ?? null,
+    earnings: row.earnings ?? null,
+    definedRiskSpread: false,
+    now: new Date(),
   });
 }
 
@@ -113,6 +126,8 @@ export function gradeContract(input: {
   consecutiveLosses: number | null;
   volumeJump?: number | null;
   levels?: KeyLevels | null;
+  earnings?: EarningsFact | null;
+  definedRiskSpread?: boolean;
 }): AlertVerdict {
   const contract = input.contract;
   const spread = checkBidAskSpread(contract.bid, contract.ask);
@@ -139,6 +154,9 @@ export function gradeContract(input: {
     underlyingPrice: input.underlyingPrice,
     consecutiveLosses: knownLosses(input.consecutiveLosses),
     levels: input.levels ?? null,
+    earnings: input.earnings ?? null,
+    definedRiskSpread: input.definedRiskSpread === true,
+    now: input.now,
   });
 }
 
@@ -183,7 +201,20 @@ export function gradeSetup(input: SetupInput): AlertVerdict {
     }
   }
 
-  const grade = capGrade(uncapped, levelsRead.checked);
+  const event = assessEventRisk({
+    now: input.now,
+    expiration: input.expiration,
+    dte: input.dte,
+    earnings: input.earnings,
+    definedRiskSpread: input.definedRiskSpread,
+  });
+  if (event.skipForEarnings && !hardSkip) checklist = "SKIP";
+  uncapped = dropGrade(uncapped, event.downgradeSteps);
+
+  const caps: LetterGrade[] = [];
+  if (!levelsRead.checked) caps.push(ALERT_RULES.maxGradeUntilLevels);
+  if (event.capGrade) caps.push(event.capGrade);
+  const grade = capGrade(uncapped, caps);
   const verdict: VerdictName = dailyStop && checklist === "TAKE" ? "STOP" : checklist;
   const levelsNote = levelsRead.checked
     ? null
@@ -194,10 +225,20 @@ export function gradeSetup(input: SetupInput): AlertVerdict {
     verdictLabel: verdict === "STOP" ? "STOP for today" : verdict,
     grade,
     uncappedGrade: uncapped,
-    reasons: buildReasons(input, market, signals.length, verdict, expired, levelsRead.sentence, input.printSummary ?? null),
+    reasons: buildReasons(
+      input,
+      market,
+      signals.length,
+      verdict,
+      expired,
+      levelsRead.sentence,
+      event.reason,
+      input.printSummary ?? null,
+    ),
     note: ALERT_RULES.note,
     levels: toStoredLevels(input.levels),
     levelsNote,
+    eventLine: event.eventLine,
     maxContracts: market.maxContracts,
     singleContractExceedsCap: market.exceedsCap,
     suggestion: market.suggestion,
@@ -259,10 +300,19 @@ function dteClass(dte: number | null): "ideal" | "acceptable" | "poor" {
   return "poor";
 }
 
-function capGrade(grade: LetterGrade, levelsChecked: boolean): LetterGrade {
-  if (levelsChecked) return grade;
-  const cap = ALERT_RULES.maxGradeUntilLevels;
-  return GRADE_RANK.indexOf(grade) < GRADE_RANK.indexOf(cap) ? cap : grade;
+function dropGrade(grade: LetterGrade, steps: number): LetterGrade {
+  if (steps <= 0) return grade;
+  const next = GRADE_RANK.indexOf(grade) + steps;
+  return GRADE_RANK[Math.min(GRADE_RANK.length - 1, next)];
+}
+
+function capGrade(grade: LetterGrade, caps: LetterGrade[]): LetterGrade {
+  let result = grade;
+  for (let i = 0; i < caps.length; i++) {
+    const cap = caps[i];
+    if (GRADE_RANK.indexOf(result) < GRADE_RANK.indexOf(cap)) result = cap;
+  }
+  return result;
 }
 
 function assessLevels(input: SetupInput): { checked: boolean; poor: boolean; sentence: string } {
@@ -315,6 +365,7 @@ function buildReasons(
   verdict: VerdictName,
   expired: boolean,
   levelSentenceText: string,
+  eventReason: string | null,
   printSummary: string | null,
 ): string[] {
   const head: string[] = [];
@@ -344,11 +395,13 @@ function buildReasons(
     if (!line || unique.indexOf(line) !== -1) continue;
     unique.push(line);
   }
+  const eventText = eventReason?.trim() ?? "";
   const printText = printSummary?.trim() ?? "";
-  const rest = unique.filter((line) => line !== levelSentenceText && line !== printText);
+  const rest = unique.filter((line) => line !== levelSentenceText && line !== eventText && line !== printText);
   const picked: string[] = [];
   if (rest.length > 0) picked.push(rest[0]);
   if (levelSentenceText.trim()) picked.push(levelSentenceText.trim());
+  if (eventText) picked.push(eventText);
   if (printText) picked.push(printText);
   for (let i = 1; i < rest.length && picked.length < 4; i++) picked.push(rest[i]);
   if (picked.length < 2) picked.push(ALERT_RULES.note);

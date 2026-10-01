@@ -42,6 +42,7 @@ function alert(over: Partial<StoredAlert> = {}): StoredAlert {
     note: "Rules checklist only.",
     levels: null,
     levelsNote: "Support and resistance were not available, so the grade stops at B.",
+    eventLine: "Next earnings 2026-11-15 after the close.",
     maxContracts: 2,
     checkpoints: {
       m15: emptyCheckpoint(),
@@ -171,6 +172,16 @@ describe("alert book parsing", () => {
     expect(lossCountForDay(again, "2026-10-02")).toBeNull();
     expect(parseAlertBook("not json").records).toEqual([]);
     expect(again.records[0].levels).toBeNull();
+    expect(again.records[0].eventLine).toContain("2026-11-15");
+  });
+
+  it("keeps an older alert that has no event line", () => {
+    const raw = JSON.parse(JSON.stringify(addRecord(emptyBook(), alert()))) as { records: Record<string, unknown>[] };
+    delete raw.records[0].eventLine;
+    const parsed = parseAlertBook(JSON.stringify(raw));
+    expect(parsed.records).toHaveLength(1);
+    expect(parsed.records[0].eventLine).toBeNull();
+    expect(parsed.records[0].grade).toBe("B");
   });
 
   it("keeps stored support and resistance and ignores a record that never had them", () => {

@@ -48,6 +48,7 @@ export function formatVerdictHtml(verdict: {
   reasons: string[];
   levels: StoredPriceLevels | null;
   levelsNote: string | null;
+  eventLine?: string | null;
 }): string {
   const lines = [
     `<b>${escapeHtml(verdict.grade)} · ${escapeHtml(verdict.verdictLabel)}</b>`,
@@ -56,6 +57,7 @@ export function formatVerdictHtml(verdict: {
   ];
   if (verdict.levels) lines.push(escapeHtml(formatLevelsSummary(verdict.levels)));
   if (verdict.levelsNote) lines.push(escapeHtml(verdict.levelsNote));
+  if (verdict.eventLine) lines.push(escapeHtml(verdict.eventLine));
   return lines.join("\n");
 }
 
@@ -80,6 +82,7 @@ export function formatFlowAlert(flow: {
     reasons: string[];
     levels: StoredPriceLevels | null;
     levelsNote: string | null;
+    eventLine?: string | null;
   } | null;
 }): string {
   const emoji = flow.putCall === "call" ? "🟢" : "🔴";

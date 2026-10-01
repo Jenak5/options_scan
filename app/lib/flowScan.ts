@@ -14,6 +14,8 @@ import {
 } from "@/app/lib/flow";
 import { PRINT_RULES } from "@/app/lib/alertConfig";
 import type { OptionContract } from "@/app/lib/contract";
+import { earningsForTicker } from "@/app/lib/earnings";
+import { UNKNOWN_EARNINGS, type EarningsFact } from "@/app/lib/eventRisk";
 import type { KeyLevels } from "@/app/lib/levels";
 import { keyLevelsForTicker } from "@/app/lib/levelScan";
 import { quotePointFromContract, type FlowQuotePoint } from "@/app/lib/prints";
@@ -25,6 +27,7 @@ import { readFlowSnapshots, writeFlowSnapshots } from "@/app/lib/schwabStore";
  * Chains and price history only. No orders. Chain results are cached for about 60 seconds.
  * A few active tickers are read again a couple of seconds later so a new last trade
  * can show up. That is still a quote, not a time-and-sales feed.
+ * Earnings are read once per ticker and attached to every row from that chain.
  * Volume snapshots go to a separate store key so the next poll can show a jump.
  */
 
@@ -93,9 +96,11 @@ export async function scanEstimatedFlow(options?: {
           contracts: chain.contracts,
           now,
         });
+        const earnings = await earningsForTicker(ticker, now).catch(() => UNKNOWN_EARNINGS);
         passes.push({
           ticker,
           levels,
+          earnings,
           samples: [{
             at: Date.now(),
             contracts: chain.contracts,
@@ -154,7 +159,7 @@ export async function scanEstimatedFlow(options?: {
       previous: prior,
       now: asOf,
       livePoints,
-    }).map((row) => ({ ...row, levels: pass.levels }));
+    }).map((row) => ({ ...row, levels: pass.levels, earnings: pass.earnings }));
     rows.push(...scored);
     const snap = snapshotFromRows(scored, now);
     snap.quotes = quotesForRows(scored, prior, livePoints, asOf);
@@ -199,6 +204,7 @@ interface TickerSample {
 interface TickerPass {
   ticker: string;
   levels: KeyLevels;
+  earnings: EarningsFact;
   samples: TickerSample[];
 }
 

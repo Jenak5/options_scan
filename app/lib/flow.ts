@@ -1,4 +1,5 @@
 import type { OptionContract, PutCall } from "@/app/lib/contract";
+import type { EarningsFact } from "@/app/lib/eventRisk";
 import type { KeyLevels } from "@/app/lib/levels";
 import { PRINT_RULES } from "@/app/lib/alertConfig";
 import { checkBidAskSpread, openInterestPasses, volumePasses } from "@/app/lib/gate";
@@ -112,6 +113,8 @@ export interface FlowRow {
   levels: KeyLevels | null;
   /** Quote-derived prints. Null summary when no new trade was seen. */
   prints: PrintRead;
+  /** Next earnings read. Missing means the grade treats the date as unknown. */
+  earnings?: EarningsFact | null;
   score: number;
 }
 
