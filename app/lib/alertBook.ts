@@ -48,6 +48,8 @@ export interface StoredAlert {
   /** Nearest support and resistance at send time. Null when history was missing. */
   levels: StoredPriceLevels | null;
   levelsNote: string | null;
+  /** Earnings and macro line at send time. Null on alerts saved before this field existed. */
+  eventLine: string | null;
   maxContracts: number | null;
   checkpoints: Record<CheckpointName, CheckpointQuote>;
   outcome: OutcomeGrade;
@@ -145,6 +147,7 @@ export function buildStoredAlert(row: FlowRow, verdict: AlertVerdict, now: Date)
     note: verdict.note,
     levels: verdict.levels,
     levelsNote: verdict.levelsNote,
+    eventLine: verdict.eventLine,
     maxContracts: verdict.maxContracts,
     checkpoints: {
       m15: emptyCheckpoint(),
@@ -489,6 +492,9 @@ function parseAlert(value: unknown): StoredAlert | null {
     note: typeof row.note === "string" ? row.note.slice(0, 240) : "",
     levels: parseStoredLevels(row.levels),
     levelsNote: typeof row.levelsNote === "string" ? row.levelsNote.slice(0, 240) : null,
+    eventLine: typeof row.eventLine === "string" && row.eventLine.trim()
+      ? row.eventLine.trim().slice(0, 500)
+      : null,
     maxContracts: optionalCount(row.maxContracts),
     checkpoints,
     outcome: "pending",

@@ -1,4 +1,5 @@
 import type { OptionContract, PutCall } from "@/app/lib/contract";
+import type { EarningsFact } from "@/app/lib/eventRisk";
 import type { KeyLevels } from "@/app/lib/levels";
 import { checkBidAskSpread, openInterestPasses, volumePasses } from "@/app/lib/gate";
 import {
@@ -101,6 +102,8 @@ export interface FlowRow {
   underlyingPrice: number | null;
   /** Support and resistance for this ticker. Null until a history read fills them. */
   levels: KeyLevels | null;
+  /** Next earnings read. Missing means the grade treats the date as unknown. */
+  earnings?: EarningsFact | null;
   score: number;
 }
 

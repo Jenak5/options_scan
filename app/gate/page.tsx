@@ -231,6 +231,9 @@ export default function GatePage() {
                 {result.verdict.levelsNote && (
                   <div style={{ color: "#94a3b8", fontSize: 13, marginTop: 8 }}>{result.verdict.levelsNote}</div>
                 )}
+                {result.verdict.eventLine && (
+                  <div style={{ color: "#fbbf24", fontSize: 13, marginTop: 8 }}>{result.verdict.eventLine}</div>
+                )}
               </div>
             )}
             <div style={{
