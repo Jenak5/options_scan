@@ -51,8 +51,8 @@ import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
  * Cheaper, or more expensive than that ceiling, stays at C or below.
  * Estimated flow premium (volume × mid × 100) has to clear the A floor for an A
  * and the B floor for a B. Below the B floor stays at C or below.
- * One contract over the $450 loss cap names a debit spread. That does not
- * by itself block A or B while the contract is inside the grade cost ceiling.
+ * One contract over the loss cap names a debit spread. The cap and the grade
+ * cost ceiling are the same number, so a single over that ceiling cannot be an A or a B.
  * The scanner grades single long options. A debit spread's max loss is its width.
  * Missing price history keeps the grade at B.
  * An unknown earnings date also keeps the grade at B.

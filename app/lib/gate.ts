@@ -8,7 +8,7 @@ import {
 } from "@/app/lib/risk";
 
 export const DEBIT_SPREAD_SUGGESTION =
-  "One contract at the ask is above the $450 loss cap. Consider a debit spread so the most you can lose stays inside the cap.";
+  `One contract at the ask is above the $${MAX_LOSS_DOLLARS} loss cap. Consider a debit spread so the most you can lose stays inside the cap.`;
 
 export type CheckStatus = "PASS" | "FAIL";
 export type GateOverall = "PASS" | "NO";

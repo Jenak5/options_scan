@@ -1,6 +1,6 @@
 # Options Edge Scanner
 
-Read-only scan-and-alert tool for a small personal options account ($3,000, max loss $450 per trade). It reads flow, quotes, positions, and balances, and it can send a Telegram message.
+Read-only scan-and-alert tool for a small personal options account ($3,000, max loss $875 per trade). It reads flow, quotes, positions, and balances, and it can send a Telegram message.
 
 **This app never places orders.** There is no order or transaction write endpoint. Schwab is used for Market Data Production only. The Tastytrade OAuth application must use a read-only scope.
 
@@ -89,7 +89,7 @@ curl -H "Authorization: Bearer $CRON_SECRET" "https://<your-deployment>/api/cron
 
 ## Account size
 
-The account is **$3,000**. The most one trade can lose is **$450** (15%). Those numbers live in `app/lib/risk.ts` and the Gate uses them.
+The account is **$3,000**. The most one trade can lose is **$875**. That ceiling lives in `app/lib/risk.ts`. The Gate, the checklist, the alerts, and the paper trade log all use it.
 
 The old Kelly Lab assumed a **$5,000** account and a **55%** win rate. That model is retired. The Kelly tab is only an illustration, and it is not used to size a trade.
 
@@ -166,9 +166,9 @@ Cron still requires `Authorization: Bearer <CRON_SECRET>` before anything else. 
 
 Every Flow row carries a checklist verdict: **TAKE**, **WATCH**, or **SKIP**, a letter grade **A–D**, and two to four plain reasons. Telegram and the Alert Report only receive **A** and **B**. Thresholds that are not already in `app/lib/risk.ts` live in `app/lib/alertConfig.ts`, including the 14 to 42 day window for an A or a B and the daily alert cap.
 
-The checklist uses the Gate for open interest (at least 500), volume today (at least 100), and spread (at most 5% of mid). A failed liquidity check is an automatic **SKIP**, and that letter stays **D**. It is never an A or a B. The ask has to be at least $0.50. One long contract (ask × 100) can cost up to $875 and still be an A or a B. Cheaper than $0.50, or more than $875, stays at C or lower and nothing is sent. The account loss cap is still $450. One contract over $450 names a debit spread in the reason. That does not by itself block the letter while the contract costs $875 or less. The scanner grades single long options. A debit spread's max loss is its width, and the Gate compares that width with $450.
+The checklist uses the Gate for open interest (at least 500), volume today (at least 100), and spread (at most 5% of mid). A failed liquidity check is an automatic **SKIP**, and that letter stays **D**. It is never an A or a B. The ask has to be at least $0.50. One long contract (ask × 100) can cost up to $875 and still be an A or a B. Cheaper than $0.50, or more than $875, stays at C or lower and nothing is sent. $875 is also the loss cap. One contract over $875 names a debit spread in the reason, and it cannot be an A or a B. The scanner grades single long options. A debit spread's max loss is its width, and the Gate compares that width with $875.
 
-Flow premium is estimated as volume × midpoint × 100 from the Schwab chain. It is not an exchange-reported sweep and not a separate field in the volume snapshot. Snapshots store volume (and recent quote points). The premium is computed when the chain is scored, and that same number is what `/api/flow` returns as `notionalPremium`. An A needs at least $100,000 of it. A B needs at least $50,000. Below $50,000 cannot be an A or a B. That A/B dollar split is an assumption. The other A checks still apply: at least 3 of the 4 flow signals, volume at least 2× open interest, and a close strike. Flow strength, days to expiration, and distance from the money decide TAKE versus WATCH. An A or a B also has to be about 2 to 6 weeks out (14 to 42 days). Under 14 days, or past 42 days, the letter stays at C or lower and nothing is sent. The message includes the flow premium, the ask, the cost of one contract, and how many contracts fit under $450 at the ask.
+Flow premium is estimated as volume × midpoint × 100 from the Schwab chain. It is not an exchange-reported sweep and not a separate field in the volume snapshot. Snapshots store volume (and recent quote points). The premium is computed when the chain is scored, and that same number is what `/api/flow` returns as `notionalPremium`. An A needs at least $100,000 of it. A B needs at least $50,000. Below $50,000 cannot be an A or a B. That A/B dollar split is an assumption. The other A checks still apply: at least 3 of the 4 flow signals, volume at least 2× open interest, and a close strike. Flow strength, days to expiration, and distance from the money decide TAKE versus WATCH. An A or a B also has to be about 2 to 6 weeks out (14 to 42 days). Under 14 days, or past 42 days, the letter stays at C or lower and nothing is sent. The message includes the flow premium, the ask, the cost of one contract, and how many contracts fit under $875 at the ask.
 
 Support and resistance come from that Schwab price history plus high-open-interest strikes on the chain already fetched (a call wall and a put wall). Prior day high, low, and close, the pre-market range, the open, the session high and low so far, an open-range window, a candle VWAP when volume is present, recent swing highs and lows, and nearby round numbers are the other levels. VWAP is the volume-weighted typical price of the candles, not a tick print. The nearest support and resistance, and the distance to each, show on the Flow row, the Gate result, the Telegram alert, and the Alert Report. Those two levels are stored on the alert. No new environment variable.
 
@@ -189,12 +189,12 @@ Alert Report (session required, same as the other tabs) lists recent alerts and 
 - Open interest at the strike is at least 500
 - Volume today is at least 100 contracts
 - Bid-ask spread is at most 5% of the midpoint
-- Max loss is at most $450. A long option is `contracts × ask × 100`. A debit spread is `contracts × strike width × 100` (the most that spread can be worth). Leave the width blank for a single option.
-- If one contract at the ask is already over $450, the result says so and suggests a debit spread
-- The underlying stop, time stop, and profit rule have to be filled in. Time and profit start from the exit defaults: take half off at +30% of the debit, stop at -25% of the debit and never more than $450, and be out by 3:00pm Chicago or if the trade is still flat after 60 minutes. A debit spread uses those same percents on the net debit. Change `TRADE_RULES` to tune them.
+- Max loss is at most $875. A long option is `contracts × ask × 100`. A debit spread is `contracts × strike width × 100` (the most that spread can be worth). Leave the width blank for a single option.
+- If one contract at the ask is already over $875, the result says so and suggests a debit spread
+- The underlying stop, time stop, and profit rule have to be filled in. Time and profit start from the exit defaults: take half off at +30% of the debit, stop at -25% of the debit and never more than $875, and be out by 3:00pm Chicago or if the trade is still flat after 60 minutes. A debit spread uses those same percents on the net debit. Change `TRADE_RULES` to tune them.
 - Two losing closes in a row, from the trade log, is a NO for the day. It is not a broker fill log.
 
-`/trades` (session required) is where a trade is entered and later closed. P&L, risk versus $450, the linked alert grade, hold time, and win, loss, or flat are on each row. The stats panel covers win rate, average win and loss, expectancy, P&L by grade and by TAKE, WATCH, and SKIP, and the week. CSV is `GET /api/trades?format=csv`.
+`/trades` (session required) is where a trade is entered and later closed. P&L, risk versus $875, the linked alert grade, hold time, and win, loss, or flat are on each row. The stats panel covers win rate, average win and loss, expectancy, P&L by grade and by TAKE, WATCH, and SKIP, and the week. CSV is `GET /api/trades?format=csv`.
 
 The result also shows the checklist grade for that contract. The Gate's own PASS or NO is unchanged.
 

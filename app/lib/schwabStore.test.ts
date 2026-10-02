@@ -318,6 +318,40 @@ describe("blob token store", () => {
     });
   });
 
+  it("strips a weak etag before ifMatch so a compressed blob can be overwritten", async () => {
+    await writeFlowSnapshots({
+      SPY: { scannedAt: 1_700_000_000_000, volumes: { "2026-10-08|105|call": 1 } },
+    });
+    const strong = mock.files.get(SCHWAB_BLOB_FLOW_PATH)?.etag ?? "";
+    mock.get.mockImplementation(async (pathname: string) => {
+      const result = await mock.read(pathname);
+      if (!result) return result;
+      return { ...result, blob: { ...result.blob, etag: `W/${result.blob.etag}` } };
+    });
+    await writeFlowSnapshots({
+      SPY: { scannedAt: 1_700_000_000_001, volumes: { "2026-10-08|105|call": 2 } },
+    });
+    const puts = mock.put.mock.calls.filter((call) => call[0] === SCHWAB_BLOB_FLOW_PATH);
+    expect(puts[puts.length - 1][2].ifMatch).toBe(strong);
+    expect(String(puts[puts.length - 1][2].ifMatch).startsWith("W/")).toBe(false);
+    expect((await readFlowSnapshots()).SPY.volumes["2026-10-08|105|call"]).toBe(2);
+  });
+
+  it("logs the blob error message and status when a snapshot put fails", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mock.put.mockRejectedValue(Object.assign(new Error("Vercel Blob: Access denied, please provide a valid token for this resource. vercel_blob_rw_secret"), { status: 403 }));
+    await writeFlowSnapshots({
+      SPY: { scannedAt: 1_700_000_000_000, volumes: { "2026-10-08|105|call": 1 } },
+    });
+    const line = String(spy.mock.calls[0]?.[0] ?? "");
+    expect(line.startsWith("Flow snapshot store could not be written:")).toBe(true);
+    expect(line).toContain("Access denied");
+    expect(line).toContain("status 403");
+    expect(line.includes("vercel_blob_rw_secret")).toBe(false);
+    expect(line).toContain("[token]");
+    spy.mockRestore();
+  });
+
   it("does not put when the blob read fails", async () => {
     mock.get.mockImplementation(async () => {
       throw new Error("blob down");
