@@ -8,11 +8,11 @@
 /** Personal account size. */
 export const ACCOUNT_SIZE_DOLLARS = 3_000;
 
-/** Maximum fraction of the account risked on one trade. */
-export const MAX_RISK_FRACTION = 0.15;
-
-/** Hard loss cap. 15% of $3,000. */
-export const MAX_LOSS_DOLLARS = ACCOUNT_SIZE_DOLLARS * MAX_RISK_FRACTION;
+/**
+ * Hard loss cap for one trade: $875.
+ * The Gate, the checklist, alert sizing, and the paper trade log all read this.
+ */
+export const MAX_LOSS_DOLLARS = 875;
 
 /** Minimum open interest at the chosen strike. */
 export const MIN_OPEN_INTEREST = 500;

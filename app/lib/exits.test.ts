@@ -15,7 +15,7 @@ describe("exit plan", () => {
     expect(plan?.riskBreachesCap).toBe(false);
     expect(plan?.lines.join(" ")).toContain("Take half off at $2.60");
     expect(plan?.lines.join(" ")).toContain("1 contract of 2");
-    expect(plan?.lines.join(" ")).toContain("inside the $450.00 cap");
+    expect(plan?.lines.join(" ")).toContain("inside the $875.00 cap");
     expect(plan?.note).toMatch(/starting defaults/i);
   });
 
@@ -31,7 +31,7 @@ describe("exit plan", () => {
     expect(plan?.stopTightened).toBe(true);
     expect(plan?.stopDollars).toBe(MAX_LOSS_DOLLARS);
     expect(plan?.stopPrice).toBeCloseTo(2 * (1 - MAX_LOSS_DOLLARS / 4000));
-    expect(plan?.lines.join(" ")).toContain("over the $450.00 cap");
+    expect(plan?.lines.join(" ")).toContain("over the $875.00 cap");
     expect(plan?.lines.join(" ")).toContain("Risk used is $4000.00");
   });
 

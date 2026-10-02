@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import type { BucketPnl, DailyStopState, TradeMetrics, TradeStats, WeeklySummary } from "@/app/lib/trades";
 import { exitDefaultsSummary, planExits } from "@/app/lib/exits";
 
@@ -254,7 +255,7 @@ export default function TradesPage() {
                     {trade.alertVerdict ? `${trade.alertVerdict} ${trade.alertGrade ?? ""}` : trade.alertId ? "Link not in the alert book" : "—"}
                   </td>
                   <td style={{ padding: "8px 10px", color: trade.metrics.riskBreachesCap ? "#fbbf24" : "#94a3b8" }}>
-                    ${trade.metrics.riskDollars.toFixed(0)}{trade.metrics.riskBreachesCap ? " over $450" : ""}
+                    ${trade.metrics.riskDollars.toFixed(0)}{trade.metrics.riskBreachesCap ? ` over $${MAX_LOSS_DOLLARS}` : ""}
                   </td>
                   <td style={{ padding: "8px 10px", color: pnlColor(trade.metrics) }}>
                     {trade.metrics.pnlDollars == null ? "Open" : `${money(trade.metrics.pnlDollars)} · ${pct(trade.metrics.pnlFraction)}`}

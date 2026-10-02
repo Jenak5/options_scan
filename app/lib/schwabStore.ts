@@ -1,5 +1,14 @@
 import { PRINT_RULES } from "@/app/lib/alertConfig";
-import { BlobPreconditionFailedError, del, get, put } from "@vercel/blob";
+import {
+  BlobAccessError,
+  BlobNotFoundError,
+  BlobPreconditionFailedError,
+  BlobStoreNotFoundError,
+  BlobStoreSuspendedError,
+  del,
+  get,
+  put,
+} from "@vercel/blob";
 import type { StoredTokens } from "@/app/lib/schwabParse";
 import {
   SCHWAB_BLOB_CACHE_CONTROL_MAX_AGE,
@@ -200,8 +209,8 @@ export async function readTokens(): Promise<StoredTokens | null> {
     if (typeof raw !== "string" || raw.length === 0) return null;
     const json = await decryptTokenPayload(raw);
     return parseStored(json);
-  } catch {
-    console.error("Schwab token store could not be read");
+  } catch (err) {
+    logStoreFailure("Schwab token store could not be read", err);
     return null;
   }
 }
@@ -308,8 +317,8 @@ export async function readFlowSnapshots(): Promise<FlowSnapshotBook> {
     const raw = await kvCommand(["GET", FLOW_SNAPSHOT_KEY]);
     if (typeof raw !== "string" || raw.length === 0) return {};
     return parseFlowBook(raw);
-  } catch {
-    console.error("Flow snapshot store could not be read");
+  } catch (err) {
+    logStoreFailure("Flow snapshot store could not be read", err);
     return {};
   }
 }
@@ -335,8 +344,8 @@ export async function writeFlowSnapshots(patch: FlowSnapshotBook): Promise<void>
   try {
     const current = await readFlowSnapshots();
     await kvCommand(["SET", FLOW_SNAPSHOT_KEY, JSON.stringify(trimFlowBook({ ...current, ...clean }))]);
-  } catch {
-    console.error("Flow snapshot store could not be written");
+  } catch (err) {
+    logStoreFailure("Flow snapshot store could not be written", err);
   }
 }
 
@@ -353,14 +362,18 @@ export async function readAlertBookText(): Promise<string | null> {
     const token = blobToken();
     if (!token) return null;
     const read = await readBlobJson(SCHWAB_BLOB_ALERT_BOOK_PATH, token);
+    if (read.state === "error") {
+      logStoreFailure("Alert book could not be read", read.error);
+      return null;
+    }
     if (read.state !== "ok") return null;
     return read.text;
   }
   try {
     const raw = await kvCommand(["GET", ALERT_BOOK_KEY]);
     return typeof raw === "string" && raw.length > 0 ? raw : null;
-  } catch {
-    console.error("Alert book could not be read");
+  } catch (err) {
+    logStoreFailure("Alert book could not be read", err);
     return null;
   }
 }
@@ -378,15 +391,15 @@ export async function updateAlertBook(change: (current: string | null) => string
   try {
     const raw = await kvCommand(["GET", ALERT_BOOK_KEY]);
     current = typeof raw === "string" && raw.length > 0 ? raw : null;
-  } catch {
-    console.error("Alert book could not be read");
+  } catch (err) {
+    logStoreFailure("Alert book could not be read", err);
     return false;
   }
   try {
     await kvCommand(["SET", ALERT_BOOK_KEY, change(current)]);
     return true;
-  } catch {
-    console.error("Alert book could not be written");
+  } catch (err) {
+    logStoreFailure("Alert book could not be written", err);
     return false;
   }
 }
@@ -403,14 +416,18 @@ export async function readTradeLogText(): Promise<string | null> {
     const token = blobToken();
     if (!token) return null;
     const read = await readBlobJson(SCHWAB_BLOB_TRADE_LOG_PATH, token);
+    if (read.state === "error") {
+      logStoreFailure("Trade log could not be read", read.error);
+      return null;
+    }
     if (read.state !== "ok") return null;
     return read.text;
   }
   try {
     const raw = await kvCommand(["GET", TRADE_LOG_KEY]);
     return typeof raw === "string" && raw.length > 0 ? raw : null;
-  } catch {
-    console.error("Trade log could not be read");
+  } catch (err) {
+    logStoreFailure("Trade log could not be read", err);
     return null;
   }
 }
@@ -428,15 +445,15 @@ export async function updateTradeLog(change: (current: string | null) => string)
   try {
     const raw = await kvCommand(["GET", TRADE_LOG_KEY]);
     current = typeof raw === "string" && raw.length > 0 ? raw : null;
-  } catch {
-    console.error("Trade log could not be read");
+  } catch (err) {
+    logStoreFailure("Trade log could not be read", err);
     return false;
   }
   try {
     await kvCommand(["SET", TRADE_LOG_KEY, change(current)]);
     return true;
-  } catch {
-    console.error("Trade log could not be written");
+  } catch (err) {
+    logStoreFailure("Trade log could not be written", err);
     return false;
   }
 }
@@ -455,7 +472,7 @@ async function updateBlobText(
   for (let attempt = 0; attempt < BLOB_WRITE_ATTEMPTS; attempt++) {
     const read = await readBlobJson(pathname, token);
     if (read.state === "error") {
-      console.error(`${label} could not be read`);
+      logStoreFailure(`${label} could not be read`, read.error);
       return false;
     }
     const current = read.state === "ok" ? read.text : null;
@@ -467,12 +484,12 @@ async function updateBlobText(
         cacheControlMaxAge: SCHWAB_BLOB_CACHE_CONTROL_MAX_AGE,
         contentType: "application/json",
         token,
-        ...(read.state === "ok" ? { ifMatch: read.etag } : {}),
+        ...(read.state === "ok" && read.etag ? { ifMatch: read.etag } : {}),
       });
       return true;
     } catch (err) {
       if (!isPreconditionFailed(err) || attempt === BLOB_WRITE_ATTEMPTS - 1) {
-        console.error(`${label} could not be written`);
+        logStoreFailure(`${label} could not be written`, err);
         return false;
       }
     }
@@ -529,8 +546,8 @@ async function tokensFromCipher(cipher: string | null): Promise<StoredTokens | n
   try {
     const json = await decryptTokenPayload(cipher);
     return parseStored(json);
-  } catch {
-    console.error("Schwab token store could not be read");
+  } catch (err) {
+    logStoreFailure("Schwab token store could not be read", err);
     return null;
   }
 }
@@ -568,23 +585,23 @@ async function readBlobRecord(token: string): Promise<BlobRead> {
       useCache: false,
       token,
     });
-  } catch {
-    console.error("Schwab token store could not be read");
+  } catch (err) {
+    logStoreFailure("Schwab token store could not be read", err);
     return { state: "error" };
   }
   if (!result) return { state: "missing" };
   if (result.statusCode !== 200 || !result.stream) {
-    console.error("Schwab token store could not be read");
+    logStoreFailure("Schwab token store could not be read", new Error(`Blob read failed (status ${result.statusCode})`));
     return { state: "error" };
   }
   let text: string;
   try {
     text = await new Response(result.stream).text();
-  } catch {
-    console.error("Schwab token store could not be read");
+  } catch (err) {
+    logStoreFailure("Schwab token store could not be read", err);
     return { state: "error" };
   }
-  const etag = result.blob.etag;
+  const etag = strongMatchEtag(result.blob.etag);
   const envelope = parseEnvelope(text);
   if (!envelope) return { state: "corrupt", etag };
   return { state: "ok", etag, envelope };
@@ -626,10 +643,48 @@ function isPreconditionFailed(err: unknown): boolean {
   return err instanceof BlobPreconditionFailedError;
 }
 
+/**
+ * get() returns the download's ETag. Once the blob is large enough to be
+ * compressed, that header is a weak validator (W/"..."). ifMatch compares
+ * strong validators, so the W/ prefix makes every conditional put fail with
+ * 412. head() and put() return the strong form. The hash is the same.
+ */
+function strongMatchEtag(etag: string): string {
+  return etag.startsWith("W/") ? etag.slice(2) : etag;
+}
+
+function storeErrorStatus(err: unknown): number | null {
+  if (err && typeof err === "object") {
+    const record = err as { status?: unknown; statusCode?: unknown };
+    if (typeof record.status === "number") return record.status;
+    if (typeof record.statusCode === "number") return record.statusCode;
+  }
+  if (err instanceof BlobPreconditionFailedError) return 412;
+  if (err instanceof BlobAccessError || err instanceof BlobStoreSuspendedError) return 403;
+  if (err instanceof BlobNotFoundError || err instanceof BlobStoreNotFoundError) return 404;
+  return null;
+}
+
+function redactSecrets(text: string): string {
+  return text
+    .replace(/vercel_blob_[A-Za-z0-9_]+/g, "[token]")
+    .replace(/Bearer\s+\S+/gi, "Bearer [token]");
+}
+
+function logStoreFailure(sentence: string, err: unknown): void {
+  const message = redactSecrets(err instanceof Error ? err.message : "Unknown error");
+  const status = storeErrorStatus(err);
+  console.error(status == null ? `${sentence}: ${message}` : `${sentence}: ${message} (status ${status})`);
+}
+
 async function readBlobFlowSnapshots(): Promise<FlowSnapshotBook> {
   const token = blobToken();
   if (!token) return {};
   const read = await readBlobJson(SCHWAB_BLOB_FLOW_PATH, token);
+  if (read.state === "error") {
+    logStoreFailure("Flow snapshot store could not be read", read.error);
+    return {};
+  }
   if (read.state !== "ok") return {};
   return parseFlowBook(read.text);
 }
@@ -640,7 +695,7 @@ async function writeBlobFlowSnapshots(patch: FlowSnapshotBook): Promise<void> {
   for (let attempt = 0; attempt < BLOB_WRITE_ATTEMPTS; attempt++) {
     const read = await readBlobJson(SCHWAB_BLOB_FLOW_PATH, token);
     if (read.state === "error") {
-      console.error("Flow snapshot store could not be read");
+      logStoreFailure("Flow snapshot store could not be read", read.error);
       return;
     }
     const current = read.state === "ok" ? parseFlowBook(read.text) : {};
@@ -652,12 +707,12 @@ async function writeBlobFlowSnapshots(patch: FlowSnapshotBook): Promise<void> {
         cacheControlMaxAge: SCHWAB_BLOB_CACHE_CONTROL_MAX_AGE,
         contentType: "application/json",
         token,
-        ...(read.state === "ok" ? { ifMatch: read.etag } : {}),
+        ...(read.state === "ok" && read.etag ? { ifMatch: read.etag } : {}),
       });
       return;
     } catch (err) {
       if (!isPreconditionFailed(err) || attempt === BLOB_WRITE_ATTEMPTS - 1) {
-        console.error("Flow snapshot store could not be written");
+        logStoreFailure("Flow snapshot store could not be written", err);
         return;
       }
     }
@@ -666,7 +721,7 @@ async function writeBlobFlowSnapshots(patch: FlowSnapshotBook): Promise<void> {
 
 async function readBlobJson(pathname: string, token: string): Promise<
   | { state: "missing" }
-  | { state: "error" }
+  | { state: "error"; error: unknown }
   | { state: "ok"; etag: string; text: string }
 > {
   let result: SchwabBlobGetResult | null;
@@ -676,16 +731,18 @@ async function readBlobJson(pathname: string, token: string): Promise<
       useCache: false,
       token,
     });
-  } catch {
-    return { state: "error" };
+  } catch (err) {
+    return { state: "error", error: err };
   }
   if (!result || result.statusCode === 404) return { state: "missing" };
-  if (result.statusCode !== 200 || !result.stream) return { state: "error" };
+  if (result.statusCode !== 200 || !result.stream) {
+    return { state: "error", error: new Error(`Blob read failed (status ${result.statusCode})`) };
+  }
   try {
     const text = await new Response(result.stream).text();
-    return { state: "ok", etag: result.blob.etag, text };
-  } catch {
-    return { state: "error" };
+    return { state: "ok", etag: strongMatchEtag(result.blob.etag), text };
+  } catch (err) {
+    return { state: "error", error: err };
   }
 }
 

@@ -19,7 +19,6 @@ import { parseOptionChain } from "@/app/lib/schwabParse";
 import {
   ACCOUNT_SIZE_DOLLARS,
   MAX_LOSS_DOLLARS,
-  MAX_RISK_FRACTION,
   MIN_CONTRACT_VOLUME,
   MIN_OPEN_INTEREST,
 } from "@/app/lib/risk";
@@ -62,10 +61,9 @@ function check(result: GateResult, id: string) {
 }
 
 describe("account constants", () => {
-  it("caps one trade at 15% of a $3,000 account", () => {
+  it("caps one trade at $875", () => {
     expect(ACCOUNT_SIZE_DOLLARS).toBe(3000);
-    expect(MAX_RISK_FRACTION).toBe(0.15);
-    expect(MAX_LOSS_DOLLARS).toBe(450);
+    expect(MAX_LOSS_DOLLARS).toBe(875);
   });
 });
 
@@ -128,28 +126,28 @@ describe("max loss", () => {
     expect(longOptionMaxLoss(1, Number.NaN)).toBeNull();
   });
 
-  it("passes a $450 long and fails $451", () => {
-    const atCap = evaluateGate(input({ contract: contract({ bid: 4.5, ask: 4.5 }), plannedEntry: 4.5 }));
+  it("passes an $875 long and fails $876", () => {
+    const atCap = evaluateGate(input({ contract: contract({ bid: 8.75, ask: 8.75 }), plannedEntry: 8.75 }));
     expect(check(atCap, "maxLoss").status).toBe("PASS");
     expect(atCap.singleContractExceedsCap).toBe(false);
     expect(atCap.suggestion).toBeNull();
 
-    const over = evaluateGate(input({ contract: contract({ bid: 4.51, ask: 4.51 }), plannedEntry: 4.51 }));
+    const over = evaluateGate(input({ contract: contract({ bid: 8.76, ask: 8.76 }), plannedEntry: 8.76 }));
     expect(check(over, "maxLoss").status).toBe("FAIL");
-    expect(over.maxLoss).toBeCloseTo(451, 5);
+    expect(over.maxLoss).toBeCloseTo(876, 5);
     expect(over.singleContractExceedsCap).toBe(true);
     expect(over.suggestion).toBe(DEBIT_SPREAD_SUGGESTION);
-    expect(singleContractExceedsCap(4.51)).toBe(true);
-    expect(singleContractExceedsCap(4.5)).toBe(false);
+    expect(singleContractExceedsCap(8.76)).toBe(true);
+    expect(singleContractExceedsCap(8.75)).toBe(false);
   });
 
   it("does not suggest a debit spread when one contract is inside the cap", () => {
     const result = evaluateGate(input({
-      contract: contract({ bid: 3, ask: 3 }),
+      contract: contract({ bid: 5, ask: 5 }),
       contracts: 2,
-      plannedEntry: 3,
+      plannedEntry: 5,
     }));
-    expect(result.maxLoss).toBe(600);
+    expect(result.maxLoss).toBe(1000);
     expect(check(result, "maxLoss").status).toBe("FAIL");
     expect(result.singleContractExceedsCap).toBe(false);
     expect(result.suggestion).toBeNull();
@@ -162,7 +160,7 @@ describe("max loss", () => {
     expect(debitSpreadMaxLoss(1, -1)).toBeNull();
 
     const passed = evaluateGate(input({
-      contract: contract({ bid: 6, ask: 6, openInterest: 800, volume: 200 }),
+      contract: contract({ bid: 9, ask: 9, openInterest: 800, volume: 200 }),
       debitSpreadWidth: 4,
       plannedEntry: 2.5,
     }));
@@ -173,8 +171,8 @@ describe("max loss", () => {
     expect(passed.overall).toBe("PASS");
 
     const failed = evaluateGate(input({
-      contract: contract({ bid: 6, ask: 6 }),
-      debitSpreadWidth: 5,
+      contract: contract({ bid: 9, ask: 9 }),
+      debitSpreadWidth: 9,
       plannedEntry: 2.5,
     }));
     expect(check(failed, "maxLoss").status).toBe("FAIL");
@@ -334,11 +332,11 @@ describe("fixture chain", () => {
 
 describe("contracts that fit the loss cap", () => {
   it("counts whole contracts at the ask and returns zero when one contract is over the cap", () => {
-    expect(maxLongContractsWithinCap(2)).toBe(2);
+    expect(maxLongContractsWithinCap(2)).toBe(4);
     expect(maxLongContractsWithinCap(4.5)).toBe(1);
-    expect(maxLongContractsWithinCap(4.51)).toBe(0);
-    expect(singleContractExceedsCap(4.5)).toBe(false);
-    expect(singleContractExceedsCap(4.51)).toBe(true);
+    expect(maxLongContractsWithinCap(8.76)).toBe(0);
+    expect(singleContractExceedsCap(8.75)).toBe(false);
+    expect(singleContractExceedsCap(8.76)).toBe(true);
     expect(maxLongContractsWithinCap(0)).toBeNull();
   });
 });

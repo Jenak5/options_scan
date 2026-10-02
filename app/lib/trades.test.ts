@@ -35,16 +35,16 @@ function opened(over: Partial<StoredTrade> = {}): StoredTrade {
 
 describe("trade metrics", () => {
   it("computes dollar and percent P&L, hold time, and a cap breach", () => {
-    const trade = opened({ contracts: 3, entryPrice: 2, closedAt: NOW.getTime() + 60 * 60_000, exitPrice: 2.6 });
+    const trade = opened({ contracts: 5, entryPrice: 2, closedAt: NOW.getTime() + 60 * 60_000, exitPrice: 2.6 });
     const metrics = tradeMetrics(trade);
-    expect(metrics.pnlDollars).toBeCloseTo(180);
+    expect(metrics.pnlDollars).toBeCloseTo(300);
     expect(metrics.pnlFraction).toBeCloseTo(0.3);
     expect(metrics.result).toBe("win");
     expect(metrics.holdMinutes).toBe(60);
     expect(metrics.matchedAlert).toBe(true);
-    expect(metrics.riskDollars).toBe(600);
+    expect(metrics.riskDollars).toBe(1000);
     expect(metrics.riskBreachesCap).toBe(true);
-    expect(MAX_LOSS_DOLLARS).toBe(450);
+    expect(MAX_LOSS_DOLLARS).toBe(875);
   });
 
   it("calls a move inside one dollar flat, and a down close a loss", () => {

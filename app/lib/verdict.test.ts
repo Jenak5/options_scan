@@ -71,7 +71,7 @@ describe("alert checklist", () => {
     expect(result.grade).toBe("B");
     expect(result.levels).toBeNull();
     expect(result.liquidityPasses).toBe(true);
-    expect(result.maxContracts).toBe(2);
+    expect(result.maxContracts).toBe(4);
     expect(result.dailyStop).toBe(false);
     expect(result.reasons.length).toBeGreaterThanOrEqual(2);
     expect(result.reasons.length).toBeLessThanOrEqual(4);
@@ -213,14 +213,15 @@ describe("alert checklist", () => {
     expect(result.reasons.length).toBeLessThanOrEqual(4);
   });
 
-  it("keeps a contract between the loss cap and the grade ceiling, and names a debit spread", () => {
+  it("fits a contract under the $875 loss cap and does not name a debit spread", () => {
     const result = gradeSetup(setup({ bid: 4.9, ask: 5, mid: 4.95, volume: 200, openInterest: 800, volOiRatio: 0.25 }));
     expect(result.verdict).toBe("TAKE");
     expect(result.grade).toBe("B");
-    expect(result.singleContractExceedsCap).toBe(true);
-    expect(result.maxContracts).toBe(0);
-    expect(result.suggestion).toBe(DEBIT_SPREAD_SUGGESTION);
-    expect(result.reasons.some((reason) => reason.includes(DEBIT_SPREAD_SUGGESTION))).toBe(true);
+    expect(result.singleContractExceedsCap).toBe(false);
+    expect(result.maxContracts).toBe(1);
+    expect(result.suggestion).toBeNull();
+    expect(result.reasons.some((reason) => reason.includes(DEBIT_SPREAD_SUGGESTION))).toBe(false);
+    expect(result.reasons.join(" ")).toContain(`$${MAX_LOSS_DOLLARS}`);
   });
 
   it("skips delayed quotes even when the other bars pass", () => {
