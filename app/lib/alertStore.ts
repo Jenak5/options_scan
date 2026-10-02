@@ -1,4 +1,5 @@
 import { OUTCOME_RULES, SMALL_SAMPLE_NOTE } from "@/app/lib/alertConfig";
+import { alertSetupKey } from "@/app/lib/alertPolicy";
 import {
   addRecord,
   alreadySentToday,
@@ -61,11 +62,21 @@ export async function wasSentToday(contractKey: string, now: Date): Promise<bool
   return alreadySentToday(book, contractKey, chicagoDate(now));
 }
 
+function setupAlreadySent(book: AlertBook, record: { ticker: string; putCall: string; expiration: string; tradingDay: string }): boolean {
+  const key = alertSetupKey(record);
+  for (let i = 0; i < book.records.length; i++) {
+    const row = book.records[i];
+    if (row.tradingDay === record.tradingDay && alertSetupKey(row) === key) return true;
+  }
+  return false;
+}
+
 export async function rememberSentAlert(row: FlowRow, verdict: AlertVerdict, now: Date): Promise<boolean> {
   const record = buildStoredAlert(row, verdict, now);
   return updateAlertBook((current) => {
     const book = parseAlertBook(current);
     if (alreadySentToday(book, record.contractKey, record.tradingDay)) return JSON.stringify(book);
+    if (setupAlreadySent(book, record)) return JSON.stringify(book);
     return JSON.stringify(addRecord(book, record));
   });
 }
@@ -106,7 +117,7 @@ export async function loadAlertReport(): Promise<AlertReport> {
     notes: {
       sample: SMALL_SAMPLE_NOTE,
       outcome: OUTCOME_RULES.note,
-      checklist: "TAKE, WATCH, and SKIP were the checklist at alert time. Outcome labels are the later midpoint check. Neither one is trade profit or loss.",
+      checklist: "Only letter A and B are saved. Older rows may include other grades. The checklist at send time was TAKE. Outcome labels are the later midpoint check. Neither one is trade profit or loss.",
     },
   };
 }

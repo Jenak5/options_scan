@@ -71,8 +71,9 @@ Set every secret in Vercel as a **Sensitive** variable. Do not leave them readab
 | `UPSTASH_REDIS_REST_URL` | Yes | Upstash Redis REST URL. Used when the KV pair is not complete and both Upstash variables are set. |
 | `UPSTASH_REDIS_REST_TOKEN` | Yes | Upstash Redis REST token. Used when the KV pair is not complete and both Upstash variables are set. |
 | `BLOB_READ_WRITE_TOKEN` | Yes | Private Vercel Blob token. Used when neither Redis pair is complete. |
-| `ALERT_MIN_PREMIUM` | No | Minimum notional before a Telegram alert |
+| `ALERT_MIN_PREMIUM` | No | Minimum notional before a contract is even considered for a Telegram alert |
 | `ALERT_OTM_ONLY` | No | When `true`, alerts also require the contract to be out of the money |
+| `ALERT_MAX_PER_DAY` | No | Max Telegram alerts per Chicago trading day. Default 5. Only 1–50 is accepted. |
 | `FLOW_WATCHLIST` | No | Comma-separated tickers for the flow scan and cron. Optional. |
 | `NEXT_PUBLIC_DEFAULT_WATCHLIST` | No | Browser-visible default tickers |
 
@@ -153,19 +154,19 @@ Each contract gets:
 
 The default watchlist is SPY, QQQ, IWM, AAPL, NVDA, TSLA, AMD, AMZN, MSFT, META, GOOGL, PLTR, SOFI, NFLX, and COIN. Set `FLOW_WATCHLIST` to replace it. A ticker typed into the filter scans that symbol instead.
 
-Chain requests stay on the chains endpoint, with `range=NTM`, `strikeCount=6`, and a date window of 35 days. Each ticker also gets two price-history reads: about a month of daily candles, and today's 5-minute candles with the extended session. Those history reads are cached per ticker for a few minutes. Schwab has no parameter for "four expirations," so after the response the scorer keeps the nearest four. Scans run in batches of three. Chain reads stay under about 100 per minute, and price-history reads stay under about 60 per minute. Chain results are cached for about 60 seconds.
+Chain requests stay on the chains endpoint, with `range=NTM`, `strikeCount=6`, and a date window of 45 days (about six weeks). Each ticker also gets two price-history reads: about a month of daily candles, and today's 5-minute candles with the extended session. Those history reads are cached per ticker for a few minutes. Schwab has no parameter for "how many expirations," so after the response the scorer keeps up to 24. Dates about 14 to 42 days out are kept ahead of the very short-dated ones, so a 2 to 6 week expiration is not dropped to make room for this week. Scans run in batches of three. Chain reads stay under about 100 per minute, and price-history reads stay under about 60 per minute. Chain results are cached for about 60 seconds.
 
 Illiquid contracts are hidden by default: open interest at least 500, volume at least 100, and bid-ask spread at most 5% of the midpoint. Those are the same bars as the Gate. The Flow tab has a checkbox to show the rest. Each row has **Check in Gate**, which opens `/gate` with the ticker, expiration, strike, call or put, and the midpoint as the planned entry.
 
 If Schwab is not connected, the tab says so and links to Reconnect Schwab.
 
-Cron still requires `Authorization: Bearer <CRON_SECRET>` before anything else. It alerts only on contracts that pass those liquidity filters, and only when notional is at least `ALERT_MIN_PREMIUM` (default $100,000). `ALERT_OTM_ONLY=true` also requires the contract to be out of the money. The Telegram text says the flow is estimated.
+Cron still requires `Authorization: Bearer <CRON_SECRET>` before anything else. It considers contracts that pass those liquidity filters, and only when notional is at least `ALERT_MIN_PREMIUM` (default $100,000). `ALERT_OTM_ONLY=true` also requires the contract to be out of the money. A Telegram alert is sent only for a checklist **TAKE** graded **A** or **B**. C and D stay on the Flow tab and are not saved in the alert book. At most `ALERT_MAX_PER_DAY` alerts go out on a Chicago trading day (default 5), and an A is sent before a B. The same ticker, call or put, and expiration is not alerted again that day. The Telegram text says the flow is estimated.
 
 ## Alert checklist and report
 
-Every Flow row, Telegram alert, and Alert Report row carries a checklist verdict: **TAKE**, **WATCH**, or **SKIP**, a letter grade **A–D**, and two to four plain reasons. Thresholds that are not already in `app/lib/risk.ts` live in `app/lib/alertConfig.ts`.
+Every Flow row carries a checklist verdict: **TAKE**, **WATCH**, or **SKIP**, a letter grade **A–D**, and two to four plain reasons. Telegram and the Alert Report only receive **A** and **B**. Thresholds that are not already in `app/lib/risk.ts` live in `app/lib/alertConfig.ts`, including the 14 to 42 day window for an A or a B and the daily alert cap.
 
-The checklist uses the Gate for open interest (at least 500), volume today (at least 100), spread (at most 5% of mid), and the $450 loss cap. One contract over $450 is an automatic **SKIP**, and the reason points at a debit spread. A failed liquidity check is also an automatic **SKIP**. Flow strength, days to expiration, and distance from the money decide TAKE versus WATCH. The message includes how many contracts fit under $450 at the ask.
+The checklist uses the Gate for open interest (at least 500), volume today (at least 100), spread (at most 5% of mid), and the $450 loss cap. One contract over $450 is an automatic **SKIP**, and the reason points at a debit spread. A failed liquidity check is also an automatic **SKIP**, and that letter stays **D**. It is never an A or a B. Flow strength, days to expiration, and distance from the money decide TAKE versus WATCH. An A or a B also has to be about 2 to 6 weeks out (14 to 42 days). Under 14 days, or past 42 days, the letter stays at C or lower and nothing is sent. The message includes how many contracts fit under $450 at the ask.
 
 Support and resistance come from that Schwab price history plus high-open-interest strikes on the chain already fetched (a call wall and a put wall). Prior day high, low, and close, the pre-market range, the open, the session high and low so far, an open-range window, a candle VWAP when volume is present, recent swing highs and lows, and nearby round numbers are the other levels. VWAP is the volume-weighted typical price of the candles, not a tick print. The nearest support and resistance, and the distance to each, show on the Flow row, the Gate result, the Telegram alert, and the Alert Report. Those two levels are stored on the alert. No new environment variable.
 
@@ -173,7 +174,7 @@ A call is favored when price is above support with room to the next resistance. 
 
 The daily stop reads closed trades in the trade log for the Chicago day. Two losing closes in a row turn a TAKE into **STOP for today** for the rest of that day. A later win does not clear it. There is no weekly loss limit. A week down about 25% of the account ($750) is a flag on the log and the Flow tab, and it does not change the checklist.
 
-After a Telegram send, the cron stores the contract, the quote, the verdict, and the grade. Later runs re-read the Schwab chain and store the **mid** (not the last trade) and the underlying at about 15 minutes, 1 hour, and the close, plus the percent change in the option mid versus the alert mid. A missing quote or an expired contract is marked and skipped. The outcome label is **win** if the mid is up 20% or more at any of those checks, **miss** if the close mid is down 20% or more and nothing earlier won, and **flat** otherwise. Pending and unscored alerts are left out of the hit rate. That label is an estimate. It is not a fill and it is not trade profit or loss.
+After a Telegram send for an A or a B, the cron stores the contract, the quote, the verdict, and the grade. Later runs re-read the Schwab chain and store the **mid** (not the last trade) and the underlying at about 15 minutes, 1 hour, and the close, plus the percent change in the option mid versus the alert mid. A missing quote or an expired contract is marked and skipped. The outcome label is **win** if the mid is up 20% or more at any of those checks, **miss** if the close mid is down 20% or more and nothing earlier won, and **flat** otherwise. Pending and unscored alerts are left out of the hit rate. That label is an estimate. It is not a fill and it is not trade profit or loss. A daily stop that turns a TAKE into STOP for today does not send a new alert.
 
 Alert Report (session required, same as the other tabs) lists recent alerts and summarizes hit rate, average mid move at 1 hour and at the close, and the same numbers by ticker, by Gate liquidity, and by TAKE versus SKIP. The sample is small until many alerts are graded.
 

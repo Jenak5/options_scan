@@ -10,6 +10,7 @@ import {
   flowContractKey,
   gateCheckHref,
   keepNearestExpirations,
+  keepScanExpirations,
   liquidityOf,
   notionalPremium,
   parseWatchlist,
@@ -163,7 +164,7 @@ describe("estimated flow scoring", () => {
     expect(FLOW_DISCLAIMER).toMatch(/not true sweeps/i);
   });
 
-  it("keeps only the nearest four expirations and drops expired contracts", () => {
+  it("keeps expirations inside the 2 to 6 week window and drops expired contracts", () => {
     const parsed = parseOptionChain(chainPayload());
     const dates = new Set(parsed.contracts.map((row) => row.expiration));
     expect(dates.has("2026-09-25")).toBe(true);
@@ -177,10 +178,10 @@ describe("estimated flow scoring", () => {
       now: NOW,
     });
     const kept = Array.from(new Set(rows.map((row) => row.expiration))).sort();
-    expect(kept).toEqual(["2026-10-02", "2026-10-03", "2026-10-08", "2026-10-15"]);
-    expect(kept).toHaveLength(FLOW_MAX_EXPIRATIONS);
+    expect(kept).toEqual(["2026-10-02", "2026-10-03", "2026-10-08", "2026-10-15", "2026-10-22"]);
+    expect(kept.length).toBeLessThanOrEqual(FLOW_MAX_EXPIRATIONS);
     expect(rows.some((row) => row.expiration === "2026-09-25")).toBe(false);
-    expect(rows.some((row) => row.expiration === "2026-10-22")).toBe(false);
+    expect(rows.some((row) => row.expiration === "2026-10-22")).toBe(true);
   });
 
   it("ignores a volume snapshot from a prior New York session", () => {
@@ -280,7 +281,7 @@ describe("estimated flow scoring", () => {
       range: "NTM",
       strikeCount: 6,
       fromDate: "2026-10-01",
-      toDate: "2026-11-05",
+      toDate: "2026-11-15",
     });
   });
 
@@ -314,6 +315,19 @@ describe("estimated flow scoring", () => {
       fakeRow({ id: "c", score: 20, notionalPremium: 90_000, otm: true, liquidityPasses: true }),
     ];
     expect(filterFlowRows(rows, { minPremium: 50_000, otmOnly: true, liquidOnly: true, limit: 10 }).map((row) => row.id)).toEqual(["c"]);
+  });
+});
+
+describe("scan expirations", () => {
+  it("keeps the 2 to 6 week dates ahead of the front of the chain when the cap is tight", () => {
+    const kept = keepScanExpirations([
+      contract({ expiration: "2026-10-02" }),
+      contract({ expiration: "2026-10-08" }),
+      contract({ expiration: "2026-10-15", strike: 1 }),
+      contract({ expiration: "2026-10-22", strike: 2 }),
+      contract({ expiration: "2026-12-01", strike: 3 }),
+    ], 2, "2026-10-01");
+    expect(kept.map((row) => row.expiration).sort()).toEqual(["2026-10-15", "2026-10-22"]);
   });
 });
 

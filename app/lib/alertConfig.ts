@@ -42,11 +42,12 @@ export const ALERT_RULES = {
    */
   aGradeNotional: 500_000,
 
-  /** Inclusive days-to-expiration window for a quick short hold. */
-  idealDteMin: 1,
-  idealDteMax: 10,
-  /** Still a short-hold candidate, but not enough on its own for TAKE. */
-  acceptableDteMax: 21,
+  /**
+   * Inclusive days to expiration for an A or a B.
+   * 14 to 42 is about 2 to 6 weeks. Shorter or longer stays C or below.
+   */
+  alertDteMin: 14,
+  alertDteMax: 42,
 
   /** Out-of-the-money fraction at or under this is close enough for an A. */
   idealOtmFraction: 0.05,
@@ -57,6 +58,39 @@ export const ALERT_RULES = {
 
   note: "Rules checklist only. This is not a prediction of profit.",
 };
+
+/**
+ * Which grades leave the scanner.
+ * Change a number here to change Telegram and the alert book.
+ * ALERT_MAX_PER_DAY overrides maxPerDay when it is a whole number in range.
+ */
+export const ALERT_POLICY = {
+  /** Letters that may be sent and stored. C and D stay on the Flow tab. */
+  alertGrades: ["A", "B"] as readonly LetterGrade[],
+  /** Default cap for one Chicago trading day. A is chosen before B. */
+  maxPerDay: 5,
+  /** ALERT_MAX_PER_DAY outside 1..maxPerDayCeiling is ignored. */
+  maxPerDayCeiling: 50,
+  /**
+   * Extra A/B setups the cron may screen in one run when Grok flags one.
+   * Successful sends still stop at the daily cap.
+   */
+  screenBuffer: 4,
+};
+
+export function isAlertGrade(grade: string): boolean {
+  return (ALERT_POLICY.alertGrades as readonly string[]).indexOf(grade) !== -1;
+}
+
+/** Whole number from the env var, or the default cap when the value is unset or out of range. */
+export function alertsPerDayLimit(raw: string | undefined): number {
+  if (raw == null || raw.trim() === "") return ALERT_POLICY.maxPerDay;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > ALERT_POLICY.maxPerDayCeiling) {
+    return ALERT_POLICY.maxPerDay;
+  }
+  return parsed;
+}
 
 /**
  * How nearby price levels change the checklist.
@@ -266,9 +300,14 @@ export function gradeARubric(): string {
   const itm = Math.round(ALERT_RULES.maxItmFraction * 100);
   const levelsCap = ALERT_RULES.maxGradeUntilLevels;
   const earningsCap = EVENT_RULES.maxGradeUntilEarnings;
-  return `An A is a TAKE that is one of the best setups of the day, not every contract that passes the checklist. It needs live quotes, open interest, volume, and a bid-ask spread that pass the Gate, and at least one contract under the $${MAX_LOSS_DOLLARS} loss cap. Expiration is ${ALERT_RULES.idealDteMin} to ${ALERT_RULES.idealDteMax} days, and the strike is within ${otm}% out of the money or ${itm}% in the money. Flow is exceptional: at least ${ALERT_RULES.aMinFlowSignals} of the 4 signals (volume versus open interest, notional, a last trade at the ask, and a same-day volume jump), with volume at least ${ALERT_RULES.aGradeVolOiRatio}× open interest and notional at least ${notional}. Support and resistance are computed and leave room to the next level. The earnings date is known, or the ticker has no earnings calendar, and that date falls after expiration. No listed macro release falls on or before expiration. Missing price levels, an unknown earnings date, earnings or a macro release inside the contract, ordinary flow, or a farther strike leaves the letter at ${levelsCap} or lower. If price history is unavailable, the grade stops at ${levelsCap}. If the earnings date is unknown, the grade stops at ${earningsCap}. A liquidity failure, a single contract over the cap, delayed quotes, and an expired contract stay SKIP. Two losing closes stay STOP for today instead of TAKE. An A is never shown when the levels or the earnings date are missing.`;
+  return `An A is a TAKE that is one of the best setups of the day, not every contract that passes the checklist. It needs live quotes, open interest, volume, and a bid-ask spread that pass the Gate, and at least one contract under the $${MAX_LOSS_DOLLARS} loss cap. Expiration is ${ALERT_RULES.alertDteMin} to ${ALERT_RULES.alertDteMax} days, about 2 to 6 weeks, and the strike is within ${otm}% out of the money or ${itm}% in the money. A contract under ${ALERT_RULES.alertDteMin} days, or past ${ALERT_RULES.alertDteMax} days, cannot be an A or a B. Flow is exceptional: at least ${ALERT_RULES.aMinFlowSignals} of the 4 signals (volume versus open interest, notional, a last trade at the ask, and a same-day volume jump), with volume at least ${ALERT_RULES.aGradeVolOiRatio}× open interest and notional at least ${notional}. Support and resistance are computed and leave room to the next level. The earnings date is known, or the ticker has no earnings calendar, and that date falls after expiration. No listed macro release falls on or before expiration. Missing price levels, an unknown earnings date, earnings or a macro release inside the contract, ordinary flow, or a farther strike leaves the letter at ${levelsCap} or lower. If price history is unavailable, the grade stops at ${levelsCap}. If the earnings date is unknown, the grade stops at ${earningsCap}. A liquidity failure, a single contract over the cap, delayed quotes, and an expired contract stay SKIP and cannot be an A or a B. Two losing closes stay STOP for today instead of TAKE. An A is never shown when the levels or the earnings date are missing.`;
+}
+
+/** Shown with the checklist so the Flow tab and the rubric agree about what is sent. */
+export function alertDeliveryNote(): string {
+  return `Only an A or a B is sent to Telegram or saved in the alert book. At most ${ALERT_POLICY.maxPerDay} alerts go out on a Chicago trading day unless ALERT_MAX_PER_DAY sets another cap from 1 to ${ALERT_POLICY.maxPerDayCeiling}, and an A is sent before a B. The same ticker, call or put, and expiration is not alerted again that day. A C or a D can still show on the Flow tab.`;
 }
 
 export function verdictBanner(): string {
-  return `Checklist for a $${ACCOUNT_SIZE_DOLLARS.toLocaleString("en-US")} account with a $${MAX_LOSS_DOLLARS} loss cap. Not a prediction of profit. ${gradeARubric()}`;
+  return `Checklist for a $${ACCOUNT_SIZE_DOLLARS.toLocaleString("en-US")} account with a $${MAX_LOSS_DOLLARS} loss cap. Not a prediction of profit. ${alertDeliveryNote()} ${gradeARubric()}`;
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ALERT_RULES, EVENT_RULES, gradeARubric } from "@/app/lib/alertConfig";
+import { ALERT_RULES, EVENT_RULES, alertDeliveryNote, gradeARubric } from "@/app/lib/alertConfig";
 import {
   EARNINGS_SKIP_SENTENCE,
   EARNINGS_UNKNOWN_PHRASE,
@@ -32,17 +32,17 @@ function setup(over: Partial<SetupInput> = {}): SetupInput {
     side: "estimated at ask",
     otmFraction: 0.04,
     otm: true,
-    dte: 7,
+    dte: 21,
     delayed: false,
     strike: 104,
-    expiration: "2026-10-08",
+    expiration: "2026-06-04",
     putCall: "call",
     underlyingPrice: 100,
     consecutiveLosses: null,
     levels: null,
     earnings: { status: "known", date: "2026-12-20", timing: "after-market", estimated: false },
     definedRiskSpread: false,
-    now: new Date("2026-10-05T15:00:00Z"),
+    now: new Date("2026-05-14T15:00:00Z"),
     ...over,
   };
 }
@@ -62,7 +62,7 @@ function levels(over: Partial<KeyLevels> = {}): KeyLevels {
 }
 
 describe("alert checklist", () => {
-  it("grades a liquid short-hold setup as TAKE and caps the letter at B without levels", () => {
+  it("grades a liquid 2 to 6 week setup as TAKE and caps the letter at B without levels", () => {
     const result = gradeSetup(setup());
     expect(result.verdict).toBe("TAKE");
     expect(result.verdictLabel).toBe("TAKE");
@@ -194,7 +194,7 @@ describe("alert checklist", () => {
       volumeJump: null,
       side: "estimated at bid",
       otmFraction: 0.2,
-      dte: 40,
+      dte: 50,
     }));
     expect(result.verdict).toBe("WATCH");
     expect(result.grade).toBe("D");
@@ -267,23 +267,23 @@ describe("alert checklist", () => {
 
   it("downgrades when earnings fall on or before expiration and names IV crush", () => {
     const result = gradeSetup(excellent({
-      earnings: { status: "known", date: "2026-10-08", timing: "before-market", estimated: false },
+      earnings: { status: "known", date: "2026-05-28", timing: "before-market", estimated: false },
     }));
     expect(result.verdict).toBe("TAKE");
     expect(result.grade).toBe("B");
     expect(result.uncappedGrade).toBe("B");
-    expect(result.eventLine).toContain("Next earnings 2026-10-08 before the open.");
+    expect(result.eventLine).toContain("Next earnings 2026-05-28 before the open.");
     expect(result.eventLine).toContain(IV_CRUSH_SENTENCE);
     expect(result.reasons.some((reason) => reason.includes(IV_CRUSH_SENTENCE))).toBe(true);
   });
 
   it("skips a short-dated single when earnings are today or tomorrow", () => {
-    const today = "2026-10-05";
+    const today = "2026-05-14";
     const earningsDate = addCalendarDays(today, EVENT_RULES.imminentEarningsDays);
     const result = gradeSetup(setup({
       levels: levels(),
       dte: EVENT_RULES.shortDatedDteMax,
-      expiration: "2026-10-20",
+      expiration: "2026-05-24",
       earnings: { status: "known", date: earningsDate, timing: "after-market", estimated: false },
     }));
     expect(result.verdict).toBe("SKIP");
@@ -297,12 +297,13 @@ describe("alert checklist", () => {
     const result = gradeSetup(setup({
       levels: levels(),
       dte: 3,
-      expiration: "2026-10-08",
+      expiration: "2026-05-17",
       definedRiskSpread: true,
-      earnings: { status: "known", date: "2026-10-06", timing: "after-market", estimated: false },
+      earnings: { status: "known", date: "2026-05-15", timing: "after-market", estimated: false },
     }));
-    expect(result.verdict).toBe("TAKE");
-    expect(result.grade).toBe("C");
+    expect(result.verdict).not.toBe("SKIP");
+    expect(result.verdict).toBe("WATCH");
+    expect(result.grade === "A" || result.grade === "B").toBe(false);
     expect(result.eventLine.includes(EARNINGS_SKIP_SENTENCE)).toBe(false);
     expect(result.eventLine).toContain(IV_CRUSH_SENTENCE);
   });
@@ -329,28 +330,28 @@ describe("alert checklist", () => {
     const jobs = EVENT_RULES.macroDates.find((row) => row.date === "2026-10-02" && row.name === "Jobs report");
     expect(jobs).toBeTruthy();
     const result = gradeSetup(excellent({
-      now: new Date("2026-10-02T15:00:00Z"),
-      dte: 6,
-      expiration: "2026-10-08",
+      now: new Date("2026-05-20T15:00:00Z"),
+      dte: 21,
+      expiration: "2026-06-10",
       earnings: farEarnings(),
     }));
     expect(result.verdict).toBe("TAKE");
     expect(result.grade).toBe("B");
-    expect(result.eventLine).toContain("Jobs report on 2026-10-02");
+    expect(result.eventLine).toContain("Jobs report on 2026-06-05");
     expect(result.eventLine).toContain(MACRO_CAUTION);
   });
 
   it("stacks the earnings downgrade and the macro downgrade", () => {
     const result = gradeSetup(excellent({
-      now: new Date("2026-10-02T15:00:00Z"),
-      dte: 6,
-      expiration: "2026-10-08",
-      earnings: { status: "known", date: "2026-10-07", timing: "after-market", estimated: false },
+      now: new Date("2026-05-20T15:00:00Z"),
+      dte: 21,
+      expiration: "2026-06-10",
+      earnings: { status: "known", date: "2026-05-28", timing: "after-market", estimated: false },
     }));
     expect(result.verdict).toBe("TAKE");
     expect(result.grade).toBe("C");
     expect(result.eventLine).toContain(IV_CRUSH_SENTENCE);
-    expect(result.eventLine).toContain("Jobs report on 2026-10-02");
+    expect(result.eventLine).toContain("Jobs report on 2026-06-05");
     expect(result.reasons.length).toBeLessThanOrEqual(4);
   });
 
@@ -384,6 +385,29 @@ describe("alert checklist", () => {
     expect(html).toContain("Not an exchange-reported sweep.");
   });
 
+  it("does not grade a short-dated or illiquid contract as A or B", () => {
+    const shortDated = gradeSetup(excellent({
+      dte: 7,
+      expiration: "2026-05-21",
+      levels: null,
+      earnings: NO_EARNINGS_LISTED,
+    }));
+    expect(shortDated.verdict).toBe("WATCH");
+    expect(shortDated.grade).not.toBe("A");
+    expect(shortDated.grade).not.toBe("B");
+    expect(shortDated.reasons.join(" ")).toMatch(/too short for an A or a B/i);
+
+    const tooFar = gradeSetup(excellent({ dte: 50, expiration: "2026-07-03" }));
+    expect(tooFar.verdict).not.toBe("TAKE");
+    expect(tooFar.grade).not.toBe("A");
+    expect(tooFar.grade).not.toBe("B");
+
+    const thin = gradeSetup(excellent({ openInterest: MIN_OPEN_INTEREST - 1, volume: 50 }));
+    expect(thin.verdict).toBe("SKIP");
+    expect(thin.grade).toBe("D");
+    expect(thin.liquidityPasses).toBe(false);
+  });
+
   it("grades an exceptional quiet setup as an A", () => {
     const result = gradeSetup(excellent());
     expect(result.verdict).toBe("TAKE");
@@ -392,7 +416,10 @@ describe("alert checklist", () => {
     expect(gradeARubric()).toMatch(/best setups of the day/);
     expect(gradeARubric()).toContain(`${ALERT_RULES.aGradeVolOiRatio}×`);
     expect(gradeARubric()).toContain("$500K");
+    expect(gradeARubric()).toContain(`${ALERT_RULES.alertDteMin} to ${ALERT_RULES.alertDteMax}`);
+    expect(gradeARubric()).toMatch(/cannot be an A or a B/);
     expect(gradeARubric()).toMatch(/never shown when the levels or the earnings date are missing/i);
+    expect(alertDeliveryNote()).toMatch(/Only an A or a B is sent/);
   });
 
   it("shows that same A on a Flow row, the Gate, and Telegram", () => {
@@ -441,14 +468,14 @@ describe("alert checklist", () => {
     expect(farther.verdict).toBe("TAKE");
     expect(farther.grade).toBe("B");
     const dayBeforeJobs = gradeSetup(excellent({
-      now: new Date("2026-10-01T15:00:00Z"),
-      dte: 7,
-      expiration: "2026-10-08",
+      now: new Date("2026-06-04T15:00:00Z"),
+      dte: 16,
+      expiration: "2026-06-20",
     }));
     expect(dayBeforeJobs.verdict).toBe("TAKE");
     expect(dayBeforeJobs.grade).toBe("B");
     expect(dayBeforeJobs.uncappedGrade).toBe("B");
-    expect(dayBeforeJobs.eventLine).toContain("Jobs report on 2026-10-02");
+    expect(dayBeforeJobs.eventLine).toContain("Jobs report on 2026-06-05");
   });
 
   it("does not show an A when levels are missing or the hard skips fail", () => {
@@ -480,7 +507,7 @@ describe("alert checklist", () => {
     const result = gradeSetup(setup({
       levels: levels(),
       printSummary: summary,
-      earnings: { status: "known", date: "2026-10-08", timing: "before-market", estimated: false },
+      earnings: { status: "known", date: "2026-05-28", timing: "before-market", estimated: false },
     }));
     expect(result.reasons).toContain(IV_CRUSH_SENTENCE);
     expect(result.reasons).toContain(summary);
@@ -499,8 +526,8 @@ function excellent(over: Partial<SetupInput> = {}): SetupInput {
     side: "estimated at ask",
     otmFraction: 0.04,
     otm: true,
-    dte: 7,
-    expiration: "2026-10-12",
+    dte: 21,
+    expiration: "2026-06-04",
     levels: levels(),
     earnings: farEarnings(),
     ...over,

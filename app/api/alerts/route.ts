@@ -1,11 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
-import { currentDailyLoss, rememberSentAlert, wasSentToday } from "@/app/lib/alertStore";
+import { alertsPerDayLimit } from "@/app/lib/alertConfig";
+import {
+  alertSetupKey,
+  chooseAlerts,
+  gradeAlertCandidates,
+  indexSentAlerts,
+} from "@/app/lib/alertPolicy";
+import { currentDailyLoss, loadAlertBook, rememberSentAlert } from "@/app/lib/alertStore";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import { selectAlertRows, watchlistFromEnv } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
+import { chicagoDate } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { sendTelegramAlert, formatFlowAlert } from "@/app/lib/telegram";
-import { gradeFlowRow } from "@/app/lib/verdict";
 
 export async function GET(request: NextRequest) {
   const denied = await denyIfUnauthorized(request);
@@ -17,7 +24,7 @@ export async function GET(request: NextRequest) {
     switch (action) {
       case "test": {
         const sent = await sendTelegramAlert(
-          "🧪 <b>OPTIONS EDGE SCANNER</b>\n\n✅ Telegram alerts are working!\n\nYou'll receive alerts here when estimated flow passes the gate liquidity filters."
+          "🧪 <b>OPTIONS EDGE SCANNER</b>\n\n✅ Telegram alerts are working!\n\nYou'll receive an alert when a setup grades A or B. C and D stay on the Flow tab."
         );
         return NextResponse.json({ success: sent, message: sent ? "Test alert sent!" : "Failed — check your TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID" });
       }
@@ -31,20 +38,32 @@ export async function GET(request: NextRequest) {
         const rows = selectAlertRows(scan.rows, {
           minPremium: Number.isFinite(minPremium) ? minPremium : 100_000,
           otmOnly,
-          limit: 25,
+          limit: 80,
         });
         const now = new Date();
+        const tradingDay = chicagoDate(now);
         const losses = await currentDailyLoss(now);
+        const maxPerDay = alertsPerDayLimit(process.env.ALERT_MAX_PER_DAY);
+        const sent = indexSentAlerts((await loadAlertBook()).records, tradingDay);
+        const room = Math.max(0, maxPerDay - sent.count);
+        const picks = chooseAlerts({
+          candidates: gradeAlertCandidates(rows, losses, now),
+          alreadySentContractKeys: sent.contracts,
+          alreadySentSetupKeys: sent.setups,
+          limit: room,
+        });
         let alertsSent = 0;
 
-        for (const flow of rows) {
-          if (await wasSentToday(flow.id, now)) continue;
-          const verdict = gradeFlowRow(flow, losses);
-          const message = formatFlowAlert({ ...flow, verdict });
-          const sent = await sendTelegramAlert(message);
-          if (sent) {
+        for (const item of picks) {
+          if (alertsSent >= room) break;
+          const latest = indexSentAlerts((await loadAlertBook()).records, tradingDay);
+          if (latest.count >= maxPerDay) break;
+          if (latest.contracts.has(item.row.id) || latest.setups.has(alertSetupKey(item.row))) continue;
+          const message = formatFlowAlert({ ...item.row, verdict: item.verdict });
+          const delivered = await sendTelegramAlert(message);
+          if (delivered) {
             alertsSent++;
-            await rememberSentAlert(flow, verdict, now);
+            await rememberSentAlert(item.row, item.verdict, now);
           }
           await new Promise((r) => setTimeout(r, 1100));
         }
