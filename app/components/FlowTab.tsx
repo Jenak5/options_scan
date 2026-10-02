@@ -13,6 +13,7 @@ import type { AlertVerdict } from "@/app/lib/verdict";
 
 interface ScoredFlow extends FlowRow {
   verdict?: AlertVerdict;
+  alertId?: string | null;
 }
 
 const INPUT: React.CSSProperties = {
@@ -209,6 +210,9 @@ function FlowCard({ row }: { row: ScoredFlow }) {
             {" "}${row.strike} · {shortDate(row.expiration)}
             {row.dte != null ? <span style={{ color: "#94a3b8" }}> · {row.dte}d</span> : null}
           </div>
+          {row.alertId && (
+            <div style={{ marginTop: 6, color: "#06b6d4", fontSize: 13, fontWeight: 700 }}>Alerted today</div>
+          )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <VerdictBadge name={name} label={verdict?.verdictLabel ?? "—"} />
@@ -283,6 +287,7 @@ function FlowCard({ row }: { row: ScoredFlow }) {
       </details>
       {(verdict?.grade === "A" || verdict?.grade === "B") && (
         <PaperTradeButton
+          alertId={row.alertId ?? undefined}
           flow={{
             ticker: row.ticker,
             putCall: row.putCall,

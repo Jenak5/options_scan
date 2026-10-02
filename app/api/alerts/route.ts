@@ -7,6 +7,7 @@ import {
   indexSentAlerts,
 } from "@/app/lib/alertPolicy";
 import { currentDailyLoss, loadAlertBook, rememberSentAlert } from "@/app/lib/alertStore";
+import { lastAlertBookWriteError, noteAlertSentUnsaved } from "@/app/lib/schwabStore";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import { selectAlertRows, watchlistFromEnv } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
@@ -53,6 +54,7 @@ export async function GET(request: NextRequest) {
           limit: room,
         });
         let alertsSent = 0;
+        const log: string[] = [];
 
         for (const item of picks) {
           if (alertsSent >= room) break;
@@ -60,11 +62,20 @@ export async function GET(request: NextRequest) {
           if (latest.count >= maxPerDay) break;
           if (latest.contracts.has(item.row.id) || latest.setups.has(alertSetupKey(item.row))) continue;
           const alertId = `${now.getTime()}-${item.row.id}`;
-          const message = formatFlowAlert({ ...item.row, verdict: item.verdict, alertId });
+          const saved = await rememberSentAlert(item.row, item.verdict, now);
+          const message = formatFlowAlert({ ...item.row, verdict: item.verdict, alertId, saved });
           const delivered = await sendTelegramAlert(message);
-          if (delivered) {
-            alertsSent++;
-            await rememberSentAlert(item.row, item.verdict, now);
+          if (delivered) alertsSent++;
+          if (!saved) {
+            const failure = await lastAlertBookWriteError();
+            if (delivered) await noteAlertSentUnsaved(now);
+            const http = failure?.status == null ? "no HTTP status" : `HTTP ${failure.status}`;
+            const detail = failure ? ` (${http}: ${failure.message})` : "";
+            log.push(`${item.row.ticker}: alert book was not saved${detail}`);
+          } else if (!delivered) {
+            log.push(`${item.row.ticker}: saved in the alert book, but Telegram send failed`);
+          } else {
+            log.push(`${item.row.ticker}: Telegram alert sent and saved`);
           }
           await new Promise((r) => setTimeout(r, 1100));
         }
@@ -74,6 +85,7 @@ export async function GET(request: NextRequest) {
           scanned: scan.rows.length,
           matched: rows.length,
           alerts_sent: alertsSent,
+          log,
           errors: scan.errors,
         });
       }

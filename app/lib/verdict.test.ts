@@ -487,6 +487,26 @@ describe("alert checklist", () => {
     });
     expect(linked).toContain(">Paper trade</a>");
     expect(linked).toContain(encodeURIComponent(alertId));
+    const unsaved = formatFlowAlert({
+      ticker: "NVDA",
+      putCall: input.putCall,
+      strike: input.strike,
+      expiration: input.expiration,
+      ask: input.ask,
+      notionalPremium: input.notionalPremium,
+      volume: input.volume,
+      openInterest: input.openInterest,
+      iv: null,
+      side: input.side,
+      otm: input.otm,
+      volumeExceedsOi: true,
+      volOiRatio: input.volOiRatio,
+      verdict: fromFlow,
+      alertId,
+      saved: false,
+    });
+    expect(unsaved).toContain("Not saved in the app");
+    expect(unsaved.includes("Paper trade")).toBe(false);
   });
 
   it("keeps ordinary flow, a farther strike, and a macro day off A", () => {

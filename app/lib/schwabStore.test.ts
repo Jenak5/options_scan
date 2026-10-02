@@ -318,7 +318,7 @@ describe("blob token store", () => {
     });
   });
 
-  it("strips a weak etag before ifMatch so a compressed blob can be overwritten", async () => {
+  it("uses the strong etag from head when get returns a different weak etag", async () => {
     await writeFlowSnapshots({
       SPY: { scannedAt: 1_700_000_000_000, volumes: { "2026-10-08|105|call": 1 } },
     });
@@ -326,13 +326,14 @@ describe("blob token store", () => {
     mock.get.mockImplementation(async (pathname: string) => {
       const result = await mock.read(pathname);
       if (!result) return result;
-      return { ...result, blob: { ...result.blob, etag: `W/${result.blob.etag}` } };
+      return { ...result, blob: { ...result.blob, etag: 'W/"compressed-body-hash"' } };
     });
     await writeFlowSnapshots({
       SPY: { scannedAt: 1_700_000_000_001, volumes: { "2026-10-08|105|call": 2 } },
     });
     const puts = mock.put.mock.calls.filter((call) => call[0] === SCHWAB_BLOB_FLOW_PATH);
     expect(puts[puts.length - 1][2].ifMatch).toBe(strong);
+    expect(puts[puts.length - 1][2].ifMatch).not.toBe('"compressed-body-hash"');
     expect(String(puts[puts.length - 1][2].ifMatch).startsWith("W/")).toBe(false);
     expect((await readFlowSnapshots()).SPY.volumes["2026-10-08|105|call"]).toBe(2);
   });
@@ -402,7 +403,12 @@ function createBlobMock() {
     }
     files.delete(pathname);
   });
-  const client: SchwabBlobClient = { put, get, del };
+  const head = vi.fn(async (pathname: string) => {
+    const existing = files.get(pathname);
+    if (!existing) return null;
+    return { etag: existing.etag };
+  });
+  const client: SchwabBlobClient = { put, get, del, head };
   return { client, put, get, del, files, read, seed: (pathname: string, body: string) => {
     seq += 1;
     files.set(pathname, { body, etag: `etag-${seq}` });

@@ -9,6 +9,7 @@ import {
   screenQueueLimit,
 } from "@/app/lib/alertPolicy";
 import { currentDailyLoss, loadAlertBook, rememberSentAlert } from "@/app/lib/alertStore";
+import { lastAlertBookWriteError, noteAlertSentUnsaved } from "@/app/lib/schwabStore";
 import { hasValidBearer } from "@/app/lib/auth";
 import { selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
@@ -42,6 +43,8 @@ const XAI_API = "https://api.x.ai/v1/chat/completions";
 const TG_API  = (token: string) => `https://api.telegram.org/bot${token}`;
 
 // Best-effort dedupe for this process. The alert book is the record that survives a cold start.
+// A contract is marked handled only after it is saved, or after Grok flags it.
+// A failed save stays unmarked so this process can try again.
 // Keys are `${Chicago date}|${contract id}` and `${Chicago date}|${setup key}`.
 const handledContractIds = new Set<string>();
 const handledSetupKeys = new Set<string>();
@@ -102,7 +105,15 @@ function convictionFor(ticker: string, signal: VolSignal | null): { emoji: strin
   return { emoji: "❓", tier: "UNSCORED", note: "Schwab did not return ATM IV versus realized vol" };
 }
 
-function formatAlert(row: FlowRow, volSummary: string, signal: VolSignal | null, grokNote: string, verdict: AlertVerdict, alertId: string): string {
+function formatAlert(
+  row: FlowRow,
+  volSummary: string,
+  signal: VolSignal | null,
+  grokNote: string,
+  verdict: AlertVerdict,
+  alertId: string,
+  saved: boolean,
+): string {
   const premStr = formatFlowPremium(row.notionalPremium);
   const typeEmoji = row.putCall === "call" ? "🟢" : "🔴";
   const conviction = convictionFor(row.ticker, signal);
@@ -125,7 +136,7 @@ ${row.prints?.summary ? `🖨 ${escapeHtml(row.prints.summary)}\n` : ""}${exitTe
 
 🤖 <i>${escapeHtml(grokNote)}</i>
 
-${paperTradeLinkHtml(alertId)}
+${saved ? paperTradeLinkHtml(alertId) : "Not saved in the app. No paper-trade link."}
 
 <b>Options Edge Scanner</b>`;
 }
@@ -138,6 +149,12 @@ function exitText(ask: number, maxContracts: number | null): string {
 
 function escapeHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function saveDetail(failure: { status: number | null; message: string } | null): string {
+  if (!failure) return "";
+  const http = failure.status == null ? "no HTTP status" : `HTTP ${failure.status}`;
+  return ` (${http}: ${failure.message})`;
 }
 
 function dayKey(tradingDay: string, key: string): string {
@@ -290,25 +307,30 @@ export async function GET(request: NextRequest) {
       log.push(`${row.ticker}: vol ${volSummary}`);
 
       const { clean, reason } = await screenWithGrok(row, volSummary);
-      handledContractIds.add(dayKey(tradingDay, row.id));
 
       if (!clean) {
+        handledContractIds.add(dayKey(tradingDay, row.id));
         log.push(`${row.ticker}: Grok flagged — ${reason}`);
         continue;
       }
       log.push(`${row.ticker}: Grok clean — ${reason}`);
 
       const alertId = `${now.getTime()}-${row.id}`;
-      const delivered = await sendTelegram(formatAlert(row, volSummary, signal, reason, verdict, alertId));
-      if (delivered) {
-        alertsSent++;
+      const saved = await rememberSentAlert(row, verdict, now);
+      if (saved) {
+        handledContractIds.add(dayKey(tradingDay, row.id));
         handledSetupKeys.add(dayKey(tradingDay, setup));
-        const saved = await rememberSentAlert(row, verdict, now);
-        log.push(saved
-          ? `${row.ticker}: Telegram alert sent and saved (${verdict.verdictLabel} ${verdict.grade})`
-          : `${row.ticker}: Telegram alert sent, but the alert book was not saved`);
+      }
+      const delivered = await sendTelegram(formatAlert(row, volSummary, signal, reason, verdict, alertId, saved));
+      if (delivered) alertsSent++;
+      if (saved && delivered) {
+        log.push(`${row.ticker}: Telegram alert sent and saved (${verdict.verdictLabel} ${verdict.grade})`);
+      } else if (saved) {
+        log.push(`${row.ticker}: saved in the alert book, but Telegram send failed — check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID`);
       } else {
-        log.push(`${row.ticker}: Telegram send failed — check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID`);
+        const failure = await lastAlertBookWriteError();
+        if (delivered) await noteAlertSentUnsaved(now);
+        log.push(`${row.ticker}: Telegram alert ${delivered ? "sent" : "not sent"}, but the alert book was not saved${saveDetail(failure)}`);
       }
     }
   } catch (err) {

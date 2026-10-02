@@ -212,4 +212,25 @@ describe("alert book parsing", () => {
     book = addRecord(book, alert({ id: "c" }), 2);
     expect(book.records.map((row) => row.id)).toEqual(["b", "c"]);
   });
+
+  it("keeps today's alert when the stored book is at the 200 record cap", () => {
+    let book = emptyBook();
+    for (let i = 0; i < OUTCOME_RULES.maxStoredAlerts; i++) {
+      book = addRecord(book, alert({ id: `old-${i}`, sentAt: i, contractKey: `SPY|2026-10-08|${i}|call` }));
+    }
+    book = addRecord(book, alert({
+      id: "today",
+      sentAt: Date.parse("2026-10-02T17:45:00Z"),
+      tradingDay: "2026-10-02",
+      contractKey: "QQQ|2026-10-16|500|put",
+      ticker: "QQQ",
+    }));
+    expect(book.records).toHaveLength(OUTCOME_RULES.maxStoredAlerts);
+    expect(book.records[book.records.length - 1].id).toBe("today");
+    expect(book.records.some((row) => row.id === "old-0")).toBe(false);
+    const parsed = parseAlertBook(JSON.stringify(book));
+    const newest = parsed.records.slice().sort((a, b) => b.sentAt - a.sentAt)[0];
+    expect(newest.tradingDay).toBe("2026-10-02");
+    expect(newest.ticker).toBe("QQQ");
+  });
 });
