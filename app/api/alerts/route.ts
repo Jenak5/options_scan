@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { alertsPerDayLimit } from "@/app/lib/alertConfig";
+import { alertScanMinPremium, alertsPerDayLimit } from "@/app/lib/alertConfig";
 import {
   alertSetupKey,
   chooseAlerts,
@@ -30,13 +30,13 @@ export async function GET(request: NextRequest) {
       }
 
       case "scan": {
-        const minPremium = Number(process.env.ALERT_MIN_PREMIUM || "100000");
+        const minPremium = alertScanMinPremium(process.env.ALERT_MIN_PREMIUM);
         const otmOnly = process.env.ALERT_OTM_ONLY === "true";
         const scan = await scanEstimatedFlow({
           tickers: watchlistFromEnv(process.env.FLOW_WATCHLIST),
         });
         const rows = selectAlertRows(scan.rows, {
-          minPremium: Number.isFinite(minPremium) ? minPremium : 100_000,
+          minPremium,
           otmOnly,
           limit: 80,
         });

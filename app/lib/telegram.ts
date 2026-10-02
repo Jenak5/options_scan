@@ -1,3 +1,4 @@
+import { formatContractPriceLine, formatFlowPremium } from "@/app/lib/alertConfig";
 import { planExitsForAsk } from "@/app/lib/exits";
 import { formatLevelsSummary, type StoredPriceLevels } from "@/app/lib/levels";
 
@@ -90,10 +91,7 @@ export function formatFlowAlert(flow: {
 }): string {
   const emoji = flow.putCall === "call" ? "🟢" : "🔴";
   const type = flow.putCall === "call" ? "CALL" : "PUT";
-  const premium = flow.notionalPremium ?? 0;
-  const premiumStr = premium >= 1_000_000
-    ? `$${(premium / 1_000_000).toFixed(1)}M`
-    : `$${(premium / 1_000).toFixed(0)}K`;
+  const premiumStr = formatFlowPremium(flow.notionalPremium);
   const flags = [
     flow.otm ? "OTM" : "",
     flow.volumeExceedsOi ? "VOL&gt;OI" : "",
@@ -110,7 +108,8 @@ export function formatFlowAlert(flow: {
     `<b>Estimated flow</b> from Schwab volume/open interest, not a sweep.`,
     flow.verdict ? formatVerdictHtml(flow.verdict) : "",
     ``,
-    `💰 <b>${premiumStr}</b> notional (volume × mid × 100)`,
+    `💰 <b>${premiumStr}</b> flow premium (volume × mid × 100)`,
+    `💵 ${escapeHtml(formatContractPriceLine(flow.ask))}`,
     `📍 $${flow.strike} strike · ${escapeHtml(flow.expiration)}`,
     `📊 Vol: ${flow.volume.toLocaleString()} · OI: ${flow.openInterest.toLocaleString()} · IV: ${ivPct}`,
     `🧭 ${escapeHtml(flow.side)} · ${ratio}`,

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { formatContractCost, formatFlowPremium } from "@/app/lib/alertConfig";
 import { arrangeFlowCards, type FlowSort, type RightFilter, type VerdictFilter } from "@/app/components/flowArrange";
 import { defaultTimeStop, planExitsForAsk } from "@/app/lib/exits";
 import { FLOW_DISCLAIMER, gateCheckHref, type FlowRow } from "@/app/lib/flow";
@@ -121,7 +122,7 @@ export function FlowTab() {
         <ControlGroup label="Sort">
           <select value={sort} onChange={(event) => setSort(event.target.value as FlowSort)} style={{ ...INPUT, cursor: "pointer" }} aria-label="Sort contracts">
             <option value="grade">Grade</option>
-            <option value="notional">Notional</option>
+            <option value="notional">Flow premium</option>
             <option value="volOi">Vol/OI</option>
           </select>
         </ControlGroup>
@@ -142,13 +143,13 @@ export function FlowTab() {
           onChange={(event) => setFilters({ ...filters, ticker: event.target.value.toUpperCase() })}
           style={{ ...INPUT, width: 120 }}
         />
-        <select value={filters.minPremium} onChange={(event) => setFilters({ ...filters, minPremium: event.target.value })} style={{ ...INPUT, cursor: "pointer" }} aria-label="Minimum premium">
-          <option value="0">Any premium</option>
-          <option value="10000">$10K+ premium</option>
-          <option value="50000">$50K+ premium</option>
-          <option value="100000">$100K+ premium</option>
-          <option value="500000">$500K+ premium</option>
-          <option value="1000000">$1M+ premium</option>
+        <select value={filters.minPremium} onChange={(event) => setFilters({ ...filters, minPremium: event.target.value })} style={{ ...INPUT, cursor: "pointer" }} aria-label="Minimum flow premium">
+          <option value="0">Any flow premium</option>
+          <option value="10000">$10K+ flow premium</option>
+          <option value="50000">$50K+ flow premium</option>
+          <option value="100000">$100K+ flow premium</option>
+          <option value="500000">$500K+ flow premium</option>
+          <option value="1000000">$1M+ flow premium</option>
         </select>
         <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 15, color: "#94a3b8", cursor: "pointer" }}>
           <input type="checkbox" checked={filters.otmOnly} onChange={(event) => setFilters({ ...filters, otmOnly: event.target.checked })} />
@@ -220,7 +221,7 @@ function FlowCard({ row }: { row: ScoredFlow }) {
           <Fact label="Volume" value={count(row.volume)} />
           <Fact label="Open interest" value={count(row.openInterest)} />
           <Fact label="Vol/OI" value={row.volOiRatio == null ? "—" : `${row.volOiRatio.toFixed(2)}×`} />
-          <Fact label="Notional" value={compactDollars(row.notionalPremium)} />
+          <Fact label="Flow premium" value={formatFlowPremium(row.notionalPremium)} />
           <Fact label="Side" value={sideText(row.side)} />
           <Fact label="Prints" value={printText(row)} />
         </Box>
@@ -247,7 +248,8 @@ function FlowCard({ row }: { row: ScoredFlow }) {
         <div className="flow-wide">
           <Box title="Trade plan">
             <Fact label={`Max under $${MAX_LOSS_DOLLARS}`} value={sizeText(verdict)} />
-            <Fact label="Entry" value={price(row.ask)} />
+            <Fact label="Ask" value={price(row.ask)} />
+            <Fact label="Cost / contract" value={formatContractCost(row.ask)} />
             <Fact label="Profit target" value={plan ? `${price(plan.profitPrice)} · take ${plan.takeContracts} off` : "—"} />
             <Fact label="Stop" value={plan ? `${price(plan.stopPrice)} · about ${compactDollars(plan.stopDollars)}` : "—"} />
             <p style={{ margin: "6px 0 0", color: "#94a3b8", fontSize: 14, lineHeight: 1.4 }}>{defaultTimeStop()}</p>

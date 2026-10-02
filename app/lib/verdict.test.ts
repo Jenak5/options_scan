@@ -213,9 +213,10 @@ describe("alert checklist", () => {
     expect(result.reasons.length).toBeLessThanOrEqual(4);
   });
 
-  it("skips a single contract over the loss cap and names a debit spread", () => {
+  it("keeps a contract between the loss cap and the grade ceiling, and names a debit spread", () => {
     const result = gradeSetup(setup({ bid: 4.9, ask: 5, mid: 4.95, volume: 200, openInterest: 800, volOiRatio: 0.25 }));
-    expect(result.verdict).toBe("SKIP");
+    expect(result.verdict).toBe("TAKE");
+    expect(result.grade).toBe("B");
     expect(result.singleContractExceedsCap).toBe(true);
     expect(result.maxContracts).toBe(0);
     expect(result.suggestion).toBe(DEBIT_SPREAD_SUGGESTION);
@@ -415,7 +416,9 @@ describe("alert checklist", () => {
     expect(result.uncappedGrade).toBe("A");
     expect(gradeARubric()).toMatch(/best setups of the day/);
     expect(gradeARubric()).toContain(`${ALERT_RULES.aGradeVolOiRatio}×`);
-    expect(gradeARubric()).toContain("$500K");
+    expect(gradeARubric()).toContain("$100K");
+    expect(gradeARubric()).toContain("$50K");
+    expect(gradeARubric()).toContain(`$${ALERT_RULES.maxContractCost}`);
     expect(gradeARubric()).toContain(`${ALERT_RULES.alertDteMin} to ${ALERT_RULES.alertDteMax}`);
     expect(gradeARubric()).toMatch(/cannot be an A or a B/);
     expect(gradeARubric()).toMatch(/never shown when the levels or the earnings date are missing/i);
@@ -460,6 +463,9 @@ describe("alert checklist", () => {
       verdict: fromFlow,
     });
     expect(alert).toContain("A · TAKE");
+    expect(alert).toContain("flow premium");
+    expect(alert).toContain("$608K");
+    expect(alert).toContain("Ask $2.05 · $205 a contract");
   });
 
   it("keeps ordinary flow, a farther strike, and a macro day off A", () => {
@@ -492,14 +498,51 @@ describe("alert checklist", () => {
     expect(tight.grade).not.toBe("A");
     expect(gradeSetup(excellent({ openInterest: MIN_OPEN_INTEREST - 1 })).grade).toBe("D");
     expect(gradeSetup(excellent({ openInterest: MIN_OPEN_INTEREST - 1 })).verdict).toBe("SKIP");
-    expect(gradeSetup(excellent({ bid: 4.9, ask: 5, mid: 4.95 })).verdict).toBe("SKIP");
-    expect(gradeSetup(excellent({ bid: 4.9, ask: 5, mid: 4.95 })).grade).toBe("D");
+    expect(gradeSetup(excellent({ bid: 4.9, ask: 5, mid: 4.95 })).verdict).toBe("TAKE");
+    expect(gradeSetup(excellent({ bid: 4.9, ask: 5, mid: 4.95 })).grade).toBe("A");
     expect(gradeSetup(excellent({ delayed: true })).verdict).toBe("SKIP");
     expect(gradeSetup(excellent({ delayed: true })).grade).toBe("D");
     const stopped = gradeSetup(excellent({ consecutiveLosses: 2 }));
     expect(stopped.verdict).toBe("STOP");
     expect(stopped.verdictLabel).toBe("STOP for today");
     expect(stopped.grade).toBe("A");
+  });
+
+  it("withholds A and B when the ask is under $0.50 or one contract costs more than $875", () => {
+    const cheap = gradeSetup(excellent({ bid: 0.39, ask: 0.4, mid: 0.395 }));
+    expect(cheap.verdict).not.toBe("TAKE");
+    expect(cheap.grade).not.toBe("A");
+    expect(cheap.grade).not.toBe("B");
+    expect(cheap.reasons.join(" ")).toMatch(/too cheap/i);
+
+    const costly = gradeSetup(excellent({ bid: 8.8, ask: 9, mid: 8.9 }));
+    expect(costly.verdict).not.toBe("TAKE");
+    expect(costly.grade).not.toBe("A");
+    expect(costly.grade).not.toBe("B");
+    expect(costly.singleContractExceedsCap).toBe(true);
+    expect(costly.reasons.join(" ")).toMatch(/\$875/);
+    expect(costly.reasons.some((reason) => reason.includes(DEBIT_SPREAD_SUGGESTION))).toBe(true);
+  });
+
+  it("requires $100K of estimated flow premium for an A and $50K for a B", () => {
+    const underB = gradeSetup(excellent({ notionalPremium: 49_999 }));
+    expect(underB.verdict).not.toBe("TAKE");
+    expect(underB.grade).not.toBe("A");
+    expect(underB.grade).not.toBe("B");
+    expect(underB.reasons.join(" ")).toMatch(/Flow premium/);
+
+    const bOnly = gradeSetup(excellent({ notionalPremium: 75_000 }));
+    expect(bOnly.verdict).toBe("TAKE");
+    expect(bOnly.grade).toBe("B");
+    expect(bOnly.reasons.join(" ")).toMatch(/\$100K/);
+
+    const atA = gradeSetup(excellent({ notionalPremium: 100_000 }));
+    expect(atA.verdict).toBe("TAKE");
+    expect(atA.grade).toBe("A");
+
+    const missing = gradeSetup(excellent({ notionalPremium: null }));
+    expect(missing.grade).not.toBe("A");
+    expect(missing.grade).not.toBe("B");
   });
 
   it("keeps the earnings reason and the quote print when both apply", () => {

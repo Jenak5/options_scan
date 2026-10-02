@@ -3,7 +3,9 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { FlowTab } from "@/app/components/FlowTab";
 import { SchwabBanner } from "@/app/components/SchwabBanner";
+import { formatContractPriceLine, formatFlowPremium } from "@/app/lib/alertConfig";
 import type { AlertSummary, StoredAlert } from "@/app/lib/alertBook";
+import { notionalPremium } from "@/app/lib/flow";
 import { formatLevelsSummary } from "@/app/lib/levels";
 import { planExitsForAsk } from "@/app/lib/exits";
 import { ACCOUNT_SIZE_DOLLARS, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
@@ -617,9 +619,9 @@ function AlertsTab() {
         <div style={{ fontSize: 14, fontWeight: 700, color: "#06b6d4", marginBottom: 10 }}>How it works</div>
         {[
           "Every 15 min on weekdays, from 8:30am to 3:00pm Central, the scanner reads Schwab chains for the watchlist. Outside that window it exits.",
-          "Considers contracts that pass the gate liquidity filters: open interest at least 500, volume at least 100, and spread at most 5% of mid. Notional still has to clear ALERT_MIN_PREMIUM. Illiquid contracts never grade A or B.",
-          "Side is estimated from the last price versus the bid and ask. This is not a sweep.",
-          "Grades every candidate. Only a TAKE graded A or B can alert, and only when expiration is about 2 to 6 weeks out (14 to 42 days). C and D stay on the Flow tab.",
+          "Considers contracts that pass the gate liquidity filters: open interest at least 500, volume at least 100, and spread at most 5% of mid. Estimated flow premium (volume × mid × 100) still has to clear ALERT_MIN_PREMIUM, which defaults to $50,000. Illiquid contracts never grade A or B.",
+          "Side is estimated from the last price versus the bid and ask. This is not a sweep. Flow premium is that volume estimate, not an exchange-reported sweep.",
+          "Grades every candidate. Only a TAKE graded A or B can alert. An A needs at least $100,000 of flow premium and a B needs at least $50,000. The ask has to be at least $0.50, and one contract can cost up to $875. Expiration is about 2 to 6 weeks out (14 to 42 days). C and D stay on the Flow tab.",
           "Sends at most 5 Telegram alerts per Chicago day unless ALERT_MAX_PER_DAY says otherwise. An A goes out before a B. The same ticker, call or put, and expiration is not sent again that day.",
           "Cross-checks the ticker's vol arb signal and asks Grok to screen for red flags (earnings, FDA, news) before that send.",
           "The message includes the checklist grade and the exit defaults. Two losing closes in a row turn TAKE into STOP for today, and that STOP is not sent.",
@@ -1005,6 +1007,12 @@ function AlertReportTab() {
                     <td style={TD_MONO}>
                       <div style={{ color: "#e2e8f0", fontWeight: 700 }}>{alert.ticker} {alert.putCall.toUpperCase()}</div>
                       <div style={{ color: "#94a3b8" }}>${alert.strike} · {alert.expiration}</div>
+                      <div style={{ color: "#64748b", fontSize: 12 }}>
+                        {formatContractPriceLine(alert.ask)}
+                      </div>
+                      <div style={{ color: "#64748b", fontSize: 12 }}>
+                        flow premium {formatFlowPremium(notionalPremium(alert.volume, alert.mid))}
+                      </div>
                       <div style={{ color: "#64748b", fontSize: 12 }}>
                         mid {alert.mid == null ? "—" : alert.mid.toFixed(2)} · underlying {alert.underlyingPrice == null ? "—" : alert.underlyingPrice.toFixed(2)}
                       </div>

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { OUTCOME_RULES, alertsPerDayLimit, isAlertGrade } from "@/app/lib/alertConfig";
+import { OUTCOME_RULES, alertScanMinPremium, alertsPerDayLimit, formatContractPriceLine, formatFlowPremium, isAlertGrade } from "@/app/lib/alertConfig";
 import { runAlertFollowUps } from "@/app/lib/alertFollowUp";
 import {
   alertSetupKey,
@@ -53,14 +53,12 @@ async function screenWithGrok(row: FlowRow, volSignal: string): Promise<{ clean:
   const apiKey = process.env.XAI_API_KEY;
   if (!apiKey) return { clean: true, reason: "No XAI key — skipping screen" };
 
-  const premium = row.notionalPremium ?? 0;
-  const premStr = premium >= 1_000_000
-    ? `$${(premium / 1_000_000).toFixed(1)}M`
-    : `$${(premium / 1_000).toFixed(0)}K`;
+  const premStr = formatFlowPremium(row.notionalPremium);
 
   const prompt = `Estimated options flow (not a sweep) on ${row.ticker} ${(row.putCall).toUpperCase()}:
 - Strike: $${row.strike}, Expiry: ${row.expiration}
-- Notional (volume × mid × 100): ${premStr}
+- Flow premium (volume × mid × 100): ${premStr}
+- ${formatContractPriceLine(row.ask)}
 - Estimated side: ${row.side}
 - Vol/OI: ${row.volOiRatio != null ? row.volOiRatio.toFixed(2) : "n/a"}
 - Vol Arb signal: ${volSignal}
@@ -105,10 +103,7 @@ function convictionFor(ticker: string, signal: VolSignal | null): { emoji: strin
 }
 
 function formatAlert(row: FlowRow, volSummary: string, signal: VolSignal | null, grokNote: string, verdict: AlertVerdict): string {
-  const premium = row.notionalPremium ?? 0;
-  const premStr = premium >= 1_000_000
-    ? `$${(premium / 1_000_000).toFixed(1)}M`
-    : `$${(premium / 1_000).toFixed(0)}K`;
+  const premStr = formatFlowPremium(row.notionalPremium);
   const typeEmoji = row.putCall === "call" ? "🟢" : "🔴";
   const conviction = convictionFor(row.ticker, signal);
 
@@ -122,7 +117,8 @@ ${formatVerdictHtml(verdict)}
 ${conviction.emoji} <b>${conviction.tier}</b>
 Estimated flow from Schwab volume/open interest, not a sweep.
 
-💰 <b>${premStr}</b> notional
+💰 <b>${premStr}</b> flow premium (volume × mid × 100)
+💵 ${escapeHtml(formatContractPriceLine(row.ask))}
 🎯 Strike <b>$${row.strike}</b> · Exp <b>${row.expiration}</b>
 📊 ${escapeHtml(row.side)} · ${ratio} · IV ${iv} · OI ${oi}
 ${row.prints?.summary ? `🖨 ${escapeHtml(row.prints.summary)}\n` : ""}${exitText(row.ask, verdict.maxContracts)}📈 Vol Arb: <b>${escapeHtml(volSummary)}</b> — ${conviction.note}
@@ -219,12 +215,12 @@ export async function GET(request: NextRequest) {
     }
     log.push(`Scored ${scan.rows.length} contracts across ${scan.watchlist.length} tickers${scan.cached ? " (cached)" : ""}`);
 
-    const minPremium = Number(process.env.ALERT_MIN_PREMIUM || "100000");
+    const minPremium = alertScanMinPremium(process.env.ALERT_MIN_PREMIUM);
     const otmOnly = process.env.ALERT_OTM_ONLY === "true";
     const maxPerDay = alertsPerDayLimit(process.env.ALERT_MAX_PER_DAY);
     const tradingDay = chicagoDate(now);
     const candidates = selectAlertRows(scan.rows, {
-      minPremium: Number.isFinite(minPremium) ? minPremium : 100_000,
+      minPremium,
       otmOnly,
       limit: 80,
     });
