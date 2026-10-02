@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { PageLinks } from "@/app/components/PageLinks";
+import { StoreStatusLine } from "@/app/components/StoreStatusLine";
 import { formatContractCost, formatFlowPremium } from "@/app/lib/alertConfig";
 import { openFlatTimeStopText } from "@/app/lib/exits";
 import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
@@ -181,6 +182,7 @@ export default function TradesPage() {
         @media (max-width: 560px) { .grade-grid { grid-template-columns: 1fr !important; } }
       ` }} />
       <div style={{ padding: "16px 16px 40px", maxWidth: 760, margin: "0 auto" }}>
+        <StoreStatusLine />
         {page && !page.stored && (
           <Banner color="#fbbf24">
             The private store is not configured, so a trade cannot be saved. It uses the same store as alerts.

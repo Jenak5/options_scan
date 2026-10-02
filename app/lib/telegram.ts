@@ -119,6 +119,8 @@ export function formatFlowAlert(flow: {
     maxContracts?: number | null;
   } | null;
   alertId?: string | null;
+  /** When false, the message says the alert was not saved and omits the paper-trade link. */
+  saved?: boolean;
 }): string {
   const emoji = flow.putCall === "call" ? "🟢" : "🔴";
   const type = flow.putCall === "call" ? "CALL" : "PUT";
@@ -147,7 +149,7 @@ export function formatFlowAlert(flow: {
     flow.prints?.summary ? escapeHtml(flow.prints.summary) : "",
     exitBlock(flow.ask, flow.verdict?.maxContracts),
     flags ? `🏷 ${flags}` : "",
-    flow.alertId ? paperTradeLinkHtml(flow.alertId) : "",
+    flow.saved === false ? "Not saved in the app. No paper-trade link." : (flow.alertId ? paperTradeLinkHtml(flow.alertId) : ""),
     ``,
     `⏰ ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZoneName: "short" })}`,
   ].filter(Boolean).join("\n");

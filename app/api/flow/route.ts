@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verdictBanner } from "@/app/lib/alertConfig";
-import { loadRiskStatus } from "@/app/lib/alertStore";
+import { loadAlertBook, loadRiskStatus } from "@/app/lib/alertStore";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import {
   FLOW_DISCLAIMER,
@@ -9,7 +9,9 @@ import {
   isFlowTicker,
   watchlistFromEnv,
 } from "@/app/lib/flow";
+import { pinTodayAlerts } from "@/app/lib/flowAlerts";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
+import { chicagoDate } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { gradeFlowRow } from "@/app/lib/verdict";
 
@@ -40,11 +42,19 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    const now = new Date();
     const scan = await scanEstimatedFlow({ tickers, bypassCache: fresh });
-    const risk = await loadRiskStatus(new Date());
+    const risk = await loadRiskStatus(now);
     const losses = risk.stop.consecutiveLosses;
-    const data = filterFlowRows(scan.rows, { minPremium, otmOnly, liquidOnly, limit })
-      .map((row) => ({ ...row, verdict: gradeFlowRow(row, losses) }));
+    const graded = filterFlowRows(scan.rows, { minPremium, otmOnly, liquidOnly, limit })
+      .map((row) => ({ ...row, verdict: gradeFlowRow(row, losses), alertId: null as string | null }));
+    let data = graded;
+    try {
+      const book = await loadAlertBook();
+      data = pinTodayAlerts(graded, book.records, chicagoDate(now), now, ticker);
+    } catch {
+      data = graded;
+    }
     return NextResponse.json({
       data,
       disclaimer: FLOW_DISCLAIMER,

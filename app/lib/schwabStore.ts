@@ -7,6 +7,7 @@ import {
   BlobStoreSuspendedError,
   del,
   get,
+  head as blobHead,
   put,
 } from "@vercel/blob";
 import type { StoredTokens } from "@/app/lib/schwabParse";
@@ -14,6 +15,7 @@ import {
   SCHWAB_BLOB_CACHE_CONTROL_MAX_AGE,
   SCHWAB_BLOB_ALERT_BOOK_PATH,
   SCHWAB_BLOB_FLOW_PATH,
+  SCHWAB_BLOB_STORE_STATUS_PATH,
   SCHWAB_BLOB_TRADE_LOG_PATH,
   SCHWAB_BLOB_TOKEN_ENV,
   SCHWAB_BLOB_TOKEN_PATH,
@@ -23,6 +25,7 @@ import {
   SCHWAB_UPSTASH_URL_ENV,
   type SchwabStoreKind,
 } from "@/app/lib/schwabStorage";
+import type { AlertBookNotice } from "@/app/lib/storeStatus";
 
 /**
  * Server-side Schwab token store.
@@ -33,9 +36,14 @@ import {
  * from SESSION_SECRET before it is written. Values are never logged.
  *
  * Blob reads pass useCache: false so a refresh does not follow a stale CDN
- * copy. A refresh re-reads and uses ifMatch so a concurrent request cannot
- * overwrite a newer refresh token. An unreadable blob is deleted with
- * ifMatch before a new envelope is written.
+ * copy. That flag only adds ?cache=0. It does not change the ETag.
+ * get() returns the download response's ETag header, which is a weak
+ * validator once the body is compressed, and that value is not the strong
+ * ETag put() compares. head() and put() return the strong ETag from the
+ * Blob API. Conditional writes use head(). A 412 is retried with a fresh
+ * head. Alert book, flow snapshots, and the trade log then write once
+ * without ifMatch. Token envelopes never do that. An unreadable token blob
+ * is deleted with ifMatch before a new envelope is written.
  *
  * Fallback: process memory, and only outside production. A serverless
  * instance does not share that memory, so production without KV, Upstash,
@@ -56,6 +64,8 @@ const FLOW_SNAPSHOT_KEY = "oes:flow:snapshots";
 const ALERT_BOOK_KEY = "oes:alert:records";
 const TRADE_LOG_KEY = "oes:trade:log";
 const BLOB_WRITE_ATTEMPTS = 4;
+const JSON_CONDITIONAL_ATTEMPTS = 3;
+const STORE_STATUS_KEY = "oes:store:status";
 const FLOW_SNAPSHOT_MAX_TICKERS = 40;
 const FLOW_SNAPSHOT_MAX_CONTRACTS = 500;
 
@@ -119,10 +129,23 @@ export interface SchwabBlobGetResult {
   blob: { etag: string; pathname: string };
 }
 
+export interface SchwabBlobHeadOptions {
+  token: string;
+}
+
+export interface SchwabBlobHeadResult {
+  etag: string;
+}
+
 export interface SchwabBlobClient {
   put(pathname: string, body: string, options: SchwabBlobPutOptions): Promise<unknown>;
   get(pathname: string, options: SchwabBlobGetOptions): Promise<SchwabBlobGetResult | null>;
   del(pathname: string, options: SchwabBlobDelOptions): Promise<void>;
+  /**
+   * Blob API metadata. Its etag is the strong value ifMatch accepts.
+   * Optional so older test doubles still work when get() already returns a strong etag.
+   */
+  head?(pathname: string, options: SchwabBlobHeadOptions): Promise<SchwabBlobHeadResult | null>;
 }
 
 type BlobRead =
@@ -144,10 +167,20 @@ function defaultBlobClient(): SchwabBlobClient {
     del(pathname, options) {
       return del(pathname, options);
     },
+    async head(pathname, options) {
+      try {
+        const result = await blobHead(pathname, { token: options.token });
+        return { etag: result.etag };
+      } catch (err) {
+        if (err instanceof BlobNotFoundError) return null;
+        throw err;
+      }
+    },
   };
 }
 
 let blobClient: SchwabBlobClient = defaultBlobClient();
+let memoryStoreStatus: PersistedStoreStatus | null = null;
 
 /** Tests inject a fake put/get/del client. Pass null to restore the SDK. */
 export function setSchwabBlobClientForTests(next: SchwabBlobClient | null): void {
@@ -169,6 +202,7 @@ function memoryBag(): MemoryBag {
 export function clearMemoryStoreForTests(): void {
   const g = globalThis as typeof globalThis & { __oesSchwabMemory?: MemoryBag };
   g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null };
+  memoryStoreStatus = null;
 }
 
 function envPair(urlName: string, tokenName: string): { url: string; token: string } | null {
@@ -259,6 +293,7 @@ export async function commitRefreshedTokens(basis: StoredTokens, next: StoredTok
     const read = await readBlobRecord(token);
     if (read.state === "error") throw new Error("Schwab token store could not be read");
     if (read.state === "corrupt") {
+      if (!read.etag) throw new Error("Schwab token store etag could not be confirmed");
       const removed = await deleteBlobIfMatch(token, read.etag);
       if (!removed) continue;
       const again = await readBlobRecord(token);
@@ -270,6 +305,7 @@ export async function commitRefreshedTokens(basis: StoredTokens, next: StoredTok
     if (latest && keepStoredTokens(latest, basis, next)) return latest;
     const envelope = read.state === "ok" ? read.envelope : { cipher: null, alerts: { ...EMPTY_ALERTS } };
     const etag = read.state === "ok" ? read.etag : undefined;
+    if (read.state === "ok" && !etag) throw new Error("Schwab token store etag could not be confirmed");
     try {
       await putEnvelope(token, {
         cipher: await encryptTokenPayload(JSON.stringify(next)),
@@ -345,7 +381,7 @@ export async function writeFlowSnapshots(patch: FlowSnapshotBook): Promise<void>
     const current = await readFlowSnapshots();
     await kvCommand(["SET", FLOW_SNAPSHOT_KEY, JSON.stringify(trimFlowBook({ ...current, ...clean }))]);
   } catch (err) {
-    logStoreFailure("Flow snapshot store could not be written", err);
+    await recordStoreFailure("flow-snapshots", "write", err);
   }
 }
 
@@ -363,7 +399,7 @@ export async function readAlertBookText(): Promise<string | null> {
     if (!token) return null;
     const read = await readBlobJson(SCHWAB_BLOB_ALERT_BOOK_PATH, token);
     if (read.state === "error") {
-      logStoreFailure("Alert book could not be read", read.error);
+      await recordStoreFailure("alert-book", "read", read.error);
       return null;
     }
     if (read.state !== "ok") return null;
@@ -373,33 +409,52 @@ export async function readAlertBookText(): Promise<string | null> {
     const raw = await kvCommand(["GET", ALERT_BOOK_KEY]);
     return typeof raw === "string" && raw.length > 0 ? raw : null;
   } catch (err) {
-    logStoreFailure("Alert book could not be read", err);
+    await recordStoreFailure("alert-book", "read", err);
     return null;
   }
 }
 
-export async function updateAlertBook(change: (current: string | null) => string): Promise<boolean> {
+export async function updateAlertBook(change: (current: string | null) => string | null): Promise<boolean> {
   const kind = resolveStoreKind();
-  if (kind === "unconfigured") return false;
+  if (kind === "unconfigured") {
+    await recordStoreFailure("alert-book", "write", new Error("Alert book storage is not configured"));
+    return false;
+  }
+  const guarded = (current: string | null): string | null => {
+    if (!hasJsonArray(current, "records")) return null;
+    return change(current);
+  };
   if (kind === "memory") {
     const bag = memoryBag();
-    bag.alertBook = change(bag.alertBook);
+    const next = guarded(bag.alertBook);
+    if (next == null) {
+      await recordStoreFailure("alert-book", "write", new Error("Refusing to overwrite an unreadable alert book"));
+      return false;
+    }
+    bag.alertBook = next;
+    await clearStoreFailure("alert-book");
     return true;
   }
-  if (kind === "blob") return updateBlobAlertBook(change);
+  if (kind === "blob") return updateBlobAlertBook(guarded);
   let current: string | null;
   try {
     const raw = await kvCommand(["GET", ALERT_BOOK_KEY]);
     current = typeof raw === "string" && raw.length > 0 ? raw : null;
   } catch (err) {
-    logStoreFailure("Alert book could not be read", err);
+    await recordStoreFailure("alert-book", "read", err);
+    return false;
+  }
+  const next = guarded(current);
+  if (next == null) {
+    await recordStoreFailure("alert-book", "write", new Error("Refusing to overwrite an unreadable alert book"));
     return false;
   }
   try {
-    await kvCommand(["SET", ALERT_BOOK_KEY, change(current)]);
+    await kvCommand(["SET", ALERT_BOOK_KEY, next]);
+    await clearStoreFailure("alert-book");
     return true;
   } catch (err) {
-    logStoreFailure("Alert book could not be written", err);
+    await recordStoreFailure("alert-book", "write", err);
     return false;
   }
 }
@@ -417,7 +472,7 @@ export async function readTradeLogText(): Promise<string | null> {
     if (!token) return null;
     const read = await readBlobJson(SCHWAB_BLOB_TRADE_LOG_PATH, token);
     if (read.state === "error") {
-      logStoreFailure("Trade log could not be read", read.error);
+      await recordStoreFailure("trade-log", "read", read.error);
       return null;
     }
     if (read.state !== "ok") return null;
@@ -427,74 +482,58 @@ export async function readTradeLogText(): Promise<string | null> {
     const raw = await kvCommand(["GET", TRADE_LOG_KEY]);
     return typeof raw === "string" && raw.length > 0 ? raw : null;
   } catch (err) {
-    logStoreFailure("Trade log could not be read", err);
+    await recordStoreFailure("trade-log", "read", err);
     return null;
   }
 }
 
 export async function updateTradeLog(change: (current: string | null) => string): Promise<boolean> {
   const kind = resolveStoreKind();
-  if (kind === "unconfigured") return false;
+  if (kind === "unconfigured") {
+    await recordStoreFailure("trade-log", "write", new Error("Trade log storage is not configured"));
+    return false;
+  }
+  const guarded = (current: string | null): string | null => {
+    if (!hasJsonArray(current, "trades")) return null;
+    return change(current);
+  };
   if (kind === "memory") {
     const bag = memoryBag();
-    bag.tradeLog = change(bag.tradeLog);
+    const next = guarded(bag.tradeLog);
+    if (next == null) {
+      await recordStoreFailure("trade-log", "write", new Error("Refusing to overwrite an unreadable trade log"));
+      return false;
+    }
+    bag.tradeLog = next;
+    await clearStoreFailure("trade-log");
     return true;
   }
-  if (kind === "blob") return updateBlobText(SCHWAB_BLOB_TRADE_LOG_PATH, change, "Trade log");
+  if (kind === "blob") return writeBlobJson(SCHWAB_BLOB_TRADE_LOG_PATH, "trade-log", "Trade log", guarded);
   let current: string | null;
   try {
     const raw = await kvCommand(["GET", TRADE_LOG_KEY]);
     current = typeof raw === "string" && raw.length > 0 ? raw : null;
   } catch (err) {
-    logStoreFailure("Trade log could not be read", err);
+    await recordStoreFailure("trade-log", "read", err);
+    return false;
+  }
+  const next = guarded(current);
+  if (next == null) {
+    await recordStoreFailure("trade-log", "write", new Error("Refusing to overwrite an unreadable trade log"));
     return false;
   }
   try {
-    await kvCommand(["SET", TRADE_LOG_KEY, change(current)]);
+    await kvCommand(["SET", TRADE_LOG_KEY, next]);
+    await clearStoreFailure("trade-log");
     return true;
   } catch (err) {
-    logStoreFailure("Trade log could not be written", err);
+    await recordStoreFailure("trade-log", "write", err);
     return false;
   }
 }
 
-async function updateBlobAlertBook(change: (current: string | null) => string): Promise<boolean> {
-  return updateBlobText(SCHWAB_BLOB_ALERT_BOOK_PATH, change, "Alert book");
-}
-
-async function updateBlobText(
-  pathname: string,
-  change: (current: string | null) => string,
-  label: string,
-): Promise<boolean> {
-  const token = blobToken();
-  if (!token) return false;
-  for (let attempt = 0; attempt < BLOB_WRITE_ATTEMPTS; attempt++) {
-    const read = await readBlobJson(pathname, token);
-    if (read.state === "error") {
-      logStoreFailure(`${label} could not be read`, read.error);
-      return false;
-    }
-    const current = read.state === "ok" ? read.text : null;
-    try {
-      await blobClient.put(pathname, change(current), {
-        access: "private",
-        allowOverwrite: true,
-        addRandomSuffix: false,
-        cacheControlMaxAge: SCHWAB_BLOB_CACHE_CONTROL_MAX_AGE,
-        contentType: "application/json",
-        token,
-        ...(read.state === "ok" && read.etag ? { ifMatch: read.etag } : {}),
-      });
-      return true;
-    } catch (err) {
-      if (!isPreconditionFailed(err) || attempt === BLOB_WRITE_ATTEMPTS - 1) {
-        logStoreFailure(`${label} could not be written`, err);
-        return false;
-      }
-    }
-  }
-  return false;
+async function updateBlobAlertBook(change: (current: string | null) => string | null): Promise<boolean> {
+  return writeBlobJson(SCHWAB_BLOB_ALERT_BOOK_PATH, "alert-book", "Alert book", change);
 }
 
 export async function writeAlertMeta(meta: AlertMeta): Promise<void> {
@@ -558,6 +597,7 @@ async function updateBlobEnvelope(change: (envelope: TokenEnvelope) => TokenEnve
     const read = await readBlobRecord(token);
     if (read.state === "error") throw new Error("Schwab token store could not be read");
     if (read.state === "corrupt") {
+      if (!read.etag) throw new Error("Schwab token store etag could not be confirmed");
       const removed = await deleteBlobIfMatch(token, read.etag);
       if (!removed) continue;
       const again = await readBlobRecord(token);
@@ -567,6 +607,7 @@ async function updateBlobEnvelope(change: (envelope: TokenEnvelope) => TokenEnve
     }
     const envelope = read.state === "ok" ? read.envelope : { cipher: null, alerts: { ...EMPTY_ALERTS } };
     const etag = read.state === "ok" ? read.etag : undefined;
+    if (read.state === "ok" && !etag) throw new Error("Schwab token store etag could not be confirmed");
     try {
       await putEnvelope(token, change(envelope), etag);
       return;
@@ -601,7 +642,7 @@ async function readBlobRecord(token: string): Promise<BlobRead> {
     logStoreFailure("Schwab token store could not be read", err);
     return { state: "error" };
   }
-  const etag = strongMatchEtag(result.blob.etag);
+  const etag = (await strongMatchToken(SCHWAB_BLOB_TOKEN_PATH, token, result.blob.etag)) ?? "";
   const envelope = parseEnvelope(text);
   if (!envelope) return { state: "corrupt", etag };
   return { state: "ok", etag, envelope };
@@ -644,13 +685,34 @@ function isPreconditionFailed(err: unknown): boolean {
 }
 
 /**
- * get() returns the download's ETag. Once the blob is large enough to be
- * compressed, that header is a weak validator (W/"..."). ifMatch compares
- * strong validators, so the W/ prefix makes every conditional put fail with
- * 412. head() and put() return the strong form. The hash is the same.
+ * get() in @vercel/blob 2.8.0 copies the download response's ETag header.
+ * useCache: false only appends ?cache=0. Once the body is compressed that
+ * header is a weak validator (W/"..."), and the quoted value is the
+ * representation validator, not the blob's strong ETag. Stripping W/ does
+ * not produce the string put() accepts as x-if-match.
+ * head() and put() return response.etag from the Blob API JSON. That is the
+ * strong ETag. A weak value is ignored here on purpose.
  */
-function strongMatchEtag(etag: string): string {
-  return etag.startsWith("W/") ? etag.slice(2) : etag;
+function strongApiEtag(etag: string | null | undefined): string | undefined {
+  if (!etag) return undefined;
+  const value = etag.trim();
+  if (!value || value.startsWith("W/") || value.startsWith("w/")) return undefined;
+  return value;
+}
+
+async function strongMatchToken(pathname: string, token: string, downloadEtag: string | undefined): Promise<string | undefined> {
+  if (blobClient.head) {
+    try {
+      const meta = await blobClient.head(pathname, { token });
+      const fromHead = strongApiEtag(meta?.etag);
+      if (fromHead) return fromHead;
+    } catch (err) {
+      if (!(err instanceof BlobNotFoundError)) {
+        logStoreFailure("Blob metadata could not be read", err);
+      }
+    }
+  }
+  return strongApiEtag(downloadEtag);
 }
 
 function storeErrorStatus(err: unknown): number | null {
@@ -666,9 +728,12 @@ function storeErrorStatus(err: unknown): number | null {
 }
 
 function redactSecrets(text: string): string {
-  return text
+  let out = text
     .replace(/vercel_blob_[A-Za-z0-9_]+/g, "[token]")
     .replace(/Bearer\s+\S+/gi, "Bearer [token]");
+  const blobTokenValue = process.env[SCHWAB_BLOB_TOKEN_ENV]?.trim() ?? "";
+  if (blobTokenValue.length > 8) out = out.split(blobTokenValue).join("[token]");
+  return out;
 }
 
 function logStoreFailure(sentence: string, err: unknown): void {
@@ -682,7 +747,7 @@ async function readBlobFlowSnapshots(): Promise<FlowSnapshotBook> {
   if (!token) return {};
   const read = await readBlobJson(SCHWAB_BLOB_FLOW_PATH, token);
   if (read.state === "error") {
-    logStoreFailure("Flow snapshot store could not be read", read.error);
+    await recordStoreFailure("flow-snapshots", "read", read.error);
     return {};
   }
   if (read.state !== "ok") return {};
@@ -690,39 +755,17 @@ async function readBlobFlowSnapshots(): Promise<FlowSnapshotBook> {
 }
 
 async function writeBlobFlowSnapshots(patch: FlowSnapshotBook): Promise<void> {
-  const token = blobToken();
-  if (!token) return;
-  for (let attempt = 0; attempt < BLOB_WRITE_ATTEMPTS; attempt++) {
-    const read = await readBlobJson(SCHWAB_BLOB_FLOW_PATH, token);
-    if (read.state === "error") {
-      logStoreFailure("Flow snapshot store could not be read", read.error);
-      return;
-    }
-    const current = read.state === "ok" ? parseFlowBook(read.text) : {};
-    try {
-      await blobClient.put(SCHWAB_BLOB_FLOW_PATH, JSON.stringify(trimFlowBook({ ...current, ...patch })), {
-        access: "private",
-        allowOverwrite: true,
-        addRandomSuffix: false,
-        cacheControlMaxAge: SCHWAB_BLOB_CACHE_CONTROL_MAX_AGE,
-        contentType: "application/json",
-        token,
-        ...(read.state === "ok" && read.etag ? { ifMatch: read.etag } : {}),
-      });
-      return;
-    } catch (err) {
-      if (!isPreconditionFailed(err) || attempt === BLOB_WRITE_ATTEMPTS - 1) {
-        logStoreFailure("Flow snapshot store could not be written", err);
-        return;
-      }
-    }
-  }
+  await writeBlobJson(SCHWAB_BLOB_FLOW_PATH, "flow-snapshots", "Flow snapshot store", (current) => {
+    if (current != null && current.trim() !== "" && !isJsonObject(current)) return null;
+    const book = current ? parseFlowBook(current) : {};
+    return JSON.stringify(trimFlowBook({ ...book, ...patch }));
+  });
 }
 
 async function readBlobJson(pathname: string, token: string): Promise<
   | { state: "missing" }
   | { state: "error"; error: unknown }
-  | { state: "ok"; etag: string; text: string }
+  | { state: "ok"; downloadEtag: string; text: string }
 > {
   let result: SchwabBlobGetResult | null;
   try {
@@ -740,10 +783,310 @@ async function readBlobJson(pathname: string, token: string): Promise<
   }
   try {
     const text = await new Response(result.stream).text();
-    return { state: "ok", etag: strongMatchEtag(result.blob.etag), text };
+    return { state: "ok", downloadEtag: result.blob.etag, text };
   } catch (err) {
     return { state: "error", error: err };
   }
+}
+
+type JsonStoreTarget = "alert-book" | "flow-snapshots" | "trade-log";
+
+interface StoreFailureRecord {
+  target: JsonStoreTarget;
+  operation: "read" | "write";
+  at: number;
+  status: number | null;
+  message: string;
+}
+
+interface PersistedStoreStatus {
+  failures: Partial<Record<JsonStoreTarget, StoreFailureRecord>>;
+  alertsSentUnsavedAt: number | null;
+}
+
+const JSON_STORE_TARGETS: JsonStoreTarget[] = ["alert-book", "flow-snapshots", "trade-log"];
+
+/**
+ * Conditional put using the strong etag from head(). On 412, re-read and retry.
+ * The last attempt writes with no ifMatch. A lost race is acceptable. A save
+ * that never lands is not. A null body refuses the write so unreadable JSON
+ * is not replaced with an empty book.
+ */
+async function writeBlobJson(
+  pathname: string,
+  target: JsonStoreTarget,
+  label: string,
+  change: (current: string | null) => string | null,
+): Promise<boolean> {
+  const token = blobToken();
+  if (!token) {
+    await recordStoreFailure(target, "write", new Error(`${label} storage is not configured`));
+    return false;
+  }
+  for (let attempt = 0; attempt < JSON_CONDITIONAL_ATTEMPTS; attempt++) {
+    const wrote = await attemptJsonPut(pathname, token, target, label, change, true);
+    if (wrote === "ok") {
+      await clearStoreFailure(target);
+      return true;
+    }
+    if (wrote === "stop") return false;
+  }
+  const wrote = await attemptJsonPut(pathname, token, target, label, change, false);
+  if (wrote === "ok") {
+    await clearStoreFailure(target);
+    return true;
+  }
+  return false;
+}
+
+async function attemptJsonPut(
+  pathname: string,
+  token: string,
+  target: JsonStoreTarget,
+  label: string,
+  change: (current: string | null) => string | null,
+  conditional: boolean,
+): Promise<"ok" | "retry" | "stop"> {
+  const read = await readBlobJson(pathname, token);
+  if (read.state === "error") {
+    await recordStoreFailure(target, "read", read.error);
+    return "stop";
+  }
+  const current = read.state === "ok" ? read.text : null;
+  const next = change(current);
+  if (next == null) {
+    await recordStoreFailure(target, "write", new Error(`Refusing to overwrite an unreadable ${label.toLowerCase()}`));
+    return "stop";
+  }
+  const etag = conditional
+    ? await strongMatchToken(pathname, token, read.state === "ok" ? read.downloadEtag : undefined)
+    : undefined;
+  try {
+    await blobClient.put(pathname, next, {
+      access: "private",
+      allowOverwrite: true,
+      addRandomSuffix: false,
+      cacheControlMaxAge: SCHWAB_BLOB_CACHE_CONTROL_MAX_AGE,
+      contentType: "application/json",
+      token,
+      ...(etag ? { ifMatch: etag } : {}),
+    });
+    return "ok";
+  } catch (err) {
+    if (conditional && isPreconditionFailed(err)) return "retry";
+    await recordStoreFailure(target, "write", err);
+    return "stop";
+  }
+}
+
+function hasJsonArray(text: string | null, key: string): boolean {
+  if (text == null || text.trim() === "") return true;
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    return Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed[key]));
+  } catch {
+    return false;
+  }
+}
+
+function isJsonObject(text: string): boolean {
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    return Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed));
+  } catch {
+    return false;
+  }
+}
+
+function emptyStoreStatus(): PersistedStoreStatus {
+  return { failures: {}, alertsSentUnsavedAt: null };
+}
+
+function cloneStoreStatus(status: PersistedStoreStatus): PersistedStoreStatus {
+  return {
+    failures: { ...status.failures },
+    alertsSentUnsavedAt: status.alertsSentUnsavedAt,
+  };
+}
+
+export async function noteAlertSentUnsaved(now: Date): Promise<void> {
+  const status = await loadPersistedStatus();
+  status.alertsSentUnsavedAt = now.getTime();
+  await persistStoreStatus(status);
+}
+
+export async function lastAlertBookWriteError(): Promise<{ status: number | null; message: string } | null> {
+  const status = await loadPersistedStatus();
+  const failure = status.failures["alert-book"];
+  if (!failure) return null;
+  return { status: failure.status, message: failure.message };
+}
+
+export async function readAlertBookNotice(): Promise<AlertBookNotice> {
+  const status = await loadPersistedStatus();
+  const failure = status.failures["alert-book"] ?? null;
+  const records = await alertBookRecordCount();
+  return {
+    problem: failure ? failure.operation : null,
+    empty: records === 0,
+    alertsSentUnsaved: status.alertsSentUnsavedAt != null,
+    failedAt: failure?.at ?? null,
+    status: failure?.status ?? null,
+    message: failure?.message ?? null,
+  };
+}
+
+async function alertBookRecordCount(): Promise<number | null> {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") return null;
+  if (kind === "memory") return countAlertRecords(memoryBag().alertBook);
+  if (kind === "blob") {
+    const token = blobToken();
+    if (!token) return null;
+    const read = await readBlobJson(SCHWAB_BLOB_ALERT_BOOK_PATH, token);
+    if (read.state === "missing") return 0;
+    if (read.state !== "ok") return null;
+    return countAlertRecords(read.text);
+  }
+  try {
+    const raw = await kvCommand(["GET", ALERT_BOOK_KEY]);
+    if (typeof raw !== "string" || raw.length === 0) return 0;
+    return countAlertRecords(raw);
+  } catch {
+    return null;
+  }
+}
+
+function countAlertRecords(text: string | null): number | null {
+  if (text == null || text.trim() === "") return 0;
+  try {
+    const parsed = JSON.parse(text) as { records?: unknown };
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !Array.isArray(parsed.records)) return null;
+    return parsed.records.length;
+  } catch {
+    return null;
+  }
+}
+
+async function loadPersistedStatus(): Promise<PersistedStoreStatus> {
+  if (memoryStoreStatus) return cloneStoreStatus(memoryStoreStatus);
+  const loaded = await readStatusFromStore();
+  memoryStoreStatus = loaded;
+  return cloneStoreStatus(loaded);
+}
+
+async function readStatusFromStore(): Promise<PersistedStoreStatus> {
+  const kind = resolveStoreKind();
+  if (kind === "blob") {
+    const token = blobToken();
+    if (!token) return emptyStoreStatus();
+    const read = await readBlobJson(SCHWAB_BLOB_STORE_STATUS_PATH, token);
+    if (read.state !== "ok") return emptyStoreStatus();
+    return parseStoreStatus(read.text);
+  }
+  if (kind === "kv") {
+    try {
+      const raw = await kvCommand(["GET", STORE_STATUS_KEY]);
+      if (typeof raw !== "string" || raw.length === 0) return emptyStoreStatus();
+      return parseStoreStatus(raw);
+    } catch {
+      return emptyStoreStatus();
+    }
+  }
+  return emptyStoreStatus();
+}
+
+function parseStoreStatus(text: string): PersistedStoreStatus {
+  try {
+    const parsed = JSON.parse(text) as Partial<PersistedStoreStatus>;
+    const failures: PersistedStoreStatus["failures"] = {};
+    const source = parsed.failures;
+    if (source && typeof source === "object") {
+      for (let i = 0; i < JSON_STORE_TARGETS.length; i++) {
+        const target = JSON_STORE_TARGETS[i];
+        const row = source[target];
+        if (!row || (row.operation !== "read" && row.operation !== "write")) continue;
+        if (typeof row.at !== "number" || !Number.isFinite(row.at)) continue;
+        failures[target] = {
+          target,
+          operation: row.operation,
+          at: row.at,
+          status: typeof row.status === "number" ? row.status : null,
+          message: redactSecrets(typeof row.message === "string" ? row.message : "Unknown error").slice(0, 240),
+        };
+      }
+    }
+    return {
+      failures,
+      alertsSentUnsavedAt: typeof parsed.alertsSentUnsavedAt === "number" ? parsed.alertsSentUnsavedAt : null,
+    };
+  } catch {
+    return emptyStoreStatus();
+  }
+}
+
+async function persistStoreStatus(status: PersistedStoreStatus): Promise<void> {
+  memoryStoreStatus = cloneStoreStatus(status);
+  const kind = resolveStoreKind();
+  const body = JSON.stringify(memoryStoreStatus);
+  if (kind === "memory" || kind === "unconfigured") return;
+  if (kind === "kv") {
+    try {
+      await kvCommand(["SET", STORE_STATUS_KEY, body]);
+    } catch (err) {
+      logStoreFailure("Store status could not be written", err);
+    }
+    return;
+  }
+  const token = blobToken();
+  if (!token) return;
+  try {
+    await blobClient.put(SCHWAB_BLOB_STORE_STATUS_PATH, body, {
+      access: "private",
+      allowOverwrite: true,
+      addRandomSuffix: false,
+      cacheControlMaxAge: SCHWAB_BLOB_CACHE_CONTROL_MAX_AGE,
+      contentType: "application/json",
+      token,
+    });
+  } catch (err) {
+    logStoreFailure("Store status could not be written", err);
+  }
+}
+
+async function recordStoreFailure(target: JsonStoreTarget, operation: "read" | "write", err: unknown): Promise<void> {
+  const sentence = operation === "read" ? `${storeLabel(target)} could not be read` : `${storeLabel(target)} could not be written`;
+  logStoreFailure(sentence, err);
+  const status = await loadPersistedStatus();
+  status.failures[target] = {
+    target,
+    operation,
+    at: Date.now(),
+    status: storeErrorStatus(err),
+    message: failureMessage(err),
+  };
+  await persistStoreStatus(status);
+}
+
+async function clearStoreFailure(target: JsonStoreTarget): Promise<void> {
+  const status = await loadPersistedStatus();
+  const hadFailure = Boolean(status.failures[target]);
+  const hadUnsaved = target === "alert-book" && status.alertsSentUnsavedAt != null;
+  if (!hadFailure && !hadUnsaved) return;
+  delete status.failures[target];
+  if (target === "alert-book") status.alertsSentUnsavedAt = null;
+  await persistStoreStatus(status);
+}
+
+function storeLabel(target: JsonStoreTarget): string {
+  if (target === "alert-book") return "Alert book";
+  if (target === "trade-log") return "Trade log";
+  return "Flow snapshot store";
+}
+
+function failureMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message : "Unknown error";
+  return redactSecrets(raw).slice(0, 240);
 }
 
 function cloneFlowBook(book: FlowSnapshotBook): FlowSnapshotBook {

@@ -4,6 +4,7 @@ import { runAlertFollowUps } from "@/app/lib/alertFollowUp";
 import {
   currentDailyLoss,
   loadAlertBook,
+  loadAlertReport,
   rememberDailyLoss,
   rememberSentAlert,
 } from "@/app/lib/alertStore";
@@ -13,8 +14,12 @@ import {
   SCHWAB_BLOB_ALERT_BOOK_PATH,
   SCHWAB_BLOB_TOKEN_PATH,
 } from "@/app/lib/schwabStorage";
+import { alertBookNoticeSentence } from "@/app/lib/storeStatus";
 import {
   clearMemoryStoreForTests,
+  lastAlertBookWriteError,
+  noteAlertSentUnsaved,
+  readAlertBookNotice,
   readTokens,
   setSchwabBlobClientForTests,
   writeTokens,
@@ -23,6 +28,7 @@ import {
   type SchwabBlobGetResult,
   type SchwabBlobPutOptions,
 } from "@/app/lib/schwabStore";
+import { loadTradePage } from "@/app/lib/tradeStore";
 import type { StoredTokens } from "@/app/lib/schwabParse";
 import { gradeFlowRow } from "@/app/lib/verdict";
 
@@ -177,6 +183,98 @@ describe("alert book store", () => {
     expect(loaded.records).toHaveLength(1);
     expect(loaded.records[0].verdict).toBe(verdict.verdict);
   });
+
+  it("shows a record saved today in the report and the trade-log dropdown", async () => {
+    const now = new Date("2026-10-02T17:45:00Z");
+    const verdict = gradeFlowRow(row({ id: "QQQ|2026-10-16|500|put", ticker: "QQQ", putCall: "put", strike: 500 }), null);
+    expect(await rememberSentAlert(row({ id: "QQQ|2026-10-16|500|put", ticker: "QQQ", putCall: "put", strike: 500 }), verdict, now)).toBe(true);
+    const book = await loadAlertBook();
+    expect(book.records.map((item) => item.tradingDay)).toEqual(["2026-10-02"]);
+    const report = await loadAlertReport();
+    expect(report.alerts.map((item) => item.ticker)).toEqual(["QQQ"]);
+    const page = await loadTradePage(now);
+    expect(page.alerts.some((item) => item.label.includes("QQQ"))).toBe(true);
+  });
+});
+
+describe("alert book blob etag", () => {
+  it("saves when get returns a weak etag and only the strong etag from head or put matches", async () => {
+    process.env.BLOB_READ_WRITE_TOKEN = "fixture-blob-token";
+    const mock = weakDownloadClient();
+    setSchwabBlobClientForTests(mock.client);
+    const first = gradeFlowRow(row(), null);
+    const second = gradeFlowRow(row({ id: "QQQ|2026-10-16|500|put", ticker: "QQQ", putCall: "put", strike: 500 }), null);
+    expect(await rememberSentAlert(row(), first, NOW)).toBe(true);
+    const strong = mock.strongEtag;
+    expect(await rememberSentAlert(row({ id: "QQQ|2026-10-16|500|put", ticker: "QQQ", putCall: "put", strike: 500 }), second, new Date("2026-10-02T17:45:00Z"))).toBe(true);
+    const book = await loadAlertBook();
+    expect(book.records.map((item) => item.ticker).sort()).toEqual(["QQQ", "SPY"]);
+    const puts = mock.put.mock.calls.filter((call) => call[0] === SCHWAB_BLOB_ALERT_BOOK_PATH);
+    const matched = puts[puts.length - 1][2].ifMatch;
+    expect(matched).toBe(strong);
+    expect(matched).not.toBe('"compressed-body-hash"');
+    expect(String(matched).startsWith("W/")).toBe(false);
+  });
+
+  it("writes without ifMatch after conditional puts return 412", async () => {
+    process.env.BLOB_READ_WRITE_TOKEN = "fixture-blob-token";
+    const mock = mismatchedHeadClient();
+    setSchwabBlobClientForTests(mock.client);
+    const verdict = gradeFlowRow(row(), null);
+    expect(await rememberSentAlert(row(), verdict, NOW)).toBe(true);
+    const body = mock.files.get(SCHWAB_BLOB_ALERT_BOOK_PATH)?.body ?? "";
+    expect(body).toContain("SPY");
+    const bookPuts = mock.put.mock.calls.filter((call) => call[0] === SCHWAB_BLOB_ALERT_BOOK_PATH);
+    expect(bookPuts.some((call) => call[2].ifMatch == null)).toBe(true);
+    expect(bookPuts.some((call) => call[2].ifMatch === '"not-the-real-etag"')).toBe(true);
+  });
+
+  it("does not replace an unreadable alert book", async () => {
+    process.env.BLOB_READ_WRITE_TOKEN = "fixture-blob-token";
+    const mock = weakDownloadClient();
+    mock.files.set(SCHWAB_BLOB_ALERT_BOOK_PATH, { body: "not-json{{{", etag: '"strong-existing"' });
+    setSchwabBlobClientForTests(mock.client);
+    const verdict = gradeFlowRow(row(), null);
+    expect(await rememberSentAlert(row(), verdict, NOW)).toBe(false);
+    expect(mock.files.get(SCHWAB_BLOB_ALERT_BOOK_PATH)?.body).toBe("not-json{{{");
+    const notice = await readAlertBookNotice();
+    expect(notice.problem).toBe("write");
+    expect(notice.message).toContain("unreadable");
+    expect(alertBookNoticeSentence(notice)).toContain("Alert book save failed");
+  });
+
+  it("keeps a redacted last error when the save fails", async () => {
+    process.env.BLOB_READ_WRITE_TOKEN = "fixture-blob-token";
+    const mock = weakDownloadClient();
+    mock.put.mockRejectedValue(Object.assign(
+      new Error("Access denied vercel_blob_rw_secret Bearer fixture-blob-token"),
+      { status: 403 },
+    ));
+    setSchwabBlobClientForTests(mock.client);
+    const verdict = gradeFlowRow(row(), null);
+    expect(await rememberSentAlert(row(), verdict, NOW)).toBe(false);
+    const failure = await lastAlertBookWriteError();
+    expect(failure?.status).toBe(403);
+    expect(failure?.message).toContain("[token]");
+    expect(failure?.message.includes("vercel_blob_rw_secret")).toBe(false);
+    expect(failure?.message.includes("fixture-blob-token")).toBe(false);
+    const notice = await readAlertBookNotice();
+    const sentence = alertBookNoticeSentence(notice) ?? "";
+    expect(sentence).toContain("HTTP 403");
+    expect(sentence.includes("vercel_blob_rw_secret")).toBe(false);
+    expect(sentence.includes("fixture-blob-token")).toBe(false);
+  });
+
+  it("says the book is empty when an alert was sent and nothing was saved", async () => {
+    process.env.BLOB_READ_WRITE_TOKEN = "fixture-blob-token";
+    const mock = weakDownloadClient();
+    setSchwabBlobClientForTests(mock.client);
+    await noteAlertSentUnsaved(new Date("2026-10-02T17:45:00Z"));
+    const notice = await readAlertBookNotice();
+    expect(notice.empty).toBe(true);
+    expect(notice.alertsSentUnsaved).toBe(true);
+    expect(alertBookNoticeSentence(notice)).toContain("Telegram alerts were sent, but the alert book is empty.");
+  });
 });
 
 function textStream(text: string): ReadableStream<Uint8Array> {
@@ -213,4 +311,68 @@ function createBlobMock() {
   const del = vi.fn(async () => undefined);
   const client: SchwabBlobClient = { put, get, del };
   return { client, put, get, del, files };
+}
+
+function textStreamBytes(text: string): ReadableStream<Uint8Array> {
+  return textStream(text);
+}
+
+function weakDownloadClient() {
+  const files = new Map<string, { body: string; etag: string }>();
+  let seq = 0;
+  let strongEtag = "";
+  const put = vi.fn(async (pathname: string, body: string, options: SchwabBlobPutOptions) => {
+    const existing = files.get(pathname);
+    if (options.ifMatch && (!existing || existing.etag !== options.ifMatch)) {
+      throw new BlobPreconditionFailedError();
+    }
+    seq += 1;
+    const etag = `"strong-${seq}"`;
+    if (pathname === SCHWAB_BLOB_ALERT_BOOK_PATH) strongEtag = etag;
+    files.set(pathname, { body, etag });
+    return { pathname, etag };
+  });
+  const get = vi.fn(async (pathname: string, _options: SchwabBlobGetOptions): Promise<SchwabBlobGetResult | null> => {
+    const existing = files.get(pathname);
+    if (!existing) return null;
+    return {
+      statusCode: 200,
+      stream: textStreamBytes(existing.body),
+      blob: { etag: 'W/"compressed-body-hash"', pathname },
+    };
+  });
+  const head = vi.fn(async (pathname: string) => {
+    const existing = files.get(pathname);
+    if (!existing) return null;
+    return { etag: existing.etag };
+  });
+  const del = vi.fn(async () => undefined);
+  const client: SchwabBlobClient = { put, get, del, head };
+  return { client, put, get, head, files, get strongEtag() { return strongEtag; } };
+}
+
+function mismatchedHeadClient() {
+  const files = new Map<string, { body: string; etag: string }>();
+  const put = vi.fn(async (pathname: string, body: string, options: SchwabBlobPutOptions) => {
+    if (pathname !== SCHWAB_BLOB_ALERT_BOOK_PATH) {
+      files.set(pathname, { body, etag: '"status"' });
+      return { pathname, etag: '"status"' };
+    }
+    if (options.ifMatch) throw new BlobPreconditionFailedError();
+    files.set(pathname, { body, etag: '"strong-real"' });
+    return { pathname, etag: '"strong-real"' };
+  });
+  const get = vi.fn(async (pathname: string, _options: SchwabBlobGetOptions): Promise<SchwabBlobGetResult | null> => {
+    const existing = files.get(pathname);
+    if (!existing) return null;
+    return {
+      statusCode: 200,
+      stream: textStreamBytes(existing.body),
+      blob: { etag: 'W/"compressed-body-hash"', pathname },
+    };
+  });
+  const head = vi.fn(async () => ({ etag: '"not-the-real-etag"' }));
+  const del = vi.fn(async () => undefined);
+  const client: SchwabBlobClient = { put, get, del, head };
+  return { client, put, files };
 }
