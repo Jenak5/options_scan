@@ -15,7 +15,7 @@ import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { planExitsForAsk } from "@/app/lib/exits";
-import { formatVerdictHtml } from "@/app/lib/telegram";
+import { formatVerdictHtml, paperTradeLinkHtml } from "@/app/lib/telegram";
 import type { AlertVerdict } from "@/app/lib/verdict";
 import { formatVolArbSummary, type VolArbReading, type VolSignal } from "@/app/lib/volArb";
 import { scanVolArb } from "@/app/lib/volScan";
@@ -102,7 +102,7 @@ function convictionFor(ticker: string, signal: VolSignal | null): { emoji: strin
   return { emoji: "❓", tier: "UNSCORED", note: "Schwab did not return ATM IV versus realized vol" };
 }
 
-function formatAlert(row: FlowRow, volSummary: string, signal: VolSignal | null, grokNote: string, verdict: AlertVerdict): string {
+function formatAlert(row: FlowRow, volSummary: string, signal: VolSignal | null, grokNote: string, verdict: AlertVerdict, alertId: string): string {
   const premStr = formatFlowPremium(row.notionalPremium);
   const typeEmoji = row.putCall === "call" ? "🟢" : "🔴";
   const conviction = convictionFor(row.ticker, signal);
@@ -124,6 +124,8 @@ Estimated flow from Schwab volume/open interest, not a sweep.
 ${row.prints?.summary ? `🖨 ${escapeHtml(row.prints.summary)}\n` : ""}${exitText(row.ask, verdict.maxContracts)}📈 Vol Arb: <b>${escapeHtml(volSummary)}</b> — ${conviction.note}
 
 🤖 <i>${escapeHtml(grokNote)}</i>
+
+${paperTradeLinkHtml(alertId)}
 
 <b>Options Edge Scanner</b>`;
 }
@@ -296,7 +298,8 @@ export async function GET(request: NextRequest) {
       }
       log.push(`${row.ticker}: Grok clean — ${reason}`);
 
-      const delivered = await sendTelegram(formatAlert(row, volSummary, signal, reason, verdict));
+      const alertId = `${now.getTime()}-${row.id}`;
+      const delivered = await sendTelegram(formatAlert(row, volSummary, signal, reason, verdict, alertId));
       if (delivered) {
         alertsSent++;
         handledSetupKeys.add(dayKey(tradingDay, setup));

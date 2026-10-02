@@ -59,7 +59,8 @@ export async function GET(request: NextRequest) {
           const latest = indexSentAlerts((await loadAlertBook()).records, tradingDay);
           if (latest.count >= maxPerDay) break;
           if (latest.contracts.has(item.row.id) || latest.setups.has(alertSetupKey(item.row))) continue;
-          const message = formatFlowAlert({ ...item.row, verdict: item.verdict });
+          const alertId = `${now.getTime()}-${item.row.id}`;
+          const message = formatFlowAlert({ ...item.row, verdict: item.verdict, alertId });
           const delivered = await sendTelegramAlert(message);
           if (delivered) {
             alertsSent++;

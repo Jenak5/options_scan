@@ -1,18 +1,26 @@
-import { TRADE_RULES, type LetterGrade } from "@/app/lib/alertConfig";
+import { formatContractCost, longContractCost, TRADE_RULES, type LetterGrade } from "@/app/lib/alertConfig";
 import { chicagoClock, chicagoDate } from "@/app/lib/marketHours";
 import { ACCOUNT_SIZE_DOLLARS, DAILY_STOP_CONSECUTIVE_LOSSES, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import type { VerdictName } from "@/app/lib/verdict";
 
 /**
- * Manual trade log. Prices are what Jena types. There is no broker fill.
+ * Paper trade log. A paper entry copies an A or B alert and prices the
+ * contract at the ask. A hand-typed row is still allowed. There is no broker fill.
  * A loss streak is counted from closes on the Chicago trading day.
  * Once two losses land in a row, the daily stop stays on until the next
  * Chicago day. A later win does not clear it. A flat close breaks the streak
  * before the stop latches. There is no weekly loss limit.
  */
 
+/** Shown next to a paper entry so the fill price is not confused with the midpoint. */
+export const PAPER_ENTRY_NOTE = "Entry price is the ask. One contract costs ask × 100. Flow premium is volume × mid × 100 and is not the fill.";
+
+export const DAILY_STOP_PAPER_MESSAGE = "Stop for the day. Two losing closes in a row. A new paper trade waits until the next Chicago day.";
+
 export type TradeStructure = "single" | "debit-spread";
 export type TradeResult = "win" | "loss" | "flat";
+/** Ask is the scanner's contract price. Typed is a price entered by hand. */
+export type EntryPriceSource = "ask" | "typed";
 
 const VERDICTS: VerdictName[] = ["TAKE", "WATCH", "SKIP", "STOP"];
 const GRADES: LetterGrade[] = ["A", "B", "C", "D"];
@@ -29,6 +37,10 @@ export interface StoredTrade {
   expiration: string;
   contracts: number;
   entryPrice: number;
+  /** Ask when the paper trade copied an alert. Typed when the price was entered by hand. */
+  entryPriceSource: EntryPriceSource | null;
+  /** Estimated flow premium at the alert: volume × mid × 100. Not the fill. */
+  flowPremium: number | null;
   structure: TradeStructure;
   alertId: string | null;
   alertVerdict: VerdictName | null;
@@ -71,6 +83,14 @@ export interface WeeklySummary {
 export interface BucketPnl {
   key: string;
   closed: number;
+  wins: number;
+  losses: number;
+  flats: number;
+  /** Wins divided by wins plus losses. Flats are left out. Null when none decided. */
+  winRate: number | null;
+  averageWin: number | null;
+  /** Mean dollar loss, as a positive number. */
+  averageLoss: number | null;
   pnlDollars: number;
 }
 
@@ -107,6 +127,8 @@ export interface OpenTradeInput {
   alertId?: string | null;
   alertVerdict?: string | null;
   alertGrade?: string | null;
+  entryPriceSource?: EntryPriceSource | null;
+  flowPremium?: number | null;
 }
 
 export function emptyTradeLog(): TradeLog {
@@ -204,8 +226,8 @@ export function weeklyFlagSentence(week: WeeklySummary): string | null {
 export function summarizeTrades(trades: readonly StoredTrade[], now: Date): TradeStats {
   const grades = ["A", "B", "C", "D", "unmatched"];
   const verdicts = ["TAKE", "WATCH", "SKIP", "STOP", "unmatched"];
-  const byGrade = grades.map((key) => ({ key, closed: 0, pnlDollars: 0 }));
-  const byVerdict = verdicts.map((key) => ({ key, closed: 0, pnlDollars: 0 }));
+  const byGrade = grades.map(emptyBucket);
+  const byVerdict = verdicts.map(emptyBucket);
   let open = 0;
   let wins = 0;
   let losses = 0;
@@ -232,8 +254,8 @@ export function summarizeTrades(trades: readonly StoredTrade[], now: Date): Trad
     }
     const gradeKey = trades[i].alertGrade ?? "unmatched";
     const verdictKey = trades[i].alertVerdict ?? "unmatched";
-    addBucket(byGrade, gradeKey, metrics.pnlDollars);
-    addBucket(byVerdict, verdictKey, metrics.pnlDollars);
+    addBucket(byGrade, gradeKey, metrics.pnlDollars, metrics.result);
+    addBucket(byVerdict, verdictKey, metrics.pnlDollars, metrics.result);
   }
 
   const decided = wins + losses;
@@ -259,8 +281,8 @@ export function summarizeTrades(trades: readonly StoredTrade[], now: Date): Trad
     averageLoss,
     expectancy,
     totalPnl,
-    byGrade,
-    byVerdict,
+    byGrade: byGrade.map(publishBucket),
+    byVerdict: byVerdict.map(publishBucket),
     week: weeklySummary(trades, now),
     sampleNote: TRADE_RULES.sampleNote,
   };
@@ -288,8 +310,8 @@ export function buildTrade(input: OpenTradeInput, id: string, now: Date): { ok: 
     return { ok: false, error: "Enter an entry time" };
   }
   const alertId = cleanId(input.alertId);
-  const alertVerdict = alertId ? parseVerdict(input.alertVerdict) : null;
-  const alertGrade = alertVerdict ? parseGrade(input.alertGrade) : null;
+  const alertVerdict = parseVerdict(input.alertVerdict);
+  const alertGrade = parseGrade(input.alertGrade);
   return {
     ok: true,
     trade: {
@@ -301,6 +323,8 @@ export function buildTrade(input: OpenTradeInput, id: string, now: Date): { ok: 
       expiration,
       contracts: input.contracts,
       entryPrice: input.entryPrice,
+      entryPriceSource: input.entryPriceSource === "ask" ? "ask" : "typed",
+      flowPremium: cleanPremium(input.flowPremium),
       structure,
       alertId,
       alertVerdict,
@@ -309,6 +333,57 @@ export function buildTrade(input: OpenTradeInput, id: string, now: Date): { ok: 
       exitPrice: null,
       exitNote: null,
     },
+  };
+}
+
+/**
+ * Refuse a paper entry that breaks the ceiling.
+ * One contract is ask × 100, and that has to be at or under $875.
+ * contracts × ask × 100 has to be at or under the same $875 loss cap.
+ * A contract between the old $450 figure and $875 is allowed.
+ */
+export function paperCostError(entryPrice: number, contracts: number): string | null {
+  if (!Number.isInteger(contracts) || contracts < 1) {
+    return "Enter a whole number of contracts, starting at 1.";
+  }
+  const one = longContractCost(entryPrice);
+  if (one == null) return "The ask is not priced, so this paper trade was not saved.";
+  if (one > MAX_LOSS_DOLLARS + 1e-6) {
+    return `One contract at the ask costs ${formatContractCost(entryPrice)}, which is over the $${MAX_LOSS_DOLLARS} ceiling. This paper trade was not saved.`;
+  }
+  const risk = riskDollars(entryPrice, contracts);
+  if (risk > MAX_LOSS_DOLLARS + 1e-6) {
+    return `${contracts} contracts at the ask cost ${dollars(risk)}, which is over the $${MAX_LOSS_DOLLARS} loss cap. This paper trade was not saved.`;
+  }
+  return null;
+}
+
+/** Open paper trade already stored for this alert, if one is still open. */
+export function findOpenTradeForAlert(trades: readonly StoredTrade[], alertId: string): StoredTrade | null {
+  const id = cleanId(alertId);
+  if (!id) return null;
+  for (let i = 0; i < trades.length; i++) {
+    const trade = trades[i];
+    if (trade.closedAt == null && trade.alertId === id) return trade;
+  }
+  return null;
+}
+
+/**
+ * Mark-to-market for an open trade. The mark is the option midpoint.
+ * Closed trades keep their exit P/L and do not use the mark.
+ */
+export function withQuoteMark<T extends StoredTrade>(trade: T, mark: number | null): T & {
+  mark: number | null;
+  markSource: "mid" | null;
+  unrealizedPnl: number | null;
+} {
+  const usable = trade.closedAt == null && mark != null && Number.isFinite(mark) && mark > 0;
+  return {
+    ...trade,
+    mark: usable ? mark : null,
+    markSource: usable ? "mid" : null,
+    unrealizedPnl: usable ? (mark as number - trade.entryPrice) * trade.contracts * 100 : null,
   };
 }
 
@@ -372,7 +447,7 @@ export function parseTradeLog(text: string | null | undefined): TradeLog {
 export function tradesToCsv(trades: readonly StoredTrade[]): string {
   const header = [
     "id", "openedAt", "ticker", "putCall", "strike", "expiration", "contracts",
-    "entryPrice", "structure", "alertId", "alertVerdict", "alertGrade",
+    "entryPrice", "entryPriceSource", "flowPremium", "structure", "alertId", "alertVerdict", "alertGrade",
     "closedAt", "exitPrice", "exitNote", "pnlDollars", "pnlPercent",
     "riskDollars", "riskBreach", "result", "holdMinutes",
   ];
@@ -389,6 +464,8 @@ export function tradesToCsv(trades: readonly StoredTrade[]): string {
       trade.expiration,
       String(trade.contracts),
       String(trade.entryPrice),
+      trade.entryPriceSource ?? "",
+      trade.flowPremium == null ? "" : String(trade.flowPremium),
       trade.structure,
       trade.alertId ?? "",
       trade.alertVerdict ?? "",
@@ -420,13 +497,71 @@ function byClose(a: StoredTrade, b: StoredTrade): number {
   return 0;
 }
 
-function addBucket(buckets: BucketPnl[], key: string, pnl: number): void {
+function publishBucket(bucket: BucketPnl & { winDollars: number; lossDollars: number }): BucketPnl {
+  return {
+    key: bucket.key,
+    closed: bucket.closed,
+    wins: bucket.wins,
+    losses: bucket.losses,
+    flats: bucket.flats,
+    winRate: bucket.winRate,
+    averageWin: bucket.averageWin,
+    averageLoss: bucket.averageLoss,
+    pnlDollars: bucket.pnlDollars,
+  };
+}
+
+function emptyBucket(key: string): BucketPnl & { winDollars: number; lossDollars: number } {
+  return {
+    key,
+    closed: 0,
+    wins: 0,
+    losses: 0,
+    flats: 0,
+    winRate: null,
+    averageWin: null,
+    averageLoss: null,
+    pnlDollars: 0,
+    winDollars: 0,
+    lossDollars: 0,
+  };
+}
+
+function addBucket(
+  buckets: Array<BucketPnl & { winDollars: number; lossDollars: number }>,
+  key: string,
+  pnl: number,
+  result: TradeResult,
+): void {
   for (let i = 0; i < buckets.length; i++) {
     if (buckets[i].key !== key) continue;
-    buckets[i].closed += 1;
-    buckets[i].pnlDollars += pnl;
+    const bucket = buckets[i];
+    bucket.closed += 1;
+    bucket.pnlDollars += pnl;
+    if (result === "win") {
+      bucket.wins += 1;
+      bucket.winDollars += pnl;
+    } else if (result === "loss") {
+      bucket.losses += 1;
+      bucket.lossDollars += Math.abs(pnl);
+    } else {
+      bucket.flats += 1;
+    }
+    const decided = bucket.wins + bucket.losses;
+    bucket.winRate = decided > 0 ? bucket.wins / decided : null;
+    bucket.averageWin = bucket.wins > 0 ? bucket.winDollars / bucket.wins : null;
+    bucket.averageLoss = bucket.losses > 0 ? bucket.lossDollars / bucket.losses : null;
     return;
   }
+}
+
+function dollars(value: number): string {
+  return `$${Math.round(value).toLocaleString("en-US")}`;
+}
+
+function cleanPremium(value: number | null | undefined): number | null {
+  if (value == null || !Number.isFinite(value) || value < 0 || value > 1e12) return null;
+  return value;
 }
 
 function findIndex(trades: readonly StoredTrade[], id: string): number {
@@ -489,6 +624,8 @@ function parseTrade(value: unknown): StoredTrade | null {
     expiration,
     contracts: contracts as number,
     entryPrice,
+    entryPriceSource: row.entryPriceSource === "ask" || row.entryPriceSource === "typed" ? row.entryPriceSource : null,
+    flowPremium: cleanPremium(typeof row.flowPremium === "number" ? row.flowPremium : null),
     structure: row.structure === "debit-spread" ? "debit-spread" : "single",
     alertId: cleanId(typeof row.alertId === "string" ? row.alertId : null),
     alertVerdict: parseVerdict(row.alertVerdict),

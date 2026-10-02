@@ -1,12 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import { exitDefaultsSummary } from "@/app/lib/exits";
+import { quoteTradeMarks } from "@/app/lib/tradeQuotes";
+import { PAPER_ENTRY_NOTE, withQuoteMark } from "@/app/lib/trades";
 import {
   closeLoggedTrade,
   loadTradePage,
   openLoggedTrade,
+  openPaperLoggedTrade,
+  paperPreviewForAlert,
   removeLoggedTrade,
   tradeLogCsv,
+  type TradePage,
 } from "@/app/lib/tradeStore";
 
 export const dynamic = "force-dynamic";
@@ -29,8 +34,16 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  const page = await loadTradePage(new Date());
-  return NextResponse.json({ ...page, exitDefaults: exitDefaultsSummary() });
+  const now = new Date();
+  const page = await loadTradePage(now);
+  const alertId = request.nextUrl.searchParams.get("alert");
+  const preview = alertId ? await paperPreviewForAlert(alertId, now) : null;
+  return NextResponse.json({
+    ...(await withMarks(page)),
+    preview,
+    entryNote: PAPER_ENTRY_NOTE,
+    exitDefaults: exitDefaultsSummary(),
+  });
 }
 
 export async function POST(request: NextRequest) {
@@ -48,6 +61,29 @@ export async function POST(request: NextRequest) {
 
   const now = new Date();
   const action = typeof row.action === "string" ? row.action : "";
+  if (action === "paper") {
+    const result = await openPaperLoggedTrade({
+      alertId: typeof row.alertId === "string" ? row.alertId : null,
+      ticker: typeof row.ticker === "string" ? row.ticker : "",
+      putCall: typeof row.putCall === "string" ? row.putCall : "",
+      strike: asNumber(row.strike) ?? undefined,
+      expiration: typeof row.expiration === "string" ? row.expiration : "",
+      ask: asNumber(row.ask) ?? undefined,
+      grade: typeof row.grade === "string" ? row.grade : null,
+      verdict: typeof row.verdict === "string" ? row.verdict : null,
+      flowPremium: asNumber(row.flowPremium),
+      contracts: asNumber(row.contracts) ?? 1,
+    }, now);
+    if (!result.ok) return NextResponse.json({ error: result.error }, { status: 400 });
+    return NextResponse.json({
+      ...(await withMarks(result.page)),
+      alreadyOpen: result.alreadyOpen,
+      focusAlertId: result.focusAlertId,
+      entryNote: PAPER_ENTRY_NOTE,
+      exitDefaults: exitDefaultsSummary(),
+    });
+  }
+
   const result = action === "open"
     ? await openLoggedTrade({
       ticker: typeof row.ticker === "string" ? row.ticker : "",
@@ -68,10 +104,24 @@ export async function POST(request: NextRequest) {
       }, now)
       : action === "remove"
         ? await removeLoggedTrade(typeof row.id === "string" ? row.id : "", now)
-        : { ok: false as const, error: "Choose open, close, or remove" };
+        : { ok: false as const, error: "Choose paper, open, close, or remove" };
 
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: 400 });
-  return NextResponse.json({ ...result.page, exitDefaults: exitDefaultsSummary() });
+  return NextResponse.json({
+    ...(await withMarks(result.page)),
+    alreadyOpen: false,
+    focusAlertId: null,
+    entryNote: PAPER_ENTRY_NOTE,
+    exitDefaults: exitDefaultsSummary(),
+  });
+}
+
+async function withMarks(page: TradePage) {
+  const marks = await quoteTradeMarks(page.trades);
+  return {
+    ...page,
+    trades: page.trades.map((trade) => withQuoteMark(trade, marks[trade.id] ?? null)),
+  };
 }
 
 function asNumber(value: unknown): number | null {

@@ -63,6 +63,36 @@ export function formatVerdictHtml(verdict: {
   return lines.join("\n");
 }
 
+/**
+ * Absolute link that opens the Trade Log for one saved alert.
+ * APP_ORIGIN wins. Otherwise the Vercel production host. Otherwise this app's public alias.
+ */
+export function paperTradeUrl(alertId: string): string | null {
+  const id = alertId.trim();
+  if (!/^[A-Za-z0-9_.:|-]{4,120}$/.test(id)) return null;
+  return `${appOrigin()}/trades?alert=${encodeURIComponent(id)}`;
+}
+
+export function paperTradeLinkHtml(alertId: string): string {
+  const url = paperTradeUrl(alertId);
+  if (!url) return "";
+  return `<a href="${escapeHtml(url)}">Paper trade</a>`;
+}
+
+function appOrigin(): string {
+  const explicit = (process.env.APP_ORIGIN ?? process.env.NEXT_PUBLIC_APP_URL ?? "").trim();
+  if (explicit) return stripOrigin(explicit);
+  const production = (process.env.VERCEL_PROJECT_PRODUCTION_URL ?? "").trim();
+  if (production) return stripOrigin(production.includes("://") ? production : `https://${production}`);
+  const vercel = (process.env.VERCEL_URL ?? "").trim();
+  if (vercel) return stripOrigin(vercel.includes("://") ? vercel : `https://${vercel}`);
+  return "https://options-scan.vercel.app";
+}
+
+function stripOrigin(value: string): string {
+  return value.replace(/\/+$/, "");
+}
+
 export function formatFlowAlert(flow: {
   ticker: string;
   putCall: "call" | "put";
@@ -88,6 +118,7 @@ export function formatFlowAlert(flow: {
     eventLine?: string | null;
     maxContracts?: number | null;
   } | null;
+  alertId?: string | null;
 }): string {
   const emoji = flow.putCall === "call" ? "🟢" : "🔴";
   const type = flow.putCall === "call" ? "CALL" : "PUT";
@@ -116,6 +147,7 @@ export function formatFlowAlert(flow: {
     flow.prints?.summary ? escapeHtml(flow.prints.summary) : "",
     exitBlock(flow.ask, flow.verdict?.maxContracts),
     flags ? `🏷 ${flags}` : "",
+    flow.alertId ? paperTradeLinkHtml(flow.alertId) : "",
     ``,
     `⏰ ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZoneName: "short" })}`,
   ].filter(Boolean).join("\n");

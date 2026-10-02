@@ -14,7 +14,7 @@ import {
   type SchwabBlobPutOptions,
 } from "@/app/lib/schwabStore";
 import type { StoredTokens } from "@/app/lib/schwabParse";
-import { closeLoggedTrade, openLoggedTrade, tradeLogCsv } from "@/app/lib/tradeStore";
+import { closeLoggedTrade, openLoggedTrade, openPaperLoggedTrade, paperPreviewForAlert, tradeLogCsv } from "@/app/lib/tradeStore";
 import { gradeFlowRow } from "@/app/lib/verdict";
 import { BlobPreconditionFailedError } from "@vercel/blob";
 
@@ -48,6 +48,116 @@ afterEach(() => {
   clearMemoryStoreForTests();
   setSchwabBlobClientForTests(null);
   vi.restoreAllMocks();
+});
+
+describe("paper trade from an alert", () => {
+  it("copies the contract, the ask, the grade, the flow premium, and the alert id", async () => {
+    const verdict = { ...gradeFlowRow(row(), null), grade: "A" as const, verdict: "TAKE" as const };
+    expect(await rememberSentAlert(row(), verdict, NOW)).toBe(true);
+    const alertId = `${NOW.getTime()}-SPY|2026-10-08|105|call`;
+    const opened = await openPaperLoggedTrade({ alertId }, NOW);
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const trade = opened.page.trades[0];
+    expect(trade.ticker).toBe("SPY");
+    expect(trade.putCall).toBe("call");
+    expect(trade.strike).toBe(105);
+    expect(trade.expiration).toBe("2026-10-08");
+    expect(trade.alertGrade).toBe(verdict.grade);
+    expect(trade.flowPremium).toBeCloseTo(162_000);
+    expect(trade.entryPrice).toBe(2.05);
+    expect(trade.entryPriceSource).toBe("ask");
+    expect(trade.contracts).toBe(1);
+    expect(trade.alertId).toBe(alertId);
+    expect(trade.openedAt).toBe(NOW.getTime());
+
+    const again = await openPaperLoggedTrade({ alertId }, new Date(NOW.getTime() + 1000));
+    expect(again.ok).toBe(true);
+    if (!again.ok) return;
+    expect(again.alreadyOpen).toBe(true);
+    expect(again.page.trades).toHaveLength(1);
+
+    const marked = 2.4;
+    const closed = await closeLoggedTrade(trade.id, { exitPrice: marked, exitNote: "Closed at the midpoint" }, new Date(NOW.getTime() + 60_000));
+    expect(closed.ok).toBe(true);
+    if (!closed.ok) return;
+    expect(closed.page.trades[0].metrics.pnlDollars).toBeCloseTo((marked - 2.05) * 100);
+  });
+
+  it("links a flow card to the saved alert and keeps the alert ask", async () => {
+    const verdict = { ...gradeFlowRow(row(), null), grade: "A" as const, verdict: "TAKE" as const };
+    expect(await rememberSentAlert(row(), verdict, NOW)).toBe(true);
+    const opened = await openPaperLoggedTrade({
+      ticker: "spy",
+      putCall: "call",
+      strike: 105,
+      expiration: "2026-10-08",
+      ask: 3,
+      grade: "B",
+      verdict: "WATCH",
+      flowPremium: 1,
+    }, NOW);
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    expect(opened.focusAlertId).toBe(`${NOW.getTime()}-SPY|2026-10-08|105|call`);
+    expect(opened.page.trades[0].entryPrice).toBe(2.05);
+    expect(opened.page.trades[0].entryPriceSource).toBe("ask");
+    expect(opened.page.trades[0].alertGrade).toBe("A");
+    expect(opened.page.trades[0].flowPremium).toBeCloseTo(162_000);
+  });
+
+  it("refuses one contract over $875, a size over $875, and a third entry after two losing closes", async () => {
+    const verdict = { ...gradeFlowRow(row(), null), grade: "B" as const, verdict: "TAKE" as const };
+    await saveAlert(verdict, NOW, { id: "SPY|2026-10-08|200|call", strike: 200, ask: 9 });
+    const over = await openPaperLoggedTrade({ alertId: alertId(NOW, "SPY|2026-10-08|200|call") }, NOW);
+    expect(over.ok).toBe(false);
+    if (over.ok) return;
+    expect(over.error).toMatch(/\$875/);
+
+    const later = new Date(NOW.getTime() + 1000);
+    await saveAlert(verdict, later, { id: "SPY|2026-10-15|110|call", strike: 110, expiration: "2026-10-15", ask: 5 });
+    const allowed = await openPaperLoggedTrade({ alertId: alertId(later, "SPY|2026-10-15|110|call"), contracts: 1 }, later);
+    expect(allowed.ok).toBe(true);
+    if (!allowed.ok) return;
+    expect(allowed.page.trades[0].entryPrice).toBe(5);
+    expect(allowed.page.trades[0].metrics.riskDollars).toBe(500);
+
+    const sizedAt = new Date(NOW.getTime() + 1500);
+    await saveAlert(verdict, sizedAt, { id: "IWM|2026-10-16|90|call", ticker: "IWM", strike: 90, expiration: "2026-10-16", ask: 2 });
+    const tooMany = await openPaperLoggedTrade({ alertId: alertId(sizedAt, "IWM|2026-10-16|90|call"), contracts: 5 }, sizedAt);
+    expect(tooMany.ok).toBe(false);
+    if (tooMany.ok) return;
+    expect(tooMany.error).toMatch(/\$875/);
+
+    const firstAt = new Date(NOW.getTime() + 2000);
+    const secondAt = new Date(NOW.getTime() + 3000);
+    await saveAlert(verdict, firstAt, { id: "SPY|2026-10-22|120|call", strike: 120, expiration: "2026-10-22", ask: 2 });
+    await saveAlert(verdict, secondAt, { id: "SPY|2026-10-29|130|call", strike: 130, expiration: "2026-10-29", ask: 2 });
+    const first = await openPaperLoggedTrade({ alertId: alertId(firstAt, "SPY|2026-10-22|120|call") }, firstAt);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect((await closeLoggedTrade(first.page.trades[0].id, { exitPrice: 1 }, new Date(NOW.getTime() + 4000))).ok).toBe(true);
+    const second = await openPaperLoggedTrade({ alertId: alertId(secondAt, "SPY|2026-10-29|130|call") }, secondAt);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    const openSecond = second.page.trades.find((trade) => trade.closedAt == null);
+    const secondClose = await closeLoggedTrade(openSecond?.id ?? "", { exitPrice: 1 }, new Date(NOW.getTime() + 5000));
+    expect(secondClose.ok).toBe(true);
+    if (!secondClose.ok) return;
+    expect(secondClose.page.stop.dailyStop).toBe(true);
+
+    const thirdAt = new Date(NOW.getTime() + 6000);
+    const thirdKey = "QQQ|2026-11-06|140|call";
+    await saveAlert(verdict, thirdAt, { id: thirdKey, ticker: "QQQ", strike: 140, expiration: "2026-11-06", ask: 2 });
+    const blocked = await openPaperLoggedTrade({ alertId: alertId(thirdAt, thirdKey) }, new Date(NOW.getTime() + 7000));
+    expect(blocked.ok).toBe(false);
+    if (blocked.ok) return;
+    expect(blocked.error).toMatch(/Stop for the day/);
+    const preview = await paperPreviewForAlert(alertId(thirdAt, thirdKey), new Date(NOW.getTime() + 7000));
+    expect(preview.found).toBe(true);
+    expect(preview.entryPrice).toBe(2);
+    expect(preview.blocked).toMatch(/Stop for the day/);
+  });
 });
 
 describe("trade log store", () => {
@@ -114,6 +224,14 @@ describe("trade log store", () => {
     });
   });
 });
+
+function alertId(now: Date, contractKey: string): string {
+  return `${now.getTime()}-${contractKey}`;
+}
+
+async function saveAlert(verdict: ReturnType<typeof gradeFlowRow>, now: Date, over: Partial<FlowRow>) {
+  expect(await rememberSentAlert(row(over), verdict, now)).toBe(true);
+}
 
 function entry(alertId: string | null) {
   return {

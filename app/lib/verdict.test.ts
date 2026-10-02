@@ -467,6 +467,26 @@ describe("alert checklist", () => {
     expect(alert).toContain("flow premium");
     expect(alert).toContain("$608K");
     expect(alert).toContain("Ask $2.05 · $205 a contract");
+    const alertId = "1727790000000-NVDA|2026-10-16|100|call";
+    const linked = formatFlowAlert({
+      ticker: "NVDA",
+      putCall: input.putCall,
+      strike: input.strike,
+      expiration: input.expiration,
+      ask: input.ask,
+      notionalPremium: input.notionalPremium,
+      volume: input.volume,
+      openInterest: input.openInterest,
+      iv: null,
+      side: input.side,
+      otm: input.otm,
+      volumeExceedsOi: true,
+      volOiRatio: input.volOiRatio,
+      verdict: fromFlow,
+      alertId,
+    });
+    expect(linked).toContain(">Paper trade</a>");
+    expect(linked).toContain(encodeURIComponent(alertId));
   });
 
   it("keeps ordinary flow, a farther strike, and a macro day off A", () => {

@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { FlowTab } from "@/app/components/FlowTab";
+import { PaperTradeButton } from "@/app/components/PaperTradeButton";
 import { SchwabBanner } from "@/app/components/SchwabBanner";
 import { formatContractPriceLine, formatFlowPremium } from "@/app/lib/alertConfig";
 import type { AlertSummary, StoredAlert } from "@/app/lib/alertBook";
@@ -626,6 +627,7 @@ function AlertsTab() {
           "Cross-checks the ticker's vol arb signal and asks Grok to screen for red flags (earnings, FDA, news) before that send.",
           "The message includes the checklist grade and the exit defaults. Two losing closes in a row turn TAKE into STOP for today, and that STOP is not sent.",
           "The same cron later re-quotes the mid at about 15 minutes, 1 hour, and the close. Alert Report compares those mids. That is an estimate, not a fill.",
+          "Each A or B alert has a Paper trade link. It opens the Trade Log and records a simulated buy at the ask for that contract. It does not place an order.",
         ].map((step, i) => (
           <div key={i} style={{ display: "flex", gap: 10, marginBottom: 6, fontSize: 14, color: "#94a3b8" }}>
             <span style={{ color: "#06b6d4", fontWeight: 700, minWidth: 20 }}>{i + 1}.</span>
@@ -1016,6 +1018,9 @@ function AlertReportTab() {
                       <div style={{ color: "#64748b", fontSize: 12 }}>
                         mid {alert.mid == null ? "—" : alert.mid.toFixed(2)} · underlying {alert.underlyingPrice == null ? "—" : alert.underlyingPrice.toFixed(2)}
                       </div>
+                      {(alert.grade === "A" || alert.grade === "B") && (
+                        <PaperTradeButton alertId={alert.id} />
+                      )}
                     </td>
                     <td style={{ ...TD, minWidth: 220 }}>
                       <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4 }}>
