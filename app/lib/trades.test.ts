@@ -6,12 +6,15 @@ import {
   closeTrade,
   dailyStopState,
   emptyTradeLog,
+  findOpenTradeForAlert,
+  paperCostError,
   parseTradeLog,
   summarizeTrades,
   tradeMetrics,
   tradesToCsv,
   weeklyFlagSentence,
   weeklySummary,
+  withQuoteMark,
   type StoredTrade,
 } from "@/app/lib/trades";
 
@@ -106,9 +109,35 @@ describe("weekly flag and stats", () => {
     expect(stats.averageLoss).toBeCloseTo(100);
     expect(stats.expectancy).toBeCloseTo((2 / 3) * 75 - (1 / 3) * 100);
     expect(stats.byGrade.find((row) => row.key === "A")?.pnlDollars).toBeCloseTo(100);
+    expect(stats.byGrade.find((row) => row.key === "A")?.winRate).toBe(1);
+    expect(stats.byGrade.find((row) => row.key === "A")?.averageWin).toBeCloseTo(100);
+    expect(stats.byGrade.find((row) => row.key === "B")?.winRate).toBe(0);
+    expect(stats.byGrade.find((row) => row.key === "B")?.averageLoss).toBeCloseTo(100);
+    expect(stats.byGrade.find((row) => row.key === "B")?.pnlDollars).toBeCloseTo(-100);
     expect(stats.byVerdict.find((row) => row.key === "WATCH")?.pnlDollars).toBeCloseTo(-100);
     expect(stats.byVerdict.find((row) => row.key === "SKIP")?.closed).toBe(1);
     expect(stats.sampleNote).toMatch(/small/i);
+  });
+});
+
+describe("paper trade cost and mark", () => {
+  it("allows one contract between $450 and $875 and refuses a contract or a size over $875", () => {
+    expect(paperCostError(5, 1)).toBeNull();
+    expect(paperCostError(8.75, 1)).toBeNull();
+    expect(paperCostError(8.76, 1)).toMatch(/\$875/);
+    expect(paperCostError(2, 5)).toMatch(/\$875/);
+  });
+
+  it("marks an open trade to the midpoint and leaves a closed trade on its exit", () => {
+    const open = opened({ entryPriceSource: "ask", flowPremium: 162_000 });
+    const marked = withQuoteMark(open, 2.4);
+    expect(marked.markSource).toBe("mid");
+    expect(marked.unrealizedPnl).toBeCloseTo(40);
+    const closed = withQuoteMark(closeAt(open, NOW.getTime() + 1000, 1.5), 2.4);
+    expect(closed.mark).toBeNull();
+    expect(closed.unrealizedPnl).toBeNull();
+    expect(findOpenTradeForAlert([open], open.alertId ?? "")?.id).toBe(open.id);
+    expect(findOpenTradeForAlert([closeAt(open, NOW.getTime() + 1000, 1.5)], open.alertId ?? "")).toBeNull();
   });
 });
 

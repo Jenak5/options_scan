@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { PaperTradeButton } from "@/app/components/PaperTradeButton";
 import { formatContractCost, formatFlowPremium } from "@/app/lib/alertConfig";
 import { arrangeFlowCards, type FlowSort, type RightFilter, type VerdictFilter } from "@/app/components/flowArrange";
 import { defaultTimeStop, planExitsForAsk } from "@/app/lib/exits";
@@ -280,6 +281,20 @@ function FlowCard({ row }: { row: ScoredFlow }) {
           <a href={gateCheckHref(row)} style={{ color: "#06b6d4", fontWeight: 700 }}>Check in Gate</a>
         </div>
       </details>
+      {(verdict?.grade === "A" || verdict?.grade === "B") && (
+        <PaperTradeButton
+          flow={{
+            ticker: row.ticker,
+            putCall: row.putCall,
+            strike: row.strike,
+            expiration: row.expiration,
+            ask: row.ask,
+            grade: verdict.grade,
+            verdict: verdict.verdict,
+            flowPremium: row.notionalPremium,
+          }}
+        />
+      )}
     </article>
   );
 }

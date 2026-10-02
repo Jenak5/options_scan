@@ -135,7 +135,7 @@ Volume snapshots for the flow scanner use the same store, on a separate key. Red
 
 Sent alerts use that same store again. Redis key `oes:alert:records`. Blob pathname `schwab/alert-book.json`, private. The file holds the checklist grade, the quote at send time, and later midpoint checks. It is not a token and it is not encrypted. No new environment variable. If none of the stores are set in production, alerts can still be sent, and the report stays empty.
 
-The trade log uses that store too. Redis key `oes:trade:log`. Blob pathname `schwab/trade-log.json`, private. It holds trades typed by hand: ticker, call or put, strike, expiration, contracts, entry, and later the exit. It is not a token, it is not a broker fill, and nothing new has to be set.
+The trade log uses that store too. Redis key `oes:trade:log`. Blob pathname `schwab/trade-log.json`, private. A paper trade copies an A or B alert: ticker, call or put, strike, expiration, grade, flow premium, the ask as the entry, one contract unless she changes it, the time, and the alert id. A hand-typed row is still allowed. It is not a token, it is not a broker fill, and nothing new has to be set.
 
 ## Estimated flow
 
@@ -194,7 +194,7 @@ Alert Report (session required, same as the other tabs) lists recent alerts and 
 - The underlying stop, time stop, and profit rule have to be filled in. Time and profit start from the exit defaults: take half off at +30% of the debit, stop at -25% of the debit and never more than $875, and be out by 3:00pm Chicago or if the trade is still flat after 60 minutes. A debit spread uses those same percents on the net debit. Change `TRADE_RULES` to tune them.
 - Two losing closes in a row, from the trade log, is a NO for the day. It is not a broker fill log.
 
-`/trades` (session required) is where a trade is entered and later closed. P&L, risk versus $875, the linked alert grade, hold time, and win, loss, or flat are on each row. The stats panel covers win rate, average win and loss, expectancy, P&L by grade and by TAKE, WATCH, and SKIP, and the week. CSV is `GET /api/trades?format=csv`.
+`/trades` (session required) is the paper trade log. An A or B Telegram alert includes a Paper trade link that opens this page for that contract. The Flow card and the Alert Report have a Paper trade button that records the same simulated entry. The entry price is the ask (ask × 100 is the cost of one contract). One contract over $875 is refused, and so is a size whose total cost is over $875. Open trades show mark-to-market P/L from the Schwab midpoint when a quote is available. She can close at that midpoint or type an exit. Stats are split by grade A and grade B: win rate, average win, average loss, and total P/L. Two losing closes in a row stop new paper trades for the Chicago day. CSV is `GET /api/trades?format=csv`. Nothing on this page places an order.
 
 The result also shows the checklist grade for that contract. The Gate's own PASS or NO is unchanged.
 
