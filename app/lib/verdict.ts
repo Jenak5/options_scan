@@ -1,5 +1,14 @@
 import type { OptionContract, PutCall } from "@/app/lib/contract";
-import { ALERT_RULES, LEVEL_RULES, type LetterGrade } from "@/app/lib/alertConfig";
+import {
+  ALERT_RULES,
+  LEVEL_RULES,
+  flowPremiumFit,
+  formatAskPrice,
+  formatContractCost,
+  formatFlowPremium,
+  premiumLimitForAsk,
+  type LetterGrade,
+} from "@/app/lib/alertConfig";
 import { assessEventRisk, type EarningsFact } from "@/app/lib/eventRisk";
 import {
   formatLevelDistance,
@@ -31,11 +40,20 @@ import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 
 /**
  * Alert-time checklist. TAKE, WATCH, or SKIP, plus a letter grade.
- * Liquidity failures and a single contract over the loss cap are SKIP.
+ * Liquidity failures stay SKIP and D. They are never an A or a B.
  * Two losing closes in a row today turn TAKE into STOP for today.
  * A TAKE with exceptional flow, a close strike, room to the next level,
  * a known earnings date after expiration, and no macro release in the
  * contract is an A. An ordinary TAKE is a B.
+ * A and B require about 2 to 6 weeks to expiration. Shorter or longer stays at C or below.
+ * A and B also require an ask of at least the minimum premium, and one long
+ * contract at the ask (ask × 100) at or under the grade cost ceiling.
+ * Cheaper, or more expensive than that ceiling, stays at C or below.
+ * Estimated flow premium (volume × mid × 100) has to clear the A floor for an A
+ * and the B floor for a B. Below the B floor stays at C or below.
+ * One contract over the $450 loss cap names a debit spread. That does not
+ * by itself block A or B while the contract is inside the grade cost ceiling.
+ * The scanner grades single long options. A debit spread's max loss is its width.
  * Missing price history keeps the grade at B.
  * An unknown earnings date also keeps the grade at B.
  * Earnings on or before expiration, and a macro release in that window, each lower the grade.
@@ -168,13 +186,13 @@ export function gradeSetup(input: SetupInput): AlertVerdict {
   const hardSkip = expired
     || input.delayed
     || !market.liquidityPasses
-    || market.exceedsCap
-    || market.maxContracts == null
-    || market.maxContracts < 1;
+    || market.maxContracts == null;
 
   const signals = flowSignals(input);
   const distanceOk = distanceFits(input);
   const dteFit = dteClass(input.dte);
+  const premiumLimit = premiumLimitForAsk(input.ask, input.definedRiskSpread);
+  const flowFit = flowPremiumFit(input.notionalPremium);
   const dailyStop = input.consecutiveLosses != null && !dailyStopPasses(input.consecutiveLosses);
 
   let checklist: "TAKE" | "WATCH" | "SKIP" = "WATCH";
@@ -189,12 +207,19 @@ export function gradeSetup(input: SetupInput): AlertVerdict {
   } else if (take) {
     checklist = "TAKE";
     uncapped = "B";
-  } else if (signals.length >= 1 || dteFit !== "poor" || distanceOk) {
+  } else if (signals.length >= 1 || dteFit === "ideal" || dteFit === "short" || distanceOk) {
     checklist = "WATCH";
     uncapped = "C";
   } else {
     checklist = "WATCH";
     uncapped = "D";
+  }
+
+  if ((premiumLimit != null || flowFit === "below-b") && !hardSkip && checklist === "TAKE") {
+    checklist = "WATCH";
+    uncapped = noHigherThan(uncapped, "C");
+  } else if (flowFit === "below-a") {
+    uncapped = noHigherThan(uncapped, "B");
   }
 
   const levelsRead = assessLevels(input);
@@ -220,7 +245,11 @@ export function gradeSetup(input: SetupInput): AlertVerdict {
   const caps: LetterGrade[] = [];
   if (!levelsRead.checked) caps.push(ALERT_RULES.maxGradeUntilLevels);
   if (event.capGrade) caps.push(event.capGrade);
-  const grade = capGrade(uncapped, caps);
+  let grade = capGrade(uncapped, caps);
+  if (dteFit !== "ideal") grade = noHigherThan(grade, "C");
+  if (premiumLimit != null || flowFit === "below-b") grade = noHigherThan(grade, "C");
+  if (flowFit === "below-a") grade = noHigherThan(grade, "B");
+  if (hardSkip) grade = noHigherThan(grade, "D");
   const verdict: VerdictName = dailyStop && checklist === "TAKE" ? "STOP" : checklist;
   const levelsNote = levelsRead.checked
     ? null
@@ -240,6 +269,7 @@ export function gradeSetup(input: SetupInput): AlertVerdict {
       levelsRead.sentence,
       event.reason,
       input.printSummary ?? null,
+      premiumSentence(input),
     ),
     note: ALERT_RULES.note,
     levels: toStoredLevels(input.levels),
@@ -286,7 +316,7 @@ function flowSignals(input: SetupInput): string[] {
 function qualifiesForA(input: SetupInput, signals: string[]): boolean {
   if (signals.length < ALERT_RULES.aMinFlowSignals) return false;
   if (input.volOiRatio == null || input.volOiRatio < ALERT_RULES.aGradeVolOiRatio) return false;
-  if (input.notionalPremium == null || input.notionalPremium < ALERT_RULES.aGradeNotional) return false;
+  if (flowPremiumFit(input.notionalPremium) !== "ok") return false;
   return distanceIdeal(input);
 }
 
@@ -314,17 +344,21 @@ function itmFraction(input: SetupInput): number | null {
   return Math.abs(input.strike - input.underlyingPrice) / input.underlyingPrice;
 }
 
-function dteClass(dte: number | null): "ideal" | "acceptable" | "poor" {
+function dteClass(dte: number | null): "ideal" | "short" | "long" | "poor" {
   if (dte == null || dte < 0) return "poor";
-  if (dte >= ALERT_RULES.idealDteMin && dte <= ALERT_RULES.idealDteMax) return "ideal";
-  if (dte <= ALERT_RULES.acceptableDteMax) return "acceptable";
-  return "poor";
+  if (dte >= ALERT_RULES.alertDteMin && dte <= ALERT_RULES.alertDteMax) return "ideal";
+  if (dte < ALERT_RULES.alertDteMin) return "short";
+  return "long";
 }
 
 function dropGrade(grade: LetterGrade, steps: number): LetterGrade {
   if (steps <= 0) return grade;
   const next = GRADE_RANK.indexOf(grade) + steps;
   return GRADE_RANK[Math.min(GRADE_RANK.length - 1, next)];
+}
+
+function noHigherThan(grade: LetterGrade, ceiling: LetterGrade): LetterGrade {
+  return GRADE_RANK.indexOf(grade) < GRADE_RANK.indexOf(ceiling) ? ceiling : grade;
 }
 
 function capGrade(grade: LetterGrade, caps: LetterGrade[]): LetterGrade {
@@ -388,6 +422,7 @@ function buildReasons(
   levelSentenceText: string,
   eventReason: string | null,
   printSummary: string | null,
+  premiumText: string | null,
 ): string[] {
   const head: string[] = [];
   if (expired) head.push("This expiration has already passed.");
@@ -399,14 +434,14 @@ function buildReasons(
   }
 
   const tail: string[] = [];
-  if (market.exceedsCap) tail.push(capSentence(input.ask));
-  else tail.push(sizingSentence(market.maxContracts, input.ask));
+  tail.push(timeSentence(input));
   if (verdict === "STOP" && input.consecutiveLosses != null) {
     tail.push(`${input.consecutiveLosses} closed losses in a row today. The daily stop is on, so this is STOP for today instead of TAKE.`);
   } else if (input.consecutiveLosses != null && !dailyStopPasses(input.consecutiveLosses) && verdict === "WATCH") {
     tail.push("The daily stop is on, so this is not a TAKE.");
   }
-  tail.push(timeSentence(input));
+  if (market.exceedsCap) tail.push(capSentence(input.ask));
+  else tail.push(sizingSentence(market.maxContracts, input.ask));
   tail.push(flowSentence(input, signalCount));
 
   const unique: string[] = [];
@@ -418,8 +453,10 @@ function buildReasons(
   }
   const eventText = eventReason?.trim() ?? "";
   const printText = printSummary?.trim() ?? "";
-  const rest = unique.filter((line) => line !== levelSentenceText && line !== eventText && line !== printText);
+  const priceText = premiumText?.trim() ?? "";
+  const rest = unique.filter((line) => line !== levelSentenceText && line !== eventText && line !== printText && line !== priceText);
   const picked: string[] = [];
+  if (priceText) picked.push(priceText);
   if (rest.length > 0) picked.push(rest[0]);
   if (levelSentenceText.trim()) picked.push(levelSentenceText.trim());
   if (eventText) picked.push(eventText);
@@ -427,6 +464,31 @@ function buildReasons(
   for (let i = 1; i < rest.length && picked.length < 4; i++) picked.push(rest[i]);
   if (picked.length < 2) picked.push(ALERT_RULES.note);
   return picked.slice(0, 4);
+}
+
+function premiumSentence(input: SetupInput): string | null {
+  const limit = premiumLimitForAsk(input.ask, input.definedRiskSpread);
+  const flow = flowPremiumFit(input.notionalPremium);
+  const parts: string[] = [];
+  if (limit === "cheap") {
+    if (!Number.isFinite(input.ask) || !(input.ask > 0)) {
+      parts.push(`The ask is missing, so this cannot be priced. Under ${formatAskPrice(ALERT_RULES.minContractPremium)} is too cheap for an A or a B.`);
+    } else {
+      parts.push(`The ask is ${formatAskPrice(input.ask)}, about ${formatContractCost(input.ask)} a contract. Under ${formatAskPrice(ALERT_RULES.minContractPremium)} is too cheap for an A or a B.`);
+    }
+  } else if (limit === "expensive") {
+    parts.push(`One contract costs ${formatContractCost(input.ask)}, over the $${ALERT_RULES.maxContractCost} grade ceiling, so this cannot be an A or a B. ${DEBIT_SPREAD_SUGGESTION}`);
+  }
+  if (flow === "below-b") {
+    const shown = input.notionalPremium == null
+      ? "Flow premium cannot be priced"
+      : `Flow premium is about ${compactDollars(input.notionalPremium)}`;
+    parts.push(`${shown}. An A needs at least ${formatFlowPremium(ALERT_RULES.aMinFlowPremium)} and a B needs at least ${formatFlowPremium(ALERT_RULES.bMinFlowPremium)}.`);
+  } else if (flow === "below-a" && input.notionalPremium != null) {
+    parts.push(`Flow premium is about ${compactDollars(input.notionalPremium)}. An A needs at least ${formatFlowPremium(ALERT_RULES.aMinFlowPremium)}, so this stays a B or lower.`);
+  }
+  if (parts.length === 0) return null;
+  return parts.join(" ");
 }
 
 function capSentence(ask: number): string {
@@ -449,8 +511,8 @@ function flowSentence(input: SetupInput, signalCount: number): string {
     ? `volume is ${input.volOiRatio.toFixed(2)}× open interest`
     : "volume versus open interest is unknown";
   const notional = input.notionalPremium != null
-    ? `notional is about ${compactDollars(input.notionalPremium)}`
-    : "notional cannot be priced";
+    ? `flow premium is about ${compactDollars(input.notionalPremium)}`
+    : "flow premium cannot be priced";
   let sentence = `${capitalize(ratio)}, ${notional}, and the last price is ${input.side}.`;
   if (input.volumeJump != null && input.volumeJump >= ALERT_RULES.strongVolumeJump) {
     sentence += ` Volume is up ${Math.round(input.volumeJump).toLocaleString("en-US")} since the last scan.`;
@@ -477,19 +539,19 @@ function timeSentence(input: SetupInput): string {
     return `${when}, and distance from the money is unknown.`;
   }
   if (dte === "ideal" && distanceFits(input)) {
-    return `${when}, and ${where}. That fits a short hold.`;
+    return `${when}, and ${where}. That fits the ${ALERT_RULES.alertDteMin}–${ALERT_RULES.alertDteMax} day window.`;
   }
   if (input.dte === 0) {
-    return `${when}, and ${where}. Same-day expiration is too short to call it a TAKE.`;
+    return `${when}, and ${where}. Same-day expiration is too short for an A or a B.`;
   }
   if (!distanceFits(input)) {
     return `${when}, and ${where}. That distance is outside the range for a TAKE.`;
   }
-  if (dte === "acceptable") {
-    return `${when}, and ${where}. That is outside the ${ALERT_RULES.idealDteMin}–${ALERT_RULES.idealDteMax} day window for a TAKE.`;
+  if (dte === "short") {
+    return `${when}, and ${where}. Under ${ALERT_RULES.alertDteMin} days is too short for an A or a B.`;
   }
-  if (dte === "poor" && input.dte != null && input.dte > ALERT_RULES.acceptableDteMax) {
-    return `${when}, and ${where}. That is longer than a quick hold.`;
+  if (dte === "long") {
+    return `${when}, and ${where}. Past ${ALERT_RULES.alertDteMax} days is outside the window for an A or a B.`;
   }
   return `${when}, and ${where}.`;
 }

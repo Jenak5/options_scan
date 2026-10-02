@@ -1,15 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
-import { OUTCOME_RULES } from "@/app/lib/alertConfig";
+import { OUTCOME_RULES, alertScanMinPremium, alertsPerDayLimit, formatContractPriceLine, formatFlowPremium, isAlertGrade } from "@/app/lib/alertConfig";
 import { runAlertFollowUps } from "@/app/lib/alertFollowUp";
-import { currentDailyLoss, rememberSentAlert, wasSentToday } from "@/app/lib/alertStore";
+import {
+  alertSetupKey,
+  chooseAlerts,
+  gradeAlertCandidates,
+  indexSentAlerts,
+  screenQueueLimit,
+} from "@/app/lib/alertPolicy";
+import { currentDailyLoss, loadAlertBook, rememberSentAlert } from "@/app/lib/alertStore";
 import { hasValidBearer } from "@/app/lib/auth";
 import { selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
-import { isChicagoMarketHours, isChicagoMinuteWindow } from "@/app/lib/marketHours";
+import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { planExitsForAsk } from "@/app/lib/exits";
 import { formatVerdictHtml } from "@/app/lib/telegram";
-import { gradeFlowRow, type AlertVerdict } from "@/app/lib/verdict";
+import type { AlertVerdict } from "@/app/lib/verdict";
 import { formatVolArbSummary, type VolArbReading, type VolSignal } from "@/app/lib/volArb";
 import { scanVolArb } from "@/app/lib/volScan";
 
@@ -21,6 +28,7 @@ import { scanVolArb } from "@/app/lib/volScan";
 // 8:30am–3:00pm America/Chicago, Monday–Friday.
 //
 // Auth is Authorization: Bearer <CRON_SECRET> only. A query secret is ignored.
+// Telegram and the alert book get letter A and B only, capped per Chicago day.
 //
 // Required Vercel environment variables (store secrets as Sensitive):
 //   XAI_API_KEY               — Grok for screening
@@ -33,8 +41,10 @@ import { scanVolArb } from "@/app/lib/volScan";
 const XAI_API = "https://api.x.ai/v1/chat/completions";
 const TG_API  = (token: string) => `https://api.telegram.org/bot${token}`;
 
-// Best-effort in-memory dedup. A cold start can repeat an alert.
-const alertedIds = new Set<string>();
+// Best-effort dedupe for this process. The alert book is the record that survives a cold start.
+// Keys are `${Chicago date}|${contract id}` and `${Chicago date}|${setup key}`.
+const handledContractIds = new Set<string>();
+const handledSetupKeys = new Set<string>();
 
 const INDEX_ETFS = new Set(["SPY", "QQQ", "IWM", "DIA", "XSP", "SPXW", "SPX", "VIX", "NDX", "RUT"]);
 
@@ -43,14 +53,12 @@ async function screenWithGrok(row: FlowRow, volSignal: string): Promise<{ clean:
   const apiKey = process.env.XAI_API_KEY;
   if (!apiKey) return { clean: true, reason: "No XAI key — skipping screen" };
 
-  const premium = row.notionalPremium ?? 0;
-  const premStr = premium >= 1_000_000
-    ? `$${(premium / 1_000_000).toFixed(1)}M`
-    : `$${(premium / 1_000).toFixed(0)}K`;
+  const premStr = formatFlowPremium(row.notionalPremium);
 
   const prompt = `Estimated options flow (not a sweep) on ${row.ticker} ${(row.putCall).toUpperCase()}:
 - Strike: $${row.strike}, Expiry: ${row.expiration}
-- Notional (volume × mid × 100): ${premStr}
+- Flow premium (volume × mid × 100): ${premStr}
+- ${formatContractPriceLine(row.ask)}
 - Estimated side: ${row.side}
 - Vol/OI: ${row.volOiRatio != null ? row.volOiRatio.toFixed(2) : "n/a"}
 - Vol Arb signal: ${volSignal}
@@ -95,10 +103,7 @@ function convictionFor(ticker: string, signal: VolSignal | null): { emoji: strin
 }
 
 function formatAlert(row: FlowRow, volSummary: string, signal: VolSignal | null, grokNote: string, verdict: AlertVerdict): string {
-  const premium = row.notionalPremium ?? 0;
-  const premStr = premium >= 1_000_000
-    ? `$${(premium / 1_000_000).toFixed(1)}M`
-    : `$${(premium / 1_000).toFixed(0)}K`;
+  const premStr = formatFlowPremium(row.notionalPremium);
   const typeEmoji = row.putCall === "call" ? "🟢" : "🔴";
   const conviction = convictionFor(row.ticker, signal);
 
@@ -112,7 +117,8 @@ ${formatVerdictHtml(verdict)}
 ${conviction.emoji} <b>${conviction.tier}</b>
 Estimated flow from Schwab volume/open interest, not a sweep.
 
-💰 <b>${premStr}</b> notional
+💰 <b>${premStr}</b> flow premium (volume × mid × 100)
+💵 ${escapeHtml(formatContractPriceLine(row.ask))}
 🎯 Strike <b>$${row.strike}</b> · Exp <b>${row.expiration}</b>
 📊 ${escapeHtml(row.side)} · ${ratio} · IV ${iv} · OI ${oi}
 ${row.prints?.summary ? `🖨 ${escapeHtml(row.prints.summary)}\n` : ""}${exitText(row.ask, verdict.maxContracts)}📈 Vol Arb: <b>${escapeHtml(volSummary)}</b> — ${conviction.note}
@@ -130,6 +136,19 @@ function exitText(ask: number, maxContracts: number | null): string {
 
 function escapeHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function dayKey(tradingDay: string, key: string): string {
+  return `${tradingDay}|${key}`;
+}
+
+function mergeDayKeys(tradingDay: string, fromBook: ReadonlySet<string>, memory: ReadonlySet<string>): Set<string> {
+  const merged = new Set(fromBook);
+  const prefix = `${tradingDay}|`;
+  memory.forEach((value) => {
+    if (value.startsWith(prefix)) merged.add(value.slice(prefix.length));
+  });
+  return merged;
 }
 
 async function sendTelegram(message: string): Promise<boolean> {
@@ -196,24 +215,36 @@ export async function GET(request: NextRequest) {
     }
     log.push(`Scored ${scan.rows.length} contracts across ${scan.watchlist.length} tickers${scan.cached ? " (cached)" : ""}`);
 
-    const minPremium = Number(process.env.ALERT_MIN_PREMIUM || "100000");
+    const minPremium = alertScanMinPremium(process.env.ALERT_MIN_PREMIUM);
     const otmOnly = process.env.ALERT_OTM_ONLY === "true";
+    const maxPerDay = alertsPerDayLimit(process.env.ALERT_MAX_PER_DAY);
+    const tradingDay = chicagoDate(now);
     const candidates = selectAlertRows(scan.rows, {
-      minPremium: Number.isFinite(minPremium) ? minPremium : 100_000,
+      minPremium,
       otmOnly,
-      limit: 40,
-    }).filter((row) => !alertedIds.has(row.id));
+      limit: 80,
+    });
+    const graded = gradeAlertCandidates(candidates, losses, now);
+    const sent = indexSentAlerts((await loadAlertBook()).records, tradingDay);
+    const room = Math.max(0, maxPerDay - sent.count);
+    const queued = chooseAlerts({
+      candidates: graded,
+      alreadySentContractKeys: mergeDayKeys(tradingDay, sent.contracts, handledContractIds),
+      alreadySentSetupKeys: mergeDayKeys(tradingDay, sent.setups, handledSetupKeys),
+      limit: screenQueueLimit(room),
+    });
 
+    const alertable = graded.filter((item) => item.verdict.verdict === "TAKE" && isAlertGrade(item.verdict.grade)).length;
     log.push(`Liquidity + premium filter passed ${candidates.length}`);
+    log.push(`Graded ${graded.length}; ${alertable} are A or B; ${queued.length} new one${queued.length === 1 ? "" : "s"} to screen`);
+    log.push(`Daily cap ${maxPerDay}, ${sent.count} already saved today, room for ${room}`);
 
-    const alertedThisRun = new Set<string>();
-    const queued = candidates.slice(0, 8);
     const volByTicker = new Map<string, VolArbReading>();
     const volMiss = new Map<string, string>();
     const symbols: string[] = [];
     const seenTickers = new Set<string>();
     for (let i = 0; i < queued.length; i++) {
-      const ticker = queued[i].ticker;
+      const ticker = queued[i].row.ticker;
       if (seenTickers.has(ticker)) continue;
       seenTickers.add(ticker);
       symbols.push(ticker);
@@ -229,14 +260,23 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    for (const row of queued) {
-      if (alertedThisRun.has(row.ticker)) {
-        log.push(`${row.ticker}: skipped — already alerted this run`);
-        continue;
+    for (const item of queued) {
+      if (alertsSent >= room) {
+        log.push("Daily alert cap reached");
+        break;
       }
-      if (await wasSentToday(row.id, now)) {
-        alertedIds.add(row.id);
-        log.push(`${row.ticker}: skipped — this contract was already saved today`);
+      const row = item.row;
+      const verdict = item.verdict;
+      const setup = alertSetupKey(row);
+      const latest = indexSentAlerts((await loadAlertBook()).records, tradingDay);
+      const sentContracts = mergeDayKeys(tradingDay, latest.contracts, handledContractIds);
+      const sentSetups = mergeDayKeys(tradingDay, latest.setups, handledSetupKeys);
+      if (latest.count >= maxPerDay) {
+        log.push("Daily alert cap reached");
+        break;
+      }
+      if (sentContracts.has(row.id) || sentSetups.has(setup)) {
+        log.push(`${row.ticker}: skipped — this ${row.putCall} expiring ${row.expiration} was already alerted today`);
         continue;
       }
 
@@ -248,7 +288,7 @@ export async function GET(request: NextRequest) {
       log.push(`${row.ticker}: vol ${volSummary}`);
 
       const { clean, reason } = await screenWithGrok(row, volSummary);
-      alertedIds.add(row.id);
+      handledContractIds.add(dayKey(tradingDay, row.id));
 
       if (!clean) {
         log.push(`${row.ticker}: Grok flagged — ${reason}`);
@@ -256,11 +296,10 @@ export async function GET(request: NextRequest) {
       }
       log.push(`${row.ticker}: Grok clean — ${reason}`);
 
-      const verdict = gradeFlowRow(row, losses);
-      const sent = await sendTelegram(formatAlert(row, volSummary, signal, reason, verdict));
-      if (sent) {
+      const delivered = await sendTelegram(formatAlert(row, volSummary, signal, reason, verdict));
+      if (delivered) {
         alertsSent++;
-        alertedThisRun.add(row.ticker);
+        handledSetupKeys.add(dayKey(tradingDay, setup));
         const saved = await rememberSentAlert(row, verdict, now);
         log.push(saved
           ? `${row.ticker}: Telegram alert sent and saved (${verdict.verdictLabel} ${verdict.grade})`

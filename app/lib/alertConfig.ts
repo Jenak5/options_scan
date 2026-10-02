@@ -37,16 +37,23 @@ export const ALERT_RULES = {
    */
   aGradeVolOiRatio: 2,
   /**
-   * Notional required for an A.
-   * The flow signal itself uses the lower strongNotional.
+   * Estimated flow premium (volume × mid × 100) required for an A.
+   * The $100,000 / $50,000 A/B split is an assumption. The flow signal
+   * itself still uses the lower strongNotional.
    */
-  aGradeNotional: 500_000,
+  aMinFlowPremium: 100_000,
+  /**
+   * Estimated flow premium required for a B.
+   * Below this cannot be an A or a B.
+   */
+  bMinFlowPremium: 50_000,
 
-  /** Inclusive days-to-expiration window for a quick short hold. */
-  idealDteMin: 1,
-  idealDteMax: 10,
-  /** Still a short-hold candidate, but not enough on its own for TAKE. */
-  acceptableDteMax: 21,
+  /**
+   * Inclusive days to expiration for an A or a B.
+   * 14 to 42 is about 2 to 6 weeks. Shorter or longer stays C or below.
+   */
+  alertDteMin: 14,
+  alertDteMax: 42,
 
   /** Out-of-the-money fraction at or under this is close enough for an A. */
   idealOtmFraction: 0.05,
@@ -55,8 +62,126 @@ export const ALERT_RULES = {
   /** In-the-money fraction above this is too expensive for this account. */
   maxItmFraction: 0.03,
 
+  /**
+   * Ask below this cannot be an A or a B.
+   * 0.50 is $50 a contract. Cheaper than that is a lottery ticket.
+   */
+  minContractPremium: 0.50,
+  /**
+   * One long contract costs ask × 100. Above this cannot be an A or a B.
+   * $8.75 ask is $875. That sits above the $450 account loss cap on purpose,
+   * so a quality contract is not thrown out of A or B. The Gate still sizes
+   * to $450 and names a debit spread when one contract is over that cap.
+   * The scanner does not grade spreads. A debit spread's max loss is the width.
+   */
+  maxContractCost: 875,
+
   note: "Rules checklist only. This is not a prediction of profit.",
 };
+
+/** Ask × 100 for one long contract. Null when the ask cannot be priced. */
+export function longContractCost(ask: number): number | null {
+  if (!Number.isFinite(ask) || !(ask > 0)) return null;
+  return ask * 100;
+}
+
+export type PremiumLimit = "cheap" | "expensive";
+
+/**
+ * Single long options are priced at the ask.
+ * A defined-risk spread is not judged by ask × 100, because its max loss is the width.
+ */
+export function premiumLimitForAsk(ask: number, definedRiskSpread = false): PremiumLimit | null {
+  if (!Number.isFinite(ask) || !(ask > 0) || ask < ALERT_RULES.minContractPremium) return "cheap";
+  if (!definedRiskSpread && ask * 100 > ALERT_RULES.maxContractCost) return "expensive";
+  return null;
+}
+
+export function formatAskPrice(ask: number): string {
+  return `$${ask.toFixed(2)}`;
+}
+
+export function formatContractCost(ask: number): string {
+  const cost = longContractCost(ask);
+  if (cost == null) return "—";
+  const nearest = Math.round(cost);
+  if (Math.abs(cost - nearest) < 0.05) return `$${nearest.toLocaleString("en-US")}`;
+  return `$${cost.toFixed(2)}`;
+}
+
+/** Ask and the dollars one long contract costs. This is the contract price, not flow premium. */
+export function formatContractPriceLine(ask: number): string {
+  if (longContractCost(ask) == null) return "Ask is not priced.";
+  return `Ask ${formatAskPrice(ask)} · ${formatContractCost(ask)} a contract`;
+}
+
+/**
+ * Estimated flow premium for display.
+ * Same dollars as volume × midpoint × 100 on a Flow row.
+ */
+export function formatFlowPremium(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value) || value < 0) return "—";
+  if (value >= 1_000_000) {
+    const millions = value / 1_000_000;
+    const digits = millions >= 10 ? 0 : 1;
+    return `$${millions.toFixed(digits)}M`;
+  }
+  if (value >= 1_000) return `$${Math.round(value / 1_000).toLocaleString("en-US")}K`;
+  return `$${Math.round(value).toLocaleString("en-US")}`;
+}
+
+export type FlowPremiumFit = "below-b" | "below-a" | "ok";
+
+/** Below the B floor cannot be an A or a B. Between the floors can be a B, not an A. */
+export function flowPremiumFit(notional: number | null): FlowPremiumFit {
+  if (notional == null || !Number.isFinite(notional) || notional < ALERT_RULES.bMinFlowPremium) return "below-b";
+  if (notional < ALERT_RULES.aMinFlowPremium) return "below-a";
+  return "ok";
+}
+
+/**
+ * ALERT_MIN_PREMIUM filters candidates before grading.
+ * Unset uses the B floor so a B is not dropped before the letter is assigned.
+ */
+export function alertScanMinPremium(raw: string | undefined): number {
+  if (raw == null || raw.trim() === "") return ALERT_RULES.bMinFlowPremium;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return ALERT_RULES.bMinFlowPremium;
+  return parsed;
+}
+
+/**
+ * Which grades leave the scanner.
+ * Change a number here to change Telegram and the alert book.
+ * ALERT_MAX_PER_DAY overrides maxPerDay when it is a whole number in range.
+ */
+export const ALERT_POLICY = {
+  /** Letters that may be sent and stored. C and D stay on the Flow tab. */
+  alertGrades: ["A", "B"] as readonly LetterGrade[],
+  /** Default cap for one Chicago trading day. A is chosen before B. */
+  maxPerDay: 5,
+  /** ALERT_MAX_PER_DAY outside 1..maxPerDayCeiling is ignored. */
+  maxPerDayCeiling: 50,
+  /**
+   * Extra A/B setups the cron may screen in one run when Grok flags one.
+   * Successful sends still stop at the daily cap.
+   */
+  screenBuffer: 4,
+};
+
+export function isAlertGrade(grade: string): boolean {
+  return (ALERT_POLICY.alertGrades as readonly string[]).indexOf(grade) !== -1;
+}
+
+/** Whole number from the env var, or the default cap when the value is unset or out of range. */
+export function alertsPerDayLimit(raw: string | undefined): number {
+  if (raw == null || raw.trim() === "") return ALERT_POLICY.maxPerDay;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > ALERT_POLICY.maxPerDayCeiling) {
+    return ALERT_POLICY.maxPerDay;
+  }
+  return parsed;
+}
 
 /**
  * How nearby price levels change the checklist.
@@ -261,14 +386,20 @@ export const EVENT_RULES = {
  * so the sentence cannot drift from the checklist.
  */
 export function gradeARubric(): string {
-  const notional = `$${Math.round(ALERT_RULES.aGradeNotional / 1000).toLocaleString("en-US")}K`;
+  const aFlow = formatFlowPremium(ALERT_RULES.aMinFlowPremium);
+  const bFlow = formatFlowPremium(ALERT_RULES.bMinFlowPremium);
   const otm = Math.round(ALERT_RULES.idealOtmFraction * 100);
   const itm = Math.round(ALERT_RULES.maxItmFraction * 100);
   const levelsCap = ALERT_RULES.maxGradeUntilLevels;
   const earningsCap = EVENT_RULES.maxGradeUntilEarnings;
-  return `An A is a TAKE that is one of the best setups of the day, not every contract that passes the checklist. It needs live quotes, open interest, volume, and a bid-ask spread that pass the Gate, and at least one contract under the $${MAX_LOSS_DOLLARS} loss cap. Expiration is ${ALERT_RULES.idealDteMin} to ${ALERT_RULES.idealDteMax} days, and the strike is within ${otm}% out of the money or ${itm}% in the money. Flow is exceptional: at least ${ALERT_RULES.aMinFlowSignals} of the 4 signals (volume versus open interest, notional, a last trade at the ask, and a same-day volume jump), with volume at least ${ALERT_RULES.aGradeVolOiRatio}× open interest and notional at least ${notional}. Support and resistance are computed and leave room to the next level. The earnings date is known, or the ticker has no earnings calendar, and that date falls after expiration. No listed macro release falls on or before expiration. Missing price levels, an unknown earnings date, earnings or a macro release inside the contract, ordinary flow, or a farther strike leaves the letter at ${levelsCap} or lower. If price history is unavailable, the grade stops at ${levelsCap}. If the earnings date is unknown, the grade stops at ${earningsCap}. A liquidity failure, a single contract over the cap, delayed quotes, and an expired contract stay SKIP. Two losing closes stay STOP for today instead of TAKE. An A is never shown when the levels or the earnings date are missing.`;
+  return `An A is a TAKE that is one of the best setups of the day, not every contract that passes the checklist. It needs live quotes, open interest, volume, and a bid-ask spread that pass the Gate. The ask has to be at least $${ALERT_RULES.minContractPremium.toFixed(2)}. One long contract at the ask (ask × 100) can cost up to $${ALERT_RULES.maxContractCost} and still be an A or a B. A cheaper ask, or a contract that costs more than that, cannot be an A or a B. The account loss cap stays $${MAX_LOSS_DOLLARS}. One contract over that cap names a debit spread, and it does not by itself block the letter when the contract costs $${ALERT_RULES.maxContractCost} or less. Flow premium is estimated as volume × midpoint × 100, not an exchange-reported sweep. An A needs at least ${aFlow} of that flow premium. A B needs at least ${bFlow}. Below ${bFlow} cannot be an A or a B. Expiration is ${ALERT_RULES.alertDteMin} to ${ALERT_RULES.alertDteMax} days, about 2 to 6 weeks, and the strike is within ${otm}% out of the money or ${itm}% in the money. A contract under ${ALERT_RULES.alertDteMin} days, or past ${ALERT_RULES.alertDteMax} days, cannot be an A or a B. Flow is exceptional: at least ${ALERT_RULES.aMinFlowSignals} of the 4 signals (volume versus open interest, flow premium, a last trade at the ask, and a same-day volume jump), with volume at least ${ALERT_RULES.aGradeVolOiRatio}× open interest and flow premium at least ${aFlow}. Support and resistance are computed and leave room to the next level. The earnings date is known, or the ticker has no earnings calendar, and that date falls after expiration. No listed macro release falls on or before expiration. Missing price levels, an unknown earnings date, earnings or a macro release inside the contract, ordinary flow, or a farther strike leaves the letter at ${levelsCap} or lower. If price history is unavailable, the grade stops at ${levelsCap}. If the earnings date is unknown, the grade stops at ${earningsCap}. A liquidity failure, delayed quotes, and an expired contract stay SKIP and cannot be an A or a B. Two losing closes stay STOP for today instead of TAKE. An A is never shown when the levels or the earnings date are missing.`;
+}
+
+/** Shown with the checklist so the Flow tab and the rubric agree about what is sent. */
+export function alertDeliveryNote(): string {
+  return `Only an A or a B is sent to Telegram or saved in the alert book. At most ${ALERT_POLICY.maxPerDay} alerts go out on a Chicago trading day unless ALERT_MAX_PER_DAY sets another cap from 1 to ${ALERT_POLICY.maxPerDayCeiling}, and an A is sent before a B. The same ticker, call or put, and expiration is not alerted again that day. A C or a D can still show on the Flow tab.`;
 }
 
 export function verdictBanner(): string {
-  return `Checklist for a $${ACCOUNT_SIZE_DOLLARS.toLocaleString("en-US")} account with a $${MAX_LOSS_DOLLARS} loss cap. Not a prediction of profit. ${gradeARubric()}`;
+  return `Checklist for a $${ACCOUNT_SIZE_DOLLARS.toLocaleString("en-US")} account with a $${MAX_LOSS_DOLLARS} loss cap. Not a prediction of profit. ${alertDeliveryNote()} ${gradeARubric()}`;
 }

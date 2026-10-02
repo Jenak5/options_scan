@@ -64,7 +64,7 @@ function row(over: Partial<FlowRow> = {}): FlowRow {
     otmPoints: 4,
     otmFraction: 0.04,
     otm: true,
-    dte: 7,
+    dte: 21,
     spreadFraction: 0.025,
     spreadQuality: "acceptable",
     side: "estimated at ask",

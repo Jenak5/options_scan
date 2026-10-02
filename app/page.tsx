@@ -3,7 +3,9 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { FlowTab } from "@/app/components/FlowTab";
 import { SchwabBanner } from "@/app/components/SchwabBanner";
+import { formatContractPriceLine, formatFlowPremium } from "@/app/lib/alertConfig";
 import type { AlertSummary, StoredAlert } from "@/app/lib/alertBook";
+import { notionalPremium } from "@/app/lib/flow";
 import { formatLevelsSummary } from "@/app/lib/levels";
 import { planExitsForAsk } from "@/app/lib/exits";
 import { ACCOUNT_SIZE_DOLLARS, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
@@ -596,6 +598,7 @@ function AlertsTab() {
     { name: "TELEGRAM_BOT_TOKEN",       note: "From @BotFather" },
     { name: "TELEGRAM_CHAT_ID",         note: "Your chat ID" },
     { name: "FLOW_WATCHLIST",           note: "Optional ticker list for the flow scan" },
+    { name: "ALERT_MAX_PER_DAY",        note: "Optional · A/B alerts per day, default 5" },
     { name: "SCHWAB_CLIENT_ID",         note: "Sensitive · Market Data app key" },
     { name: "SCHWAB_CLIENT_SECRET",     note: "Sensitive · Market Data secret" },
     { name: "SCHWAB_REDIRECT_URI",      note: "Sensitive · must match the callback URL" },
@@ -616,10 +619,12 @@ function AlertsTab() {
         <div style={{ fontSize: 14, fontWeight: 700, color: "#06b6d4", marginBottom: 10 }}>How it works</div>
         {[
           "Every 15 min on weekdays, from 8:30am to 3:00pm Central, the scanner reads Schwab chains for the watchlist. Outside that window it exits.",
-          "Alerts only on contracts that pass the gate liquidity filters: open interest at least 500, volume at least 100, and spread at most 5% of mid. Notional still has to clear ALERT_MIN_PREMIUM.",
-          "Side is estimated from the last price versus the bid and ask. This is not a sweep.",
-          "Cross-checks the ticker's vol arb signal and asks Grok to screen for red flags (earnings, FDA, news).",
-          "If it is still a candidate, sends a Telegram alert with a TAKE, WATCH, or SKIP checklist grade, plus the exit defaults. Two losing closes in a row in the trade log today show STOP for today instead of TAKE.",
+          "Considers contracts that pass the gate liquidity filters: open interest at least 500, volume at least 100, and spread at most 5% of mid. Estimated flow premium (volume × mid × 100) still has to clear ALERT_MIN_PREMIUM, which defaults to $50,000. Illiquid contracts never grade A or B.",
+          "Side is estimated from the last price versus the bid and ask. This is not a sweep. Flow premium is that volume estimate, not an exchange-reported sweep.",
+          "Grades every candidate. Only a TAKE graded A or B can alert. An A needs at least $100,000 of flow premium and a B needs at least $50,000. The ask has to be at least $0.50, and one contract can cost up to $875. Expiration is about 2 to 6 weeks out (14 to 42 days). C and D stay on the Flow tab.",
+          "Sends at most 5 Telegram alerts per Chicago day unless ALERT_MAX_PER_DAY says otherwise. An A goes out before a B. The same ticker, call or put, and expiration is not sent again that day.",
+          "Cross-checks the ticker's vol arb signal and asks Grok to screen for red flags (earnings, FDA, news) before that send.",
+          "The message includes the checklist grade and the exit defaults. Two losing closes in a row turn TAKE into STOP for today, and that STOP is not sent.",
           "The same cron later re-quotes the mid at about 15 minutes, 1 hour, and the close. Alert Report compares those mids. That is an estimate, not a fill.",
         ].map((step, i) => (
           <div key={i} style={{ display: "flex", gap: 10, marginBottom: 6, fontSize: 14, color: "#94a3b8" }}>
@@ -902,7 +907,7 @@ function AlertReportTab() {
     <div>
       <div style={{ fontSize: 17, fontWeight: 700, color: "#e2e8f0", marginBottom: 6 }}>Alert Report</div>
       <div style={{ fontSize: 14, color: "#94a3b8", lineHeight: 1.5, marginBottom: 8, maxWidth: 760 }}>
-        Each saved alert keeps the checklist grade from the moment Telegram accepted it. Later rows are a midpoint check at about 15 minutes, 1 hour, and the same-day close.
+        Each saved alert is an A or a B from the moment Telegram accepted it. C and D are not stored. Later rows are a midpoint check at about 15 minutes, 1 hour, and the same-day close.
       </div>
       {report && (
         <div style={{ fontSize: 13, color: "#64748b", lineHeight: 1.5, marginBottom: 16, maxWidth: 760 }}>
@@ -984,7 +989,7 @@ function AlertReportTab() {
                 {report.alerts.length === 0 && (
                   <tr>
                     <td colSpan={7} style={{ ...TD, textAlign: "center", color: "#475569" }}>
-                      No alerts saved yet. The cron stores one when Telegram accepts a message.
+                      No alerts saved yet. The cron stores one when Telegram accepts an A or a B.
                     </td>
                   </tr>
                 )}
@@ -1002,6 +1007,12 @@ function AlertReportTab() {
                     <td style={TD_MONO}>
                       <div style={{ color: "#e2e8f0", fontWeight: 700 }}>{alert.ticker} {alert.putCall.toUpperCase()}</div>
                       <div style={{ color: "#94a3b8" }}>${alert.strike} · {alert.expiration}</div>
+                      <div style={{ color: "#64748b", fontSize: 12 }}>
+                        {formatContractPriceLine(alert.ask)}
+                      </div>
+                      <div style={{ color: "#64748b", fontSize: 12 }}>
+                        flow premium {formatFlowPremium(notionalPremium(alert.volume, alert.mid))}
+                      </div>
                       <div style={{ color: "#64748b", fontSize: 12 }}>
                         mid {alert.mid == null ? "—" : alert.mid.toFixed(2)} · underlying {alert.underlyingPrice == null ? "—" : alert.underlyingPrice.toFixed(2)}
                       </div>

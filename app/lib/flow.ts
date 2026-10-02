@@ -1,7 +1,7 @@
 import type { OptionContract, PutCall } from "@/app/lib/contract";
 import type { EarningsFact } from "@/app/lib/eventRisk";
 import type { KeyLevels } from "@/app/lib/levels";
-import { PRINT_RULES } from "@/app/lib/alertConfig";
+import { ALERT_RULES, PRINT_RULES } from "@/app/lib/alertConfig";
 import { checkBidAskSpread, openInterestPasses, volumePasses } from "@/app/lib/gate";
 import {
   detectPrints,
@@ -34,10 +34,15 @@ export const DEFAULT_FLOW_WATCHLIST = [
 /** Near-the-money strikes above and below the underlying. Sent as strikeCount. */
 export const FLOW_STRIKE_COUNT = 6;
 
-/** Schwab has no "expiration count" parameter. The request uses this date window, then scoring keeps the nearest expirations. */
-export const FLOW_DATE_WINDOW_DAYS = 35;
+/**
+ * Schwab has no "expiration count" parameter. The request uses this date window,
+ * about six weeks, then scoring keeps expirations that can grade A or B
+ * ahead of the very short-dated ones.
+ */
+export const FLOW_DATE_WINDOW_DAYS = 45;
 
-export const FLOW_MAX_EXPIRATIONS = 4;
+/** Enough for a few expirations a week across the 2–6 week window, plus shorter dates for review. */
+export const FLOW_MAX_EXPIRATIONS = 24;
 
 export const FLOW_MAX_WATCHLIST = 20;
 
@@ -178,8 +183,8 @@ export function calendarDaysBetween(fromYmd: string, toYmd: string): number | nu
 }
 
 /**
- * Chain request limited to near-the-money strikes and a short date window.
- * Still only the chains endpoint. Scoring then keeps the nearest expirations.
+ * Chain request limited to near-the-money strikes and about six weeks of expirations.
+ * Still only the chains endpoint. Scoring then prefers the 2–6 week window.
  */
 export function flowChainRequest(symbol: string, now: Date): {
   symbol: string;
@@ -306,6 +311,34 @@ export function liquidityOf(contract: OptionContract): LiquidityResult {
   };
 }
 
+/**
+ * Drop expired contracts, then keep up to `count` expirations.
+ * Dates inside the A/B window come first, then shorter dates, then anything further out.
+ */
+export function keepScanExpirations(
+  contracts: OptionContract[],
+  count: number,
+  today: string,
+): OptionContract[] {
+  const dates = new Set<string>();
+  for (let i = 0; i < contracts.length; i++) {
+    const expiration = contracts[i].expiration;
+    if (expiration >= today) dates.add(expiration);
+  }
+  const ranked: { expiration: string; rank: number; dte: number }[] = [];
+  dates.forEach((expiration) => {
+    const dte = calendarDaysBetween(today, expiration);
+    const days = dte == null ? 9_999 : dte;
+    let rank = 2;
+    if (days >= ALERT_RULES.alertDteMin && days <= ALERT_RULES.alertDteMax) rank = 0;
+    else if (days >= 0 && days < ALERT_RULES.alertDteMin) rank = 1;
+    ranked.push({ expiration, rank, dte: days });
+  });
+  ranked.sort((a, b) => a.rank - b.rank || a.dte - b.dte || a.expiration.localeCompare(b.expiration));
+  const allowed = new Set(ranked.slice(0, Math.max(0, count)).map((row) => row.expiration));
+  return contracts.filter((contract) => allowed.has(contract.expiration));
+}
+
 export function keepNearestExpirations(
   contracts: OptionContract[],
   count: number,
@@ -333,7 +366,7 @@ export function scoreChain(input: {
   livePoints?: Record<string, FlowQuotePoint[]>;
 }): FlowRow[] {
   const today = newYorkDate(input.now);
-  const limited = keepNearestExpirations(
+  const limited = keepScanExpirations(
     input.contracts,
     input.maxExpirations ?? FLOW_MAX_EXPIRATIONS,
     today,
@@ -462,8 +495,9 @@ export function flowScore(input: {
   }
   if (input.otmFraction != null && input.otmFraction > 0 && input.otmFraction <= 0.08) score += 6;
   else if (input.otmFraction != null && input.otmFraction > 0.08 && input.otmFraction <= 0.15) score += 3;
-  if (input.dte != null && input.dte >= 0 && input.dte <= 21) score += 5;
-  else if (input.dte != null && input.dte <= 45) score += 2;
+  if (input.dte != null && input.dte >= ALERT_RULES.alertDteMin && input.dte <= ALERT_RULES.alertDteMax) score += 6;
+  else if (input.dte != null && input.dte >= 0 && input.dte < ALERT_RULES.alertDteMin) score += 1;
+  else if (input.dte != null && input.dte > ALERT_RULES.alertDteMax && input.dte <= ALERT_RULES.alertDteMax + 21) score += 2;
   if (input.spreadQuality === "tight") score += 6;
   else if (input.spreadQuality === "acceptable") score += 3;
   else if (input.spreadQuality === "wide") score -= 10;
