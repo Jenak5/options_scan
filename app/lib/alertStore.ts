@@ -73,12 +73,19 @@ function setupAlreadySent(book: AlertBook, record: { ticker: string; putCall: st
 
 export async function rememberSentAlert(row: FlowRow, verdict: AlertVerdict, now: Date): Promise<boolean> {
   const record = buildStoredAlert(row, verdict, now);
-  return updateAlertBook((current) => {
+  let kept = false;
+  const saved = await updateAlertBook((current) => {
     const book = parseAlertBook(current);
-    if (alreadySentToday(book, record.contractKey, record.tradingDay)) return JSON.stringify(book);
-    if (setupAlreadySent(book, record)) return JSON.stringify(book);
-    return JSON.stringify(addRecord(book, record));
+    if (alreadySentToday(book, record.contractKey, record.tradingDay) || setupAlreadySent(book, record)) {
+      kept = true;
+      return JSON.stringify(book);
+    }
+    const next = addRecord(book, record);
+    kept = next.records.some((item) => item.id === record.id);
+    if (!kept) return null;
+    return JSON.stringify(next);
   });
+  return saved && kept;
 }
 
 export async function saveFollowUps(
