@@ -59,3 +59,38 @@ export function isChicagoMinuteWindow(now: Date, startMinute: number, endMinute:
   if (!clock || !clock.weekdaySession) return false;
   return clock.minutes >= startMinute && clock.minutes < endMinute;
 }
+
+/**
+ * Chicago weekdays after the open date, through `to`, not counting the open date.
+ * Saturday and Sunday do not count. Exchange holidays are not on this calendar.
+ */
+export function chicagoTradingDaysElapsed(from: Date, to: Date): number {
+  const start = chicagoDate(from);
+  const end = chicagoDate(to);
+  if (!start || !end || end <= start) return 0;
+  let count = 0;
+  let cursor = nextYmd(start);
+  while (cursor <= end) {
+    if (isWeekdayYmd(cursor)) count += 1;
+    const next = nextYmd(cursor);
+    if (next <= cursor) break;
+    cursor = next;
+  }
+  return count;
+}
+
+function nextYmd(ymd: string): string {
+  const parts = ymd.split("-");
+  if (parts.length !== 3) return ymd;
+  const date = new Date(Date.UTC(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]) + 1));
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${date.getUTCFullYear()}-${month}-${day}`;
+}
+
+function isWeekdayYmd(ymd: string): boolean {
+  const parts = ymd.split("-");
+  if (parts.length !== 3) return false;
+  const day = new Date(Date.UTC(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]))).getUTCDay();
+  return day !== 0 && day !== 6;
+}

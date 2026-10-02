@@ -47,7 +47,7 @@ function input(over: Partial<GateInput> = {}): GateInput {
     debitSpreadWidth: null,
     underlyingStop: "Out if SPY trades 568",
     timeStop: "Flat by 15:30 ET",
-    profitRule: "Sell half at +30%",
+    profitRule: "Sell half at +40%",
     consecutiveLosses: 0,
     delayed: false,
     ...over,

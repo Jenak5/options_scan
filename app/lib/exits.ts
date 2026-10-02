@@ -86,7 +86,18 @@ export function defaultProfitRule(): string {
 }
 
 export function defaultTimeStop(): string {
-  return `Time stop: be out by ${clockLabel(TRADE_RULES.flatByMinutes)} Chicago, or if the trade is still flat after ${TRADE_RULES.flatAfterMinutes} minutes.`;
+  return `Time stop: get out if the trade is still flat after ${flatAfterLabel()}. ${TRADE_RULES.lastWeekExitReminder}`;
+}
+
+/** Shown on an open paper trade once the multi-day flat rule is due. */
+export function openFlatTimeStopText(): string {
+  return `Time stop: this trade is still flat after ${flatAfterLabel()}.`;
+}
+
+function flatAfterLabel(): string {
+  const days = TRADE_RULES.flatAfterTradingDays;
+  const word = days === 1 ? "trading day" : "trading days";
+  return `${days} ${word}`;
 }
 
 export function exitDefaultsSummary(): string {
@@ -123,13 +134,4 @@ function money(value: number): string {
 
 function percent(fraction: number): string {
   return `${Math.round(fraction * 100)}%`;
-}
-
-function clockLabel(minutes: number): string {
-  const h24 = Math.floor(minutes / 60) % 24;
-  const minute = minutes % 60;
-  const suffix = h24 >= 12 ? "pm" : "am";
-  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
-  if (minute === 0) return `${h12}:00${suffix}`;
-  return `${h12}:${String(minute).padStart(2, "0")}${suffix}`;
 }

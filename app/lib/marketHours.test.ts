@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { OUTCOME_RULES } from "@/app/lib/alertConfig";
-import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow } from "@/app/lib/marketHours";
+import { chicagoDate, chicagoTradingDaysElapsed, isChicagoMarketHours, isChicagoMinuteWindow } from "@/app/lib/marketHours";
 
 describe("Chicago session clock", () => {
   it("treats 8:30 as open and 15:00 as closed, and opens a short close window", () => {
@@ -23,5 +23,14 @@ describe("Chicago session clock", () => {
     expect(isChicagoMinuteWindow(after, closeStart, closeEnd)).toBe(false);
     expect(isChicagoMarketHours(saturday)).toBe(false);
     expect(isChicagoMinuteWindow(saturday, closeStart, closeEnd)).toBe(false);
+  });
+
+  it("counts Chicago weekdays after the open date and skips the weekend", () => {
+    const thursday = new Date("2026-10-01T15:00:00Z");
+    expect(chicagoTradingDaysElapsed(thursday, thursday)).toBe(0);
+    expect(chicagoTradingDaysElapsed(thursday, new Date("2026-10-02T15:00:00Z"))).toBe(1);
+    expect(chicagoTradingDaysElapsed(thursday, new Date("2026-10-03T15:00:00Z"))).toBe(1);
+    expect(chicagoTradingDaysElapsed(thursday, new Date("2026-10-05T15:00:00Z"))).toBe(2);
+    expect(chicagoTradingDaysElapsed(thursday, new Date("2026-10-06T15:00:00Z"))).toBe(3);
   });
 });

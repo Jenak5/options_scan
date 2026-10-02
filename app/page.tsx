@@ -1098,8 +1098,20 @@ const TABS = [
   { id: "report",   label: "▣ Alert Report" },
 ];
 
+function requestedTab(): string | null {
+  if (typeof window === "undefined") return null;
+  const fromQuery = new URLSearchParams(window.location.search).get("tab");
+  const fromHash = window.location.hash.replace(/^#/, "");
+  const id = fromQuery || fromHash;
+  return TABS.some((item) => item.id === id) ? id : null;
+}
+
 export default function OptionsEdgeScanner() {
   const [tab, setTab] = useState("flow");
+  useEffect(() => {
+    const id = requestedTab();
+    if (id) setTab(id);
+  }, []);
   return (
     <div style={{ minHeight: "100vh", background: "#0b0f1a", color: "#e2e8f0", fontFamily: "system-ui, -apple-system, sans-serif", fontSize: 16 }}>
       <style>{`

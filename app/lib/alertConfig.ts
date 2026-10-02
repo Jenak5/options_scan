@@ -265,14 +265,20 @@ export const PRINT_RULES = {
 export const TRADE_RULES = {
   /** Take this fraction of the contracts off at the profit target. 0.5 is half. */
   scaleOutFraction: 0.5,
-  /** Profit target as a fraction of the debit paid. 0.30 is +30%. */
-  profitTargetFraction: 0.30,
+  /** Profit target as a fraction of the debit paid. 0.40 is +40%. */
+  profitTargetFraction: 0.40,
   /** Stop as a fraction of the debit paid, before the dollar cap. 0.25 is -25%. */
   stopLossFraction: 0.25,
-  /** Be out by this Chicago clock time on a quick trade. 15:00 is the cash close. */
-  flatByMinutes: 15 * 60,
-  /** Also get out if the trade is still flat after this many minutes. */
-  flatAfterMinutes: 60,
+  /**
+   * Get out when the trade is still flat after this many Chicago trading days.
+   * Weekends do not count. This is not the same-day cash-close checkpoint.
+   */
+  flatAfterTradingDays: 3,
+  /**
+   * Plain reminder for contracts about 2 to 6 weeks out.
+   * Defined here so the Gate, the alerts, and the trade log say the same thing.
+   */
+  lastWeekExitReminder: "Be out before the last week to expiration.",
   /** A closed trade whose dollar P&L is inside this band is flat. */
   flatAbsDollars: 1,
   /** Information-only flag when the week's closed P&L is down this fraction of the account. */
