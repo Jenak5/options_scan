@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { PageLinks } from "@/app/components/PageLinks";
 import { formatContractCost, formatFlowPremium } from "@/app/lib/alertConfig";
+import { openFlatTimeStopText } from "@/app/lib/exits";
 import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import { PAPER_ENTRY_NOTE, type BucketPnl, type DailyStopState, type TradeMetrics, type TradeStats, type WeeklySummary } from "@/app/lib/trades";
 
@@ -27,6 +29,7 @@ interface TradeRow {
   mark: number | null;
   markSource: "mid" | null;
   unrealizedPnl: number | null;
+  flatTimeStop?: boolean;
 }
 
 interface AlertChoice {
@@ -160,15 +163,18 @@ export default function TradesPage() {
   return (
     <main style={{ minHeight: "100vh", background: "#0b0f1a", color: "#e2e8f0", fontFamily: "system-ui, -apple-system, sans-serif" }}>
       <div style={{ borderBottom: "1px solid rgba(255,255,255,0.06)", padding: "16px 16px 14px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-          <h1 style={{ margin: 0, fontSize: 22, fontFamily: "monospace" }}>
-            <span style={{ color: "#06b6d4" }}>▣</span> Trade log
-          </h1>
-          <a href="/" style={{ color: "#06b6d4", fontSize: 16, fontWeight: 700, minHeight: 44, display: "inline-flex", alignItems: "center" }}>Scanner</a>
-        </div>
+        <h1 style={{ margin: 0, fontSize: 22, fontFamily: "monospace" }}>
+          <span style={{ color: "#06b6d4" }}>▣</span> Trade log
+        </h1>
         <p style={{ margin: "6px 0 0", color: "#94a3b8", fontSize: 15, lineHeight: 1.45 }}>
           Paper trades only. Nothing on this page places an order.
         </p>
+        {page?.exitDefaults && (
+          <p style={{ margin: "8px 0 0", color: "#94a3b8", fontSize: 14, lineHeight: 1.45 }}>
+            {page.exitDefaults}
+          </p>
+        )}
+        <PageLinks current="trades" />
       </div>
 
       <style dangerouslySetInnerHTML={{ __html: `
@@ -213,6 +219,11 @@ export default function TradesPage() {
                 <p style={{ margin: "8px 0 0", color: "#94a3b8", fontSize: 14, lineHeight: 1.45 }}>
                   {page?.entryNote ?? PAPER_ENTRY_NOTE}
                 </p>
+                {page?.exitDefaults && (
+                  <p style={{ margin: "6px 0 0", color: "#94a3b8", fontSize: 14, lineHeight: 1.45 }}>
+                    {page.exitDefaults}
+                  </p>
+                )}
                 {preview.openTradeId ? (
                   <p style={{ margin: "12px 0 0", fontSize: 16 }}>This alert already has an open paper trade.</p>
                 ) : (
@@ -368,6 +379,9 @@ function TradeCard({
       <p style={{ margin: "4px 0 0", color: trade.metrics.riskBreachesCap ? "#fbbf24" : "#64748b", fontSize: 13 }}>
         Risk ${trade.metrics.riskDollars.toFixed(0)}{trade.metrics.riskBreachesCap ? ` over $${MAX_LOSS_DOLLARS}` : ""}
       </p>
+      {open && trade.flatTimeStop && (
+        <p style={{ margin: "8px 0 0", color: "#fbbf24", fontSize: 15, lineHeight: 1.4 }}>{openFlatTimeStopText()}</p>
+      )}
       {open && (
         <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
           <button

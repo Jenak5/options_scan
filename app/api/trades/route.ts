@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import { exitDefaultsSummary } from "@/app/lib/exits";
 import { quoteTradeMarks } from "@/app/lib/tradeQuotes";
-import { PAPER_ENTRY_NOTE, withQuoteMark } from "@/app/lib/trades";
+import { flatTimeStopDue, PAPER_ENTRY_NOTE, withQuoteMark } from "@/app/lib/trades";
 import {
   closeLoggedTrade,
   loadTradePage,
@@ -39,7 +39,7 @@ export async function GET(request: NextRequest) {
   const alertId = request.nextUrl.searchParams.get("alert");
   const preview = alertId ? await paperPreviewForAlert(alertId, now) : null;
   return NextResponse.json({
-    ...(await withMarks(page)),
+    ...(await withMarks(page, now)),
     preview,
     entryNote: PAPER_ENTRY_NOTE,
     exitDefaults: exitDefaultsSummary(),
@@ -76,7 +76,7 @@ export async function POST(request: NextRequest) {
     }, now);
     if (!result.ok) return NextResponse.json({ error: result.error }, { status: 400 });
     return NextResponse.json({
-      ...(await withMarks(result.page)),
+      ...(await withMarks(result.page, now)),
       alreadyOpen: result.alreadyOpen,
       focusAlertId: result.focusAlertId,
       entryNote: PAPER_ENTRY_NOTE,
@@ -108,7 +108,7 @@ export async function POST(request: NextRequest) {
 
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: 400 });
   return NextResponse.json({
-    ...(await withMarks(result.page)),
+    ...(await withMarks(result.page, now)),
     alreadyOpen: false,
     focusAlertId: null,
     entryNote: PAPER_ENTRY_NOTE,
@@ -116,11 +116,14 @@ export async function POST(request: NextRequest) {
   });
 }
 
-async function withMarks(page: TradePage) {
+async function withMarks(page: TradePage, now: Date) {
   const marks = await quoteTradeMarks(page.trades);
   return {
     ...page,
-    trades: page.trades.map((trade) => withQuoteMark(trade, marks[trade.id] ?? null)),
+    trades: page.trades.map((trade) => {
+      const marked = withQuoteMark(trade, marks[trade.id] ?? null);
+      return { ...marked, flatTimeStop: flatTimeStopDue(marked, marked.unrealizedPnl, now) };
+    }),
   };
 }
 

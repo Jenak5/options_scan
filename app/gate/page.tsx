@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { PageLinks } from "@/app/components/PageLinks";
 import { SchwabBanner } from "@/app/components/SchwabBanner";
 import type { OptionContract } from "@/app/lib/contract";
 import type { GateCheck } from "@/app/lib/gate";
@@ -134,16 +135,14 @@ export default function GatePage() {
           .gate-check { grid-template-columns: 72px 1fr; }
         }
       ` }} />
-      <div style={{ borderBottom: "1px solid rgba(255,255,255,0.06)", padding: "16px 24px", display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-        <div>
-          <h1 style={{ margin: 0, fontSize: 20, fontFamily: "monospace" }}>
-            <span style={{ color: "#06b6d4" }}>▣</span> Trade gate
-          </h1>
-          <p style={{ margin: "4px 0 0", color: "#64748b", fontSize: 14 }}>
-            ${ACCOUNT_SIZE_DOLLARS.toLocaleString()} account · max loss ${MAX_LOSS_DOLLARS} · read-only Schwab quotes
-          </p>
-        </div>
-        <a href="/" style={{ color: "#06b6d4", fontSize: 14, alignSelf: "center" }}>Back to scanner</a>
+      <div style={{ borderBottom: "1px solid rgba(255,255,255,0.06)", padding: "16px 24px" }}>
+        <h1 style={{ margin: 0, fontSize: 20, fontFamily: "monospace" }}>
+          <span style={{ color: "#06b6d4" }}>▣</span> Trade gate
+        </h1>
+        <p style={{ margin: "4px 0 0", color: "#64748b", fontSize: 14 }}>
+          ${ACCOUNT_SIZE_DOLLARS.toLocaleString()} account · max loss ${MAX_LOSS_DOLLARS} · read-only Schwab quotes
+        </p>
+        <PageLinks current="gate" />
       </div>
 
       <div style={{ padding: 24, maxWidth: 760 }}>
@@ -192,7 +191,7 @@ export default function GatePage() {
             <input value={underlyingStop} onChange={(e) => setUnderlyingStop(e.target.value)} placeholder="Exit if the underlying trades through…" style={INPUT} />
           </Field>
           <Field label="Time stop" wide>
-            <input value={timeStop} onChange={(e) => setTimeStop(e.target.value)} placeholder="Out by…" style={INPUT} />
+            <input value={timeStop} onChange={(e) => setTimeStop(e.target.value)} placeholder="Still flat after a few trading days…" style={INPUT} />
           </Field>
           <Field label="Profit-taking rule" wide>
             <input value={profitRule} onChange={(e) => setProfitRule(e.target.value)} placeholder="Take it off when…" style={INPUT} />

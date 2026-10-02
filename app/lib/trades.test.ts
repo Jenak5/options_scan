@@ -7,6 +7,7 @@ import {
   dailyStopState,
   emptyTradeLog,
   findOpenTradeForAlert,
+  flatTimeStopDue,
   paperCostError,
   parseTradeLog,
   summarizeTrades,
@@ -126,6 +127,17 @@ describe("paper trade cost and mark", () => {
     expect(paperCostError(8.75, 1)).toBeNull();
     expect(paperCostError(8.76, 1)).toMatch(/\$875/);
     expect(paperCostError(2, 5)).toMatch(/\$875/);
+  });
+
+  it("flags an open trade that is still flat after 3 trading days", () => {
+    const open = opened();
+    const tuesday = new Date("2026-10-06T15:00:00Z");
+    const friday = new Date("2026-10-02T15:00:00Z");
+    expect(flatTimeStopDue(open, 0.4, friday)).toBe(false);
+    expect(flatTimeStopDue(open, 0.4, tuesday)).toBe(true);
+    expect(flatTimeStopDue(open, 40, tuesday)).toBe(false);
+    expect(flatTimeStopDue(open, null, tuesday)).toBe(false);
+    expect(flatTimeStopDue(closeAt(open, tuesday.getTime(), 2), 0, tuesday)).toBe(false);
   });
 
   it("marks an open trade to the midpoint and leaves a closed trade on its exit", () => {

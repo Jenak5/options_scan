@@ -1,5 +1,5 @@
 import { formatContractCost, longContractCost, TRADE_RULES, type LetterGrade } from "@/app/lib/alertConfig";
-import { chicagoClock, chicagoDate } from "@/app/lib/marketHours";
+import { chicagoClock, chicagoDate, chicagoTradingDaysElapsed } from "@/app/lib/marketHours";
 import { ACCOUNT_SIZE_DOLLARS, DAILY_STOP_CONSECUTIVE_LOSSES, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import type { VerdictName } from "@/app/lib/verdict";
 
@@ -373,6 +373,21 @@ export function findOpenTradeForAlert(trades: readonly StoredTrade[], alertId: s
  * Mark-to-market for an open trade. The mark is the option midpoint.
  * Closed trades keep their exit P/L and do not use the mark.
  */
+/**
+ * Open paper trade that is still inside the flat dollar band after the
+ * multi-day time stop. A missing mark is not called flat. A closed trade is not flagged.
+ */
+export function flatTimeStopDue(
+  trade: Pick<StoredTrade, "openedAt" | "closedAt">,
+  unrealizedPnl: number | null,
+  now: Date,
+): boolean {
+  if (trade.closedAt != null) return false;
+  if (unrealizedPnl == null || !Number.isFinite(unrealizedPnl)) return false;
+  if (Math.abs(unrealizedPnl) >= TRADE_RULES.flatAbsDollars) return false;
+  return chicagoTradingDaysElapsed(new Date(trade.openedAt), now) >= TRADE_RULES.flatAfterTradingDays;
+}
+
 export function withQuoteMark<T extends StoredTrade>(trade: T, mark: number | null): T & {
   mark: number | null;
   markSource: "mid" | null;
