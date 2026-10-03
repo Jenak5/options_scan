@@ -1,0 +1,27 @@
+import { NextRequest, NextResponse } from "next/server";
+import { denyIfUnauthorized } from "@/app/lib/auth";
+import { loadShadowPage, shadowCsv } from "@/app/lib/shadowStore";
+
+export const dynamic = "force-dynamic";
+
+/**
+ * Shadow alert scorecard. Session required.
+ * Read-only. Nothing here places an order or writes the trade log.
+ */
+export async function GET(request: NextRequest) {
+  const denied = await denyIfUnauthorized(request);
+  if (denied) return denied;
+
+  if (request.nextUrl.searchParams.get("format") === "csv") {
+    const csv = await shadowCsv();
+    return new NextResponse(csv, {
+      headers: {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": "attachment; filename=\"alert-scorecard.csv\"",
+      },
+    });
+  }
+
+  const page = await loadShadowPage(new Date());
+  return NextResponse.json(page);
+}

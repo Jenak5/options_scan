@@ -45,6 +45,24 @@ describe("level cache", () => {
     expect(calls).toHaveLength(4);
   });
 
+  it("uses two history reads per ticker, then the cache, on a longer list", async () => {
+    const calls: string[] = [];
+    setPriceHistoryFetcherForTests(async (input) => {
+      calls.push(input.symbol);
+      return [candle(Date.parse("2026-10-01T13:30:00Z"), 100)];
+    });
+    const now = Date.parse("2026-10-01T15:00:00Z");
+    const tickers = ["SPY", "QQQ", "IWM", "JPM", "BA", "XOM", "XLF", "GLD", "NVDA"];
+    for (let i = 0; i < tickers.length; i++) {
+      await keyLevelsForTicker({ ticker: tickers[i], spot: 100, now });
+    }
+    expect(calls).toHaveLength(tickers.length * 2);
+    for (let i = 0; i < tickers.length; i++) {
+      await keyLevelsForTicker({ ticker: tickers[i], spot: 100, now: now + 1_000 });
+    }
+    expect(calls).toHaveLength(tickers.length * 2);
+  });
+
   it("does not cache a failed read and still refuses a dead Schwab session", async () => {
     const fetcher = vi.fn(async () => {
       throw new Error("Schwab market data request failed (500)");

@@ -11,8 +11,9 @@ import {
 import { currentDailyLoss, loadAlertBook, rememberSentAlert } from "@/app/lib/alertStore";
 import { lastAlertBookWriteError, noteAlertSentUnsaved } from "@/app/lib/schwabStore";
 import { hasValidBearer } from "@/app/lib/auth";
-import { selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
+import { flowCronSlice, flowCronSliceNote, selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
+import { runShadowPass } from "@/app/lib/shadowStore";
 import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { planExitsForAsk } from "@/app/lib/exits";
@@ -20,6 +21,9 @@ import { formatVerdictHtml, paperTradeLinkHtml } from "@/app/lib/telegram";
 import type { AlertVerdict } from "@/app/lib/verdict";
 import { formatVolArbSummary, type VolArbReading, type VolSignal } from "@/app/lib/volArb";
 import { scanVolArb } from "@/app/lib/volScan";
+
+export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // AUTOMATED ALERT CRON  — /api/cron
@@ -221,13 +225,25 @@ export async function GET(request: NextRequest) {
       log.push("Alert follow-up failed");
     }
 
+    try {
+      const shadow = await runShadowPass(now);
+      const saved = shadow.saved ? "saved" : "not saved";
+      log.push(`Shadow alerts: ${shadow.opened} opened, ${shadow.quoted} quoted, ${shadow.closed} closed (${saved})`);
+    } catch (err) {
+      if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+      log.push("Shadow alert update failed");
+    }
+
     if (!inSession && !isManual) {
       return NextResponse.json({ alertsSent: 0, followUpOnly: true, followUps, log });
     }
 
     const losses = await currentDailyLoss(now);
+    const watchlist = watchlistFromEnv(process.env.FLOW_WATCHLIST);
+    const slice = flowCronSlice(watchlist, now);
+    log.push(flowCronSliceNote(slice, watchlist.length, process.env.FLOW_WATCHLIST));
     const scan = await scanEstimatedFlow({
-      tickers: watchlistFromEnv(process.env.FLOW_WATCHLIST),
+      tickers: slice.tickers,
     });
     if (scan.errors.length > 0) {
       log.push(`Chain errors: ${scan.errors.map((item) => item.ticker).join(", ")}`);

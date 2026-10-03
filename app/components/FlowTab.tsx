@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { PaperTradeButton } from "@/app/components/PaperTradeButton";
 import { formatContractCost, formatFlowPremium } from "@/app/lib/alertConfig";
 import { arrangeFlowCards, type FlowSort, type RightFilter, type VerdictFilter } from "@/app/components/flowArrange";
@@ -42,43 +42,63 @@ export function FlowTab() {
   const [verdictFilter, setVerdictFilter] = useState<VerdictFilter>("all");
   const [rightFilter, setRightFilter] = useState<RightFilter>("all");
   const [sort, setSort] = useState<FlowSort>("grade");
+  const [watchlistNote, setWatchlistNote] = useState<string | null>(null);
+  const requestId = useRef(0);
 
   const load = useCallback(async (fresh = false) => {
+    const id = ++requestId.current;
     setLoading(true);
     setError(null);
     setDisconnected(false);
     setPartial([]);
+    const collected: ScoredFlow[] = [];
+    const missed: string[] = [];
     try {
-      const url = new URL("/api/flow", window.location.origin);
-      if (filters.ticker) url.searchParams.set("ticker", filters.ticker);
-      if (filters.minPremium) url.searchParams.set("minPremium", filters.minPremium);
-      if (filters.otmOnly) url.searchParams.set("otmOnly", "true");
-      if (!filters.liquidOnly) url.searchParams.set("liquidOnly", "false");
-      if (fresh) url.searchParams.set("fresh", "true");
-      url.searchParams.set("limit", "80");
-      const res = await fetch(url.toString());
-      const json = await res.json();
-      if (typeof json.disclaimer === "string") setDisclaimer(json.disclaimer);
-      setVerdictNote(typeof json.verdictBanner === "string" ? json.verdictBanner : "");
-      setDailyStop(json.dailyStop === true);
-      setWeeklyNote(typeof json.weeklyNote === "string" && json.weeklyNote ? json.weeklyNote : null);
-      if (json.connected === false || res.status === 409 || res.status === 503) {
-        setDisconnected(true);
-        setReconnect(typeof json.reconnect === "string" ? json.reconnect : "");
-        setError(typeof json.error === "string" ? json.error : "Schwab is not connected. Use Reconnect Schwab.");
-        setFlows([]);
-        return;
+      let offset = 0;
+      for (let guard = 0; guard < 8; guard++) {
+        const url = new URL("/api/flow", window.location.origin);
+        if (filters.ticker) url.searchParams.set("ticker", filters.ticker);
+        else url.searchParams.set("offset", String(offset));
+        if (filters.minPremium) url.searchParams.set("minPremium", filters.minPremium);
+        if (filters.otmOnly) url.searchParams.set("otmOnly", "true");
+        if (!filters.liquidOnly) url.searchParams.set("liquidOnly", "false");
+        if (fresh) url.searchParams.set("fresh", "true");
+        url.searchParams.set("limit", "80");
+        const res = await fetch(url.toString());
+        const json = await res.json();
+        if (requestId.current !== id) return;
+        if (typeof json.disclaimer === "string") setDisclaimer(json.disclaimer);
+        setVerdictNote(typeof json.verdictBanner === "string" ? json.verdictBanner : "");
+        setDailyStop(json.dailyStop === true);
+        setWeeklyNote(typeof json.weeklyNote === "string" && json.weeklyNote ? json.weeklyNote : null);
+        setWatchlistNote(typeof json.watchlistNote === "string" && json.watchlistNote ? json.watchlistNote : null);
+        if (json.connected === false || res.status === 409 || res.status === 503) {
+          setDisconnected(true);
+          setReconnect(typeof json.reconnect === "string" ? json.reconnect : "");
+          setError(typeof json.error === "string" ? json.error : "Schwab is not connected. Use Reconnect Schwab.");
+          setFlows([]);
+          return;
+        }
+        if (!res.ok || json.error) throw new Error(json.error || "Flow scan failed");
+        if (Array.isArray(json.data)) collected.push(...json.data);
+        if (Array.isArray(json.errors)) {
+          for (const item of json.errors) {
+            if (item && typeof item.ticker === "string" && item.ticker) missed.push(item.ticker);
+          }
+        }
+        if (filters.ticker || json.scanComplete !== false) break;
+        offset = typeof json.nextOffset === "number" ? json.nextOffset : offset + 1;
       }
-      if (!res.ok || json.error) throw new Error(json.error || "Flow scan failed");
-      setFlows(Array.isArray(json.data) ? json.data : []);
-      const missed = Array.isArray(json.errors)
-        ? json.errors.map((item: { ticker?: string }) => item.ticker).filter(Boolean)
-        : [];
+      if (requestId.current !== id) return;
+      setFlows(collected);
       setPartial(missed);
     } catch (err: unknown) {
+      if (requestId.current !== id) return;
+      setFlows(collected);
+      setPartial(missed);
       setError(err instanceof Error ? err.message : "Flow scan failed");
     } finally {
-      setLoading(false);
+      if (requestId.current === id) setLoading(false);
     }
   }, [filters]);
 
@@ -101,6 +121,10 @@ export function FlowTab() {
       `}</style>
 
       <p style={{ margin: "0 0 14px", color: "#94a3b8", fontSize: 15, lineHeight: 1.5 }}>{disclaimer}</p>
+      <p style={{ margin: "0 0 14px", color: "#94a3b8", fontSize: 15, lineHeight: 1.5 }}>
+        Search checks one ticker. The full list is read in small groups so price history and earnings lookups can finish.
+        {watchlistNote ? ` ${watchlistNote}` : ""}
+      </p>
       {verdictNote && (
         <p style={{ margin: "0 0 14px", color: "#cbd5e1", fontSize: 15, lineHeight: 1.5 }}>{verdictNote}</p>
       )}

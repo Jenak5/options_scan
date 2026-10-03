@@ -7,7 +7,9 @@ import {
   FLOW_LIQUIDITY_RULES,
   filterFlowRows,
   isFlowTicker,
+  watchlistChunk,
   watchlistFromEnv,
+  watchlistOverrideNote,
 } from "@/app/lib/flow";
 import { pinTodayAlerts } from "@/app/lib/flowAlerts";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
@@ -16,6 +18,7 @@ import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { gradeFlowRow } from "@/app/lib/verdict";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 /**
  * Estimated flow from Schwab chains.
@@ -32,13 +35,20 @@ export async function GET(request: NextRequest) {
   const liquidOnly = params.get("liquidOnly") !== "false";
   const limit = boundedInt(params.get("limit"), 80, 1, 200);
   const fresh = params.get("fresh") === "true";
+  const offset = boundedInt(params.get("offset"), 0, 0, 10_000);
 
+  const fullWatchlist = watchlistFromEnv(process.env.FLOW_WATCHLIST);
   let tickers: string[];
+  let scanComplete = true;
+  let nextOffset = fullWatchlist.length;
   if (ticker) {
     if (!isFlowTicker(ticker)) return NextResponse.json({ error: "Enter a ticker" }, { status: 400 });
     tickers = [ticker];
   } else {
-    tickers = watchlistFromEnv(process.env.FLOW_WATCHLIST);
+    const chunk = watchlistChunk(fullWatchlist, offset);
+    tickers = chunk.tickers;
+    scanComplete = chunk.complete;
+    nextOffset = chunk.nextOffset;
   }
 
   try {
@@ -65,7 +75,10 @@ export async function GET(request: NextRequest) {
       connected: true,
       cached: scan.cached,
       scannedAt: scan.scannedAt,
-      watchlist: scan.watchlist,
+      watchlist: fullWatchlist,
+      watchlistNote: watchlistOverrideNote(process.env.FLOW_WATCHLIST),
+      scanComplete,
+      nextOffset,
       errors: scan.errors,
       liquidity: { ...FLOW_LIQUIDITY_RULES, liquidOnly },
     });
