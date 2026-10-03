@@ -1,4 +1,15 @@
 {
+  "functions": {
+    "app/api/cron/route.ts": {
+      "maxDuration": 300
+    },
+    "app/api/alerts/route.ts": {
+      "maxDuration": 300
+    },
+    "app/api/flow/route.ts": {
+      "maxDuration": 300
+    }
+  },
   "crons": [
     {
       "path": "/api/cron",

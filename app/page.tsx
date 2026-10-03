@@ -1148,6 +1148,10 @@ export default function OptionsEdgeScanner() {
             padding: "12px 18px", fontSize: 14, fontWeight: 600,
             color: "#475569", letterSpacing: "0.03em", whiteSpace: "nowrap", textDecoration: "none",
           }}>▣ Trades</a>
+          <a href="/scorecard" style={{
+            padding: "12px 18px", fontSize: 14, fontWeight: 600,
+            color: "#475569", letterSpacing: "0.03em", whiteSpace: "nowrap", textDecoration: "none",
+          }}>▣ Alert scorecard</a>
           <a href="/gate" style={{
             padding: "12px 18px", fontSize: 14, fontWeight: 600,
             color: "#475569", letterSpacing: "0.03em", whiteSpace: "nowrap", textDecoration: "none",

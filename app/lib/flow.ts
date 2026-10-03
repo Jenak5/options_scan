@@ -1,7 +1,8 @@
 import type { OptionContract, PutCall } from "@/app/lib/contract";
 import type { EarningsFact } from "@/app/lib/eventRisk";
 import type { KeyLevels } from "@/app/lib/levels";
-import { ALERT_RULES, PRINT_RULES } from "@/app/lib/alertConfig";
+import { ALERT_POLICY, ALERT_RULES, OUTCOME_RULES, PRINT_RULES } from "@/app/lib/alertConfig";
+import { chicagoClock } from "@/app/lib/marketHours";
 import { checkBidAskSpread, openInterestPasses, volumePasses } from "@/app/lib/gate";
 import {
   detectPrints,
@@ -26,10 +27,21 @@ import {
 export const FLOW_DISCLAIMER =
   "Estimated flow from Schwab volume/open interest, not true sweeps.";
 
-export const DEFAULT_FLOW_WATCHLIST = [
+/** Scanned on every cron run. Alert latency for these names stays on the 15-minute cadence. */
+export const CORE_FLOW_WATCHLIST = [
   "SPY", "QQQ", "IWM", "AAPL", "NVDA", "TSLA", "AMD", "AMZN",
   "MSFT", "META", "GOOGL", "PLTR", "SOFI", "NFLX", "COIN",
 ] as const;
+
+/** Rotated across cron runs. The core list above is not part of this rotation. */
+export const ADDED_FLOW_WATCHLIST = [
+  "JPM", "BAC", "GS", "WFC", "C", "MS",
+  "BA", "LMT", "CAT", "GE",
+  "XOM", "CVX", "OXY", "XLE",
+  "XLF", "GLD", "TLT", "SMH", "DIS", "UBER", "MU", "AVGO", "CRM", "V", "WMT", "COST", "HOOD", "MSTR",
+] as const;
+
+export const DEFAULT_FLOW_WATCHLIST = [...CORE_FLOW_WATCHLIST, ...ADDED_FLOW_WATCHLIST] as const;
 
 /** Near-the-money strikes above and below the underlying. Sent as strikeCount. */
 export const FLOW_STRIKE_COUNT = 6;
@@ -44,12 +56,47 @@ export const FLOW_DATE_WINDOW_DAYS = 45;
 /** Enough for a few expirations a week across the 2–6 week window, plus shorter dates for review. */
 export const FLOW_MAX_EXPIRATIONS = 24;
 
-export const FLOW_MAX_WATCHLIST = 20;
+/** Room for the built-in list. A longer FLOW_WATCHLIST value is cut here. */
+export const FLOW_MAX_WATCHLIST = 48;
 
 /** Leave headroom under Schwab's about-120 requests per minute. */
 export const FLOW_MAX_REQUESTS_PER_MINUTE = 100;
 
 export const FLOW_BATCH_SIZE = 3;
+
+/**
+ * Names the Flow tab reads in one browser request.
+ * The scheduled scan uses planCronScan, so the core names are not limited by this.
+ * A search for one ticker does not use this cap.
+ */
+export const FLOW_SCAN_TICKERS_PER_RUN = 9;
+
+/** Added names should be scanned at least this often. Core names use the 15-minute cron. */
+export const FLOW_ROTATING_MAX_MINUTES = 30;
+
+export const FLOW_CRON_CADENCE_MINUTES = 15;
+
+/** levelScan pauses above this many price-history reads in a rolling minute. */
+export const FLOW_HISTORY_MAX_PER_MINUTE = 60;
+
+/**
+ * Unique open shadow contracts quoted on one cron run.
+ * Older marks go first. A longer book finishes on the next runs.
+ */
+export const SHADOW_QUOTES_PER_RUN = 16;
+
+/**
+ * Planning figure for one Schwab or earnings GET.
+ * Used to decide the slice size. It is not a measured latency.
+ */
+export const FLOW_ASSUMED_REQUEST_MS = 800;
+
+/**
+ * Route maxDuration for cron, the manual alert scan, and Flow.
+ * Fluid compute allows 300s on Hobby and defaults to 300s on Pro.
+ * The old 60s export was below this pass (core names plus one added-name group).
+ */
+export const FLOW_FUNCTION_BUDGET_MS = 300_000;
 
 export const FLOW_CACHE_MS = 60_000;
 
@@ -153,6 +200,253 @@ export function parseWatchlist(
 
 export function watchlistFromEnv(raw: string | undefined): string[] {
   return parseWatchlist(raw);
+}
+
+/**
+ * Set FLOW_WATCHLIST and the built-in list is not used.
+ * The env value replaces the default. It does not add to it.
+ */
+export function watchlistOverrideNote(raw: string | undefined): string | null {
+  if (raw == null || raw.trim() === "") return null;
+  return "FLOW_WATCHLIST is set, so this list replaces the built-in default.";
+}
+
+export interface CronScanPlan {
+  /** Core names, open alerts or paper trades, then this run's added-name group. */
+  tickers: string[];
+  core: string[];
+  /** Open shadow or paper tickers that are not already in `core`. */
+  priority: string[];
+  /** Added names scanned on this run. */
+  rotating: string[];
+  rotatingPool: number;
+  /** Zero-based added-name group for this 15-minute slot. */
+  index: number;
+  count: number;
+  /** Minutes between scans of one core name. */
+  coreEveryMinutes: number;
+  /** Minutes between scans of one added name. 0 when there are no added names. */
+  rotatingEveryMinutes: number;
+}
+
+const CORE_TICKERS = new Set<string>(CORE_FLOW_WATCHLIST);
+
+/**
+ * Every cron run scans the original 15 names that are still on the watchlist,
+ * plus any open shadow alert or open paper trade.
+ * Only the added names rotate. The slice is large enough to cover them within
+ * 30 minutes when that still fits the chain cap, the history cap, and maxDuration.
+ * A short list that fits is scanned whole.
+ * 8:30 Chicago is group 0, 8:45 is group 1, then it wraps.
+ */
+export function planCronScan(
+  watchlist: readonly string[],
+  now: Date,
+  priorityTickers: readonly string[] = [],
+): CronScanPlan {
+  const onList = new Set(watchlist);
+  const seen = new Set<string>();
+  const core: string[] = [];
+  for (let i = 0; i < CORE_FLOW_WATCHLIST.length; i++) {
+    const ticker = CORE_FLOW_WATCHLIST[i];
+    if (!onList.has(ticker) || seen.has(ticker)) continue;
+    seen.add(ticker);
+    core.push(ticker);
+  }
+  const priority: string[] = [];
+  for (let i = 0; i < priorityTickers.length; i++) {
+    const ticker = priorityTickers[i].trim().toUpperCase();
+    if (!TICKER_PATTERN.test(ticker) || seen.has(ticker)) continue;
+    seen.add(ticker);
+    priority.push(ticker);
+  }
+  const pool: string[] = [];
+  for (let i = 0; i < watchlist.length; i++) {
+    const ticker = watchlist[i];
+    if (seen.has(ticker)) continue;
+    seen.add(ticker);
+    pool.push(ticker);
+  }
+
+  const everyRun = core.length + priority.length;
+  const room = Math.max(0, tickersThatFit() - everyRun);
+  const half = pool.length === 0 ? 0 : Math.ceil(pool.length / groupsForRotation());
+  let perRun = 0;
+  if (pool.length > 0 && room > 0) {
+    if (pool.length <= room) perRun = pool.length;
+    else if (half <= room) perRun = half;
+    else perRun = room;
+  }
+  const count = perRun === 0 ? 1 : Math.ceil(pool.length / perRun);
+  const index = perRun === 0 ? 0 : slotIndex(now, count);
+  const rotating = perRun === 0 ? [] : pool.slice(index * perRun, index * perRun + perRun);
+  return {
+    tickers: core.concat(priority, rotating),
+    core,
+    priority,
+    rotating,
+    rotatingPool: pool.length,
+    index,
+    count,
+    coreEveryMinutes: FLOW_CRON_CADENCE_MINUTES,
+    rotatingEveryMinutes: perRun === 0 ? 0 : count * FLOW_CRON_CADENCE_MINUTES,
+  };
+}
+
+export function flowCronSliceNote(plan: CronScanPlan, _watchlistLength: number, envRaw: string | undefined): string {
+  const env = watchlistOverrideNote(envRaw);
+  const envSentence = env ? ` ${env}` : "";
+  const every = plan.core.length + plan.priority.length;
+  if (plan.rotatingPool === 0) {
+    return `Scanning ${plan.tickers.length} tickers every ${plan.coreEveryMinutes} minutes. That includes the core names on this list and any open alert or paper trade.${envSentence}`;
+  }
+  if (plan.rotating.length === 0) {
+    return `Scanning ${every} core or open names. Added names are waiting because this run is already at the request budget.${envSentence}`;
+  }
+  return `Scanning ${every} core or open names and ${plan.rotating.length} of ${plan.rotatingPool} added names (group ${plan.index + 1} of ${plan.count}). Core names and any open alert or paper trade run every ${plan.coreEveryMinutes} minutes. Added names run every ${plan.rotatingEveryMinutes} minutes.${envSentence}`;
+}
+
+function groupsForRotation(): number {
+  return Math.max(1, Math.ceil(FLOW_ROTATING_MAX_MINUTES / FLOW_CRON_CADENCE_MINUTES));
+}
+
+function slotIndex(now: Date, count: number): number {
+  const clock = chicagoClock(now);
+  const open = 8 * 60 + 30;
+  const slot = clock ? Math.floor((clock.minutes - open) / FLOW_CRON_CADENCE_MINUTES) : 0;
+  return ((slot % count) + count) % count;
+}
+
+/** Largest ticker count that stays under the chain cap, the history cap, and maxDuration. */
+function tickersThatFit(): number {
+  let best = 0;
+  const ceiling = FLOW_MAX_WATCHLIST + 16;
+  for (let n = 0; n <= ceiling; n++) {
+    const budget = cronRequestBudget(standardLoad(n));
+    if (!budget.withinChainCap || !budget.withinHistoryCap || budget.estimatedWallMs >= FLOW_FUNCTION_BUDGET_MS) break;
+    best = n;
+  }
+  return best;
+}
+
+/** One Flow request. Search ignores this and reads a single ticker. */
+export function watchlistChunk(watchlist: readonly string[], offset: number): {
+  tickers: string[];
+  nextOffset: number;
+  complete: boolean;
+} {
+  const start = Number.isInteger(offset) && offset > 0 ? Math.min(offset, watchlist.length) : 0;
+  const tickers = watchlist.slice(start, start + FLOW_SCAN_TICKERS_PER_RUN);
+  const nextOffset = start + tickers.length;
+  return { tickers, nextOffset, complete: nextOffset >= watchlist.length };
+}
+
+export interface RequestBudget {
+  tickers: number;
+  chainRequests: number;
+  /** Price-history reads for key levels. Vol history is separate. */
+  historyRequests: number;
+  /** Daily history inside the vol scan. That scan has its own 60 per minute pacer. */
+  volHistoryRequests: number;
+  withinChainCap: boolean;
+  withinHistoryCap: boolean;
+  estimatedWallMs: number;
+  fitsFunctionBudget: boolean;
+}
+
+/**
+ * Schwab reads for one cron pass, plus the earnings lookups that sit on the same wait.
+ * Each scanned ticker is 1 chain, 2 price-history reads, and up to 2 earnings lookups.
+ * Follow-up chains, alert checkpoint quotes, shadow marks, and one vol chain per symbol are added.
+ * Chain-style reads share the 100 per minute planning cap (headroom under Schwab's about 120).
+ * Level history uses the 60 per minute cap in levelScan. Vol history does not, because volScan paces itself.
+ * Earnings are not Schwab calls.
+ * A count over a per-minute cap adds a full minute of waiting.
+ */
+export function cronRequestBudget(input: {
+  tickers: number;
+  followUpTickers: number;
+  followUpReads: number;
+  alertQuotes: number;
+  shadowQuotes: number;
+  volSymbols: number;
+}): RequestBudget {
+  const tickers = Math.max(0, input.tickers);
+  const followUpTickers = Math.max(0, input.followUpTickers);
+  const followUpReads = followUpTickers > 0 ? Math.max(0, input.followUpReads) : 0;
+  const alertQuotes = Math.max(0, input.alertQuotes);
+  const shadowQuotes = Math.max(0, input.shadowQuotes);
+  const volSymbols = Math.max(0, input.volSymbols);
+  const historyCap = FLOW_HISTORY_MAX_PER_MINUTE;
+  const chainRequests = tickers
+    + followUpTickers * followUpReads
+    + alertQuotes
+    + shadowQuotes
+    + volSymbols;
+  const historyRequests = tickers * 2;
+  const volHistoryRequests = volSymbols;
+  const scanBatches = tickers === 0 ? 0 : Math.ceil(tickers / FLOW_BATCH_SIZE);
+  const stepsPerTicker = 5;
+  const scanMs = scanBatches * stepsPerTicker * FLOW_ASSUMED_REQUEST_MS;
+  const followBatches = followUpTickers === 0 ? 0 : Math.ceil(followUpTickers / FLOW_BATCH_SIZE);
+  const followUncapped = followUpReads * (PRINT_RULES.followUpGapMs + followBatches * FLOW_ASSUMED_REQUEST_MS);
+  const followMs = followUpTickers === 0
+    ? 0
+    : Math.min(followUncapped, PRINT_RULES.followUpBudgetMs + followBatches * FLOW_ASSUMED_REQUEST_MS);
+  const alertMs = alertQuotes * FLOW_ASSUMED_REQUEST_MS;
+  const shadowBatches = shadowQuotes === 0 ? 0 : Math.ceil(shadowQuotes / FLOW_BATCH_SIZE);
+  const shadowMs = shadowBatches * FLOW_ASSUMED_REQUEST_MS;
+  const volBatches = volSymbols === 0 ? 0 : Math.ceil(volSymbols / 2);
+  const volMs = volBatches * 2 * FLOW_ASSUMED_REQUEST_MS;
+  let estimatedWallMs = scanMs + followMs + alertMs + shadowMs + volMs;
+  const withinChainCap = chainRequests <= FLOW_MAX_REQUESTS_PER_MINUTE;
+  const withinHistoryCap = historyRequests <= historyCap;
+  if (!withinChainCap) estimatedWallMs += 60_000;
+  if (!withinHistoryCap) estimatedWallMs += 60_000;
+  return {
+    tickers,
+    chainRequests,
+    historyRequests,
+    volHistoryRequests,
+    withinChainCap,
+    withinHistoryCap,
+    estimatedWallMs,
+    fitsFunctionBudget: withinChainCap && withinHistoryCap && estimatedWallMs < FLOW_FUNCTION_BUDGET_MS,
+  };
+}
+
+function standardLoad(tickers: number): {
+  tickers: number;
+  followUpTickers: number;
+  followUpReads: number;
+  alertQuotes: number;
+  shadowQuotes: number;
+  volSymbols: number;
+} {
+  const count = Math.max(0, tickers);
+  return {
+    tickers: count,
+    followUpTickers: Math.min(count, PRINT_RULES.maxFollowUpTickers),
+    followUpReads: PRINT_RULES.followUpReads,
+    alertQuotes: OUTCOME_RULES.maxFollowUpQuotesPerRun,
+    shadowQuotes: SHADOW_QUOTES_PER_RUN,
+    volSymbols: ALERT_POLICY.maxPerDay + ALERT_POLICY.screenBuffer,
+  };
+}
+
+/** Budget for one cron pass of this watchlist, including open names and the quote caps. */
+export function plannedCronBudget(
+  watchlist: readonly string[],
+  now: Date = new Date("2026-10-01T13:30:00Z"),
+  priorityTickers: readonly string[] = [],
+): RequestBudget {
+  const plan = planCronScan(watchlist, now, priorityTickers);
+  return cronRequestBudget(standardLoad(plan.tickers.length));
+}
+
+/** What one pass would cost if it read the whole list. Used to show why added names still rotate. */
+export function fullListCronBudget(watchlistLength: number): RequestBudget {
+  return cronRequestBudget(standardLoad(watchlistLength));
 }
 
 export function isFlowTicker(value: string): boolean {

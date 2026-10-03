@@ -130,6 +130,20 @@ describe("earnings cache", () => {
     expect(calls).toBe(2);
   });
 
+  it("looks up each ticker once while the cache is warm", async () => {
+    const start = Date.parse("2026-10-05T15:00:00Z");
+    let calls = 0;
+    setEarningsFetcherForTests(async () => {
+      calls += 1;
+      return { status: "known", date: "2026-12-20", timing: "unspecified", estimated: false };
+    });
+    const tickers = ["SPY", "JPM", "BA", "XOM", "XLF", "GLD", "NVDA", "COST", "AVGO"];
+    for (let i = 0; i < tickers.length; i++) await earningsForTicker(tickers[i], start);
+    expect(calls).toBe(tickers.length);
+    for (let i = 0; i < tickers.length; i++) await earningsForTicker(tickers[i], start + 1_000);
+    expect(calls).toBe(tickers.length);
+  });
+
   it("does not call the network for a ticker that is not a symbol", async () => {
     let calls = 0;
     setEarningsFetcherForTests(async () => {

@@ -32,6 +32,12 @@ export const SCHWAB_BLOB_ALERT_BOOK_PATH = "schwab/alert-book.json";
 export const SCHWAB_BLOB_TRADE_LOG_PATH = "schwab/trade-log.json";
 
 /**
+ * Private blob for shadow alert outcomes. Not a token and not the trade log.
+ * Same store as the alert book. No broker fills.
+ */
+export const SCHWAB_BLOB_SHADOW_BOOK_PATH = "schwab/shadow-book.json";
+
+/**
  * Small private blob for the last alert-book, flow, or trade-log failure.
  * Written without ifMatch so a status line can be saved even when a
  * conditional overwrite of the alert book is rejected.

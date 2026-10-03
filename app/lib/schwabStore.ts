@@ -16,6 +16,7 @@ import {
   SCHWAB_BLOB_ALERT_BOOK_PATH,
   SCHWAB_BLOB_FLOW_PATH,
   SCHWAB_BLOB_STORE_STATUS_PATH,
+  SCHWAB_BLOB_SHADOW_BOOK_PATH,
   SCHWAB_BLOB_TRADE_LOG_PATH,
   SCHWAB_BLOB_TOKEN_ENV,
   SCHWAB_BLOB_TOKEN_PATH,
@@ -63,10 +64,12 @@ const ALERT_KEY = "oes:schwab:alerts";
 const FLOW_SNAPSHOT_KEY = "oes:flow:snapshots";
 const ALERT_BOOK_KEY = "oes:alert:records";
 const TRADE_LOG_KEY = "oes:trade:log";
+const SHADOW_BOOK_KEY = "oes:alert:shadows";
 const BLOB_WRITE_ATTEMPTS = 4;
 const JSON_CONDITIONAL_ATTEMPTS = 3;
 const STORE_STATUS_KEY = "oes:store:status";
-const FLOW_SNAPSHOT_MAX_TICKERS = 40;
+/** Holds the full flow watchlist so a rotated scan still has the prior volume. */
+const FLOW_SNAPSHOT_MAX_TICKERS = 48;
 const FLOW_SNAPSHOT_MAX_CONTRACTS = 500;
 
 export interface FlowVolumeSnapshot {
@@ -95,6 +98,7 @@ interface MemoryBag {
   flowSnapshots: FlowSnapshotBook;
   alertBook: string | null;
   tradeLog: string | null;
+  shadowBook: string | null;
 }
 
 interface TokenEnvelope {
@@ -190,18 +194,19 @@ export function setSchwabBlobClientForTests(next: SchwabBlobClient | null): void
 function memoryBag(): MemoryBag {
   const g = globalThis as typeof globalThis & { __oesSchwabMemory?: MemoryBag };
   if (!g.__oesSchwabMemory) {
-    g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null };
+    g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null };
   } else if (!g.__oesSchwabMemory.flowSnapshots) {
     g.__oesSchwabMemory.flowSnapshots = {};
   }
   if (g.__oesSchwabMemory.alertBook === undefined) g.__oesSchwabMemory.alertBook = null;
   if (g.__oesSchwabMemory.tradeLog === undefined) g.__oesSchwabMemory.tradeLog = null;
+  if (g.__oesSchwabMemory.shadowBook === undefined) g.__oesSchwabMemory.shadowBook = null;
   return g.__oesSchwabMemory;
 }
 
 export function clearMemoryStoreForTests(): void {
   const g = globalThis as typeof globalThis & { __oesSchwabMemory?: MemoryBag };
-  g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null };
+  g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null };
   memoryStoreStatus = null;
 }
 
@@ -532,6 +537,79 @@ export async function updateTradeLog(change: (current: string | null) => string)
   }
 }
 
+/**
+ * Shadow alert outcomes. Same store order as the trade log. Not a token.
+ * A failed read does not overwrite the book. This is not the trade log.
+ */
+export async function readShadowBookText(): Promise<string | null> {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") return null;
+  if (kind === "memory") return memoryBag().shadowBook;
+  if (kind === "blob") {
+    const token = blobToken();
+    if (!token) return null;
+    const read = await readBlobJson(SCHWAB_BLOB_SHADOW_BOOK_PATH, token);
+    if (read.state === "error") {
+      await recordStoreFailure("shadow-book", "read", read.error);
+      return null;
+    }
+    if (read.state !== "ok") return null;
+    return read.text;
+  }
+  try {
+    const raw = await kvCommand(["GET", SHADOW_BOOK_KEY]);
+    return typeof raw === "string" && raw.length > 0 ? raw : null;
+  } catch (err) {
+    await recordStoreFailure("shadow-book", "read", err);
+    return null;
+  }
+}
+
+export async function updateShadowBook(change: (current: string | null) => string): Promise<boolean> {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") {
+    await recordStoreFailure("shadow-book", "write", new Error("Alert scorecard storage is not configured"));
+    return false;
+  }
+  const guarded = (current: string | null): string | null => {
+    if (!hasJsonArray(current, "records")) return null;
+    return change(current);
+  };
+  if (kind === "memory") {
+    const bag = memoryBag();
+    const next = guarded(bag.shadowBook);
+    if (next == null) {
+      await recordStoreFailure("shadow-book", "write", new Error("Refusing to overwrite an unreadable alert scorecard"));
+      return false;
+    }
+    bag.shadowBook = next;
+    await clearStoreFailure("shadow-book");
+    return true;
+  }
+  if (kind === "blob") return writeBlobJson(SCHWAB_BLOB_SHADOW_BOOK_PATH, "shadow-book", "Alert scorecard", guarded);
+  let current: string | null;
+  try {
+    const raw = await kvCommand(["GET", SHADOW_BOOK_KEY]);
+    current = typeof raw === "string" && raw.length > 0 ? raw : null;
+  } catch (err) {
+    await recordStoreFailure("shadow-book", "read", err);
+    return false;
+  }
+  const next = guarded(current);
+  if (next == null) {
+    await recordStoreFailure("shadow-book", "write", new Error("Refusing to overwrite an unreadable alert scorecard"));
+    return false;
+  }
+  try {
+    await kvCommand(["SET", SHADOW_BOOK_KEY, next]);
+    await clearStoreFailure("shadow-book");
+    return true;
+  } catch (err) {
+    await recordStoreFailure("shadow-book", "write", err);
+    return false;
+  }
+}
+
 async function updateBlobAlertBook(change: (current: string | null) => string | null): Promise<boolean> {
   return writeBlobJson(SCHWAB_BLOB_ALERT_BOOK_PATH, "alert-book", "Alert book", change);
 }
@@ -789,7 +867,7 @@ async function readBlobJson(pathname: string, token: string): Promise<
   }
 }
 
-type JsonStoreTarget = "alert-book" | "flow-snapshots" | "trade-log";
+type JsonStoreTarget = "alert-book" | "flow-snapshots" | "trade-log" | "shadow-book";
 
 interface StoreFailureRecord {
   target: JsonStoreTarget;
@@ -804,7 +882,7 @@ interface PersistedStoreStatus {
   alertsSentUnsavedAt: number | null;
 }
 
-const JSON_STORE_TARGETS: JsonStoreTarget[] = ["alert-book", "flow-snapshots", "trade-log"];
+const JSON_STORE_TARGETS: JsonStoreTarget[] = ["alert-book", "flow-snapshots", "trade-log", "shadow-book"];
 
 /**
  * Conditional put using the strong etag from head(). On 412, re-read and retry.
@@ -1081,6 +1159,7 @@ async function clearStoreFailure(target: JsonStoreTarget): Promise<void> {
 function storeLabel(target: JsonStoreTarget): string {
   if (target === "alert-book") return "Alert book";
   if (target === "trade-log") return "Trade log";
+  if (target === "shadow-book") return "Alert scorecard";
   return "Flow snapshot store";
 }
 

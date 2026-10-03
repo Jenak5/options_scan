@@ -11,8 +11,9 @@ import {
 import { currentDailyLoss, loadAlertBook, rememberSentAlert } from "@/app/lib/alertStore";
 import { lastAlertBookWriteError, noteAlertSentUnsaved } from "@/app/lib/schwabStore";
 import { hasValidBearer } from "@/app/lib/auth";
-import { selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
+import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
+import { openScanTickers, runShadowPass } from "@/app/lib/shadowStore";
 import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { planExitsForAsk } from "@/app/lib/exits";
@@ -21,12 +22,17 @@ import type { AlertVerdict } from "@/app/lib/verdict";
 import { formatVolArbSummary, type VolArbReading, type VolSignal } from "@/app/lib/volArb";
 import { scanVolArb } from "@/app/lib/volScan";
 
+export const dynamic = "force-dynamic";
+export const maxDuration = 300;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // AUTOMATED ALERT CRON  — /api/cron
 // Vercel cron hits this every 15 minutes from 13:30 through 21:00 UTC on
 // weekdays (see vercel.json). That window covers Central market hours in
 // both daylight and standard time. This handler then keeps only
 // 8:30am–3:00pm America/Chicago, Monday–Friday.
+// Each run scans the original 15 names, any open shadow or paper ticker,
+// and one group of the added names. maxDuration is 300 seconds.
 //
 // Auth is Authorization: Bearer <CRON_SECRET> only. A query secret is ignored.
 // Telegram and the alert book get letter A and B only, capped per Chicago day.
@@ -221,13 +227,25 @@ export async function GET(request: NextRequest) {
       log.push("Alert follow-up failed");
     }
 
+    try {
+      const shadow = await runShadowPass(now);
+      const saved = shadow.saved ? "saved" : "not saved";
+      log.push(`Shadow alerts: ${shadow.opened} opened, ${shadow.quoted} quoted, ${shadow.closed} closed (${saved})`);
+    } catch (err) {
+      if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+      log.push("Shadow alert update failed");
+    }
+
     if (!inSession && !isManual) {
       return NextResponse.json({ alertsSent: 0, followUpOnly: true, followUps, log });
     }
 
     const losses = await currentDailyLoss(now);
+    const watchlist = watchlistFromEnv(process.env.FLOW_WATCHLIST);
+    const plan = planCronScan(watchlist, now, await openScanTickers());
+    log.push(flowCronSliceNote(plan, watchlist.length, process.env.FLOW_WATCHLIST));
     const scan = await scanEstimatedFlow({
-      tickers: watchlistFromEnv(process.env.FLOW_WATCHLIST),
+      tickers: plan.tickers,
     });
     if (scan.errors.length > 0) {
       log.push(`Chain errors: ${scan.errors.map((item) => item.ticker).join(", ")}`);
