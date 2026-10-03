@@ -17,7 +17,7 @@ export const SHADOW_MIN_TRUST = 30;
 export const LAST_WEEK_CALENDAR_DAYS = 7;
 
 export const SHADOW_ESTIMATE_NOTE =
-  "These results are estimates from quotes (the midpoint, or the bid when the midpoint is missing), not fills. The scan runs every 15 minutes and the option chain is only a snapshot, so an exit can show up late.";
+  "These results are estimates from quotes (the midpoint, or the bid when the midpoint is missing), not fills. Open shadows are marked every 15 minutes, and the option chain is only a snapshot, so an exit can show up late.";
 
 export type ShadowExitReason = "profit" | "stop" | "flat" | "expiration";
 export type ShadowQuoteSource = "mid" | "bid";

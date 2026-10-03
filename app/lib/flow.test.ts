@@ -1,11 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import type { OptionContract } from "@/app/lib/contract";
 import {
+  ADDED_FLOW_WATCHLIST,
+  CORE_FLOW_WATCHLIST,
   DEFAULT_FLOW_WATCHLIST,
+  FLOW_FUNCTION_BUDGET_MS,
   FLOW_MAX_WATCHLIST,
   FLOW_SCAN_TICKERS_PER_RUN,
-  flowCronSlice,
+  flowCronSliceNote,
   fullListCronBudget,
+  planCronScan,
   plannedCronBudget,
   watchlistChunk,
   watchlistFromEnv,
@@ -297,6 +301,9 @@ describe("estimated flow scoring", () => {
     expect(parseWatchlist("spy, qqq, SPY, !!!, amd")).toEqual(["SPY", "QQQ", "AMD"]);
     expect(parseWatchlist("")).toEqual([...DEFAULT_FLOW_WATCHLIST]);
     expect(parseWatchlist(undefined)).toHaveLength(43);
+    expect(CORE_FLOW_WATCHLIST).toHaveLength(15);
+    expect(ADDED_FLOW_WATCHLIST).toHaveLength(28);
+    expect(DEFAULT_FLOW_WATCHLIST.slice(0, 15)).toEqual([...CORE_FLOW_WATCHLIST]);
     expect(DEFAULT_FLOW_WATCHLIST).toContain("SOFI");
     expect(DEFAULT_FLOW_WATCHLIST).toContain("NFLX");
     expect(DEFAULT_FLOW_WATCHLIST).toEqual(expect.arrayContaining([
@@ -315,26 +322,66 @@ describe("estimated flow scoring", () => {
     expect(watchlistOverrideNote("SPY")).toMatch(/replaces the built-in default/);
   });
 
-  it("rotates the watchlist so one cron pass stays inside the request budget", () => {
+  it("scans core names every run and rotates only the added names", () => {
     const list = [...DEFAULT_FLOW_WATCHLIST];
     const open = new Date("2026-10-01T13:30:00Z");
-    const first = flowCronSlice(list, open);
+    const first = planCronScan(list, open);
     expect(first.index).toBe(0);
-    expect(first.tickers).toHaveLength(FLOW_SCAN_TICKERS_PER_RUN);
-    expect(first.tickers[0]).toBe("SPY");
-    const second = flowCronSlice(list, new Date("2026-10-01T13:45:00Z"));
+    expect(first.core).toEqual([...CORE_FLOW_WATCHLIST]);
+    expect(first.priority).toEqual([]);
+    expect(first.rotating).toHaveLength(14);
+    expect(first.rotating[0]).toBe("JPM");
+    expect(first.tickers).toHaveLength(29);
+    expect(first.coreEveryMinutes).toBe(15);
+    expect(first.rotatingEveryMinutes).toBe(30);
+    expect(first.tickers.slice(0, 15)).toEqual([...CORE_FLOW_WATCHLIST]);
+
+    const second = planCronScan(list, new Date("2026-10-01T13:45:00Z"));
     expect(second.index).toBe(1);
-    expect(second.tickers[0]).toBe(list[FLOW_SCAN_TICKERS_PER_RUN]);
+    expect(second.core).toEqual([...CORE_FLOW_WATCHLIST]);
+    expect(second.rotating[0]).toBe("XLF");
+    expect(second.rotating).toHaveLength(14);
+    expect(second.tickers.slice(0, 15)).toEqual([...CORE_FLOW_WATCHLIST]);
 
     const seen = new Set<string>();
     for (let i = 0; i < first.count; i++) {
       const at = new Date(open.getTime() + i * 15 * 60 * 1000);
-      const slice = flowCronSlice(list, at);
-      expect(slice.tickers.length).toBeGreaterThan(0);
-      expect(slice.tickers.length).toBeLessThanOrEqual(FLOW_SCAN_TICKERS_PER_RUN);
+      const slice = planCronScan(list, at);
+      expect(slice.core).toEqual([...CORE_FLOW_WATCHLIST]);
+      expect(slice.rotating.length).toBeGreaterThan(0);
       slice.tickers.forEach((ticker) => seen.add(ticker));
     }
     expect(Array.from(seen).sort()).toEqual([...list].sort());
+    expect(flowCronSliceNote(first, list.length, undefined)).toMatch(/every 15 minutes/);
+    expect(flowCronSliceNote(first, list.length, undefined)).toMatch(/every 30 minutes/);
+    expect(flowCronSliceNote(first, list.length, "SPY")).toMatch(/replaces the built-in default/);
+
+    const withOpen = planCronScan(list, open, ["hood", "DIA", "SPY", "not a ticker"]);
+    expect(withOpen.priority).toEqual(["HOOD", "DIA"]);
+    expect(withOpen.rotating).not.toContain("HOOD");
+    expect(withOpen.tickers.slice(0, 15)).toEqual([...CORE_FLOW_WATCHLIST]);
+    expect(withOpen.tickers).toContain("DIA");
+    expect(planCronScan(list, new Date("2026-10-01T13:45:00Z"), ["HOOD", "DIA"]).tickers.slice(0, 17)).toEqual([
+      ...CORE_FLOW_WATCHLIST, "HOOD", "DIA",
+    ]);
+
+    const crowded = planCronScan(list, open, ["JPM", "BAC", "GS"]);
+    expect(crowded.priority).toEqual(["JPM", "BAC", "GS"]);
+    expect(crowded.rotating).toHaveLength(12);
+    expect(crowded.rotatingEveryMinutes).toBe(45);
+    expect(crowded.tickers.slice(0, 15)).toEqual([...CORE_FLOW_WATCHLIST]);
+    const crowdedSeen = new Set<string>();
+    for (let i = 0; i < crowded.count; i++) {
+      const slice = planCronScan(list, new Date(open.getTime() + i * 15 * 60 * 1000), ["JPM", "BAC", "GS"]);
+      expect(slice.priority).toEqual(["JPM", "BAC", "GS"]);
+      slice.rotating.forEach((ticker) => crowdedSeen.add(ticker));
+    }
+    expect(crowdedSeen.size).toBe(25);
+
+    const custom = planCronScan(["JPM", "BAC", "XOM"], open, []);
+    expect(custom.core).toEqual([]);
+    expect(custom.tickers).toEqual(["JPM", "BAC", "XOM"]);
+    expect(custom.rotatingEveryMinutes).toBe(15);
 
     let offset = 0;
     const chunked = new Set<string>();
@@ -347,18 +394,23 @@ describe("estimated flow scoring", () => {
     }
     expect(chunked.size).toBe(list.length);
 
-    const planned = plannedCronBudget(list.length);
-    expect(planned.tickers).toBe(FLOW_SCAN_TICKERS_PER_RUN);
+    const planned = plannedCronBudget(list, open);
+    expect(planned.tickers).toBe(29);
+    expect(planned.chainRequests).toBe(82);
+    expect(planned.historyRequests).toBe(58);
+    expect(planned.volHistoryRequests).toBe(9);
     expect(planned.withinChainCap).toBe(true);
     expect(planned.withinHistoryCap).toBe(true);
-    expect(planned.fitsDefaultDuration).toBe(true);
-    expect(planned.chainRequests).toBeLessThanOrEqual(100);
-    expect(planned.historyRequests).toBeLessThanOrEqual(60);
-    expect(planned.estimatedWallMs).toBeLessThan(60_000);
+    expect(planned.estimatedWallMs).toBe(76_000);
+    expect(planned.estimatedWallMs).toBeGreaterThan(60_000);
+    expect(planned.fitsFunctionBudget).toBe(true);
+    expect(FLOW_FUNCTION_BUDGET_MS).toBe(300_000);
+    expect(plannedCronBudget(list, open, ["JPM", "BAC", "GS"]).fitsFunctionBudget).toBe(true);
 
     const whole = fullListCronBudget(list.length);
-    expect(whole.fitsDefaultDuration).toBe(false);
+    expect(whole.fitsFunctionBudget).toBe(false);
     expect(whole.withinHistoryCap).toBe(false);
+    expect(whole.chainRequests).toBeLessThanOrEqual(100);
   });
 
   it("stores the volumes that the next scan will diff", () => {

@@ -18,7 +18,7 @@ import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { gradeFlowRow } from "@/app/lib/verdict";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 /**
  * Estimated flow from Schwab chains.

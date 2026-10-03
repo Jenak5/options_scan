@@ -9,14 +9,15 @@ import {
 import { currentDailyLoss, loadAlertBook, rememberSentAlert } from "@/app/lib/alertStore";
 import { lastAlertBookWriteError, noteAlertSentUnsaved } from "@/app/lib/schwabStore";
 import { denyIfUnauthorized } from "@/app/lib/auth";
-import { flowCronSlice, flowCronSliceNote, selectAlertRows, watchlistFromEnv } from "@/app/lib/flow";
+import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
+import { openScanTickers } from "@/app/lib/shadowStore";
 import { chicagoDate } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { sendTelegramAlert, formatFlowAlert } from "@/app/lib/telegram";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 export async function GET(request: NextRequest) {
   const denied = await denyIfUnauthorized(request);
@@ -37,16 +38,16 @@ export async function GET(request: NextRequest) {
         const minPremium = alertScanMinPremium(process.env.ALERT_MIN_PREMIUM);
         const otmOnly = process.env.ALERT_OTM_ONLY === "true";
         const watchlist = watchlistFromEnv(process.env.FLOW_WATCHLIST);
-        const slice = flowCronSlice(watchlist, new Date());
+        const now = new Date();
+        const plan = planCronScan(watchlist, now, await openScanTickers());
         const scan = await scanEstimatedFlow({
-          tickers: slice.tickers,
+          tickers: plan.tickers,
         });
         const rows = selectAlertRows(scan.rows, {
           minPremium,
           otmOnly,
           limit: 80,
         });
-        const now = new Date();
         const tradingDay = chicagoDate(now);
         const losses = await currentDailyLoss(now);
         const maxPerDay = alertsPerDayLimit(process.env.ALERT_MAX_PER_DAY);
@@ -59,7 +60,7 @@ export async function GET(request: NextRequest) {
           limit: room,
         });
         let alertsSent = 0;
-        const log: string[] = [flowCronSliceNote(slice, watchlist.length, process.env.FLOW_WATCHLIST)];
+        const log: string[] = [flowCronSliceNote(plan, watchlist.length, process.env.FLOW_WATCHLIST)];
 
         for (const item of picks) {
           if (alertsSent >= room) break;

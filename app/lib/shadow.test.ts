@@ -25,7 +25,7 @@ import {
   summarizeShadows,
   type ShadowTrade,
 } from "@/app/lib/shadow";
-import { loadShadowPage, runShadowPass, shadowCsv } from "@/app/lib/shadowStore";
+import { loadShadowPage, openScanTickers, runShadowPass, shadowCsv } from "@/app/lib/shadowStore";
 import { addTrade, buildTrade, emptyTradeLog } from "@/app/lib/trades";
 
 const OPEN = new Date("2026-10-01T15:00:00Z");
@@ -284,6 +284,28 @@ describe("shadow store", () => {
     const csv = await shadowCsv();
     expect(csv).toContain(saved.ticker);
     expect(csv).toContain(",no");
+  });
+
+  it("lists open shadow and paper tickers for the cron scan", async () => {
+    const openHood = openShadow({ id: "shadow-hood-open", ticker: "HOOD", alertId: "alert-hood" });
+    const closedSpy = openShadow({ id: "shadow-spy-closed", status: "closed", closedAt: OPEN.getTime(), exitReason: "stop", exitPrice: 1 });
+    expect(await updateShadowBook(() => JSON.stringify({ version: 1, records: [openHood, closedSpy] }))).toBe(true);
+    const built = buildTrade({
+      ticker: "dia",
+      putCall: "put",
+      strike: 400,
+      expiration: "2026-10-16",
+      contracts: 1,
+      entryPrice: 2,
+      alertId: null,
+      alertGrade: null,
+      alertVerdict: null,
+    }, "t_openscandia1234", OPEN);
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    const closed = { ...built.trade, id: "t_openscanclosed1", ticker: "AAPL", closedAt: OPEN.getTime(), exitPrice: 2 };
+    expect(await updateTradeLog(() => JSON.stringify(addTrade(addTrade(emptyTradeLog(), built.trade), closed)))).toBe(true);
+    expect(await openScanTickers()).toEqual(["HOOD", "DIA"]);
   });
 
   it("does not replace an unreadable scorecard", async () => {

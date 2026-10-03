@@ -11,9 +11,9 @@ import {
 import { currentDailyLoss, loadAlertBook, rememberSentAlert } from "@/app/lib/alertStore";
 import { lastAlertBookWriteError, noteAlertSentUnsaved } from "@/app/lib/schwabStore";
 import { hasValidBearer } from "@/app/lib/auth";
-import { flowCronSlice, flowCronSliceNote, selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
+import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
-import { runShadowPass } from "@/app/lib/shadowStore";
+import { openScanTickers, runShadowPass } from "@/app/lib/shadowStore";
 import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { planExitsForAsk } from "@/app/lib/exits";
@@ -23,7 +23,7 @@ import { formatVolArbSummary, type VolArbReading, type VolSignal } from "@/app/l
 import { scanVolArb } from "@/app/lib/volScan";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // AUTOMATED ALERT CRON  — /api/cron
@@ -31,6 +31,8 @@ export const maxDuration = 60;
 // weekdays (see vercel.json). That window covers Central market hours in
 // both daylight and standard time. This handler then keeps only
 // 8:30am–3:00pm America/Chicago, Monday–Friday.
+// Each run scans the original 15 names, any open shadow or paper ticker,
+// and one group of the added names. maxDuration is 300 seconds.
 //
 // Auth is Authorization: Bearer <CRON_SECRET> only. A query secret is ignored.
 // Telegram and the alert book get letter A and B only, capped per Chicago day.
@@ -240,10 +242,10 @@ export async function GET(request: NextRequest) {
 
     const losses = await currentDailyLoss(now);
     const watchlist = watchlistFromEnv(process.env.FLOW_WATCHLIST);
-    const slice = flowCronSlice(watchlist, now);
-    log.push(flowCronSliceNote(slice, watchlist.length, process.env.FLOW_WATCHLIST));
+    const plan = planCronScan(watchlist, now, await openScanTickers());
+    log.push(flowCronSliceNote(plan, watchlist.length, process.env.FLOW_WATCHLIST));
     const scan = await scanEstimatedFlow({
-      tickers: slice.tickers,
+      tickers: plan.tickers,
     });
     if (scan.errors.length > 0) {
       log.push(`Chain errors: ${scan.errors.map((item) => item.ticker).join(", ")}`);

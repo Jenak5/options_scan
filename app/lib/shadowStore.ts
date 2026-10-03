@@ -48,6 +48,28 @@ export async function loadShadowPage(now: Date): Promise<ShadowPage> {
   };
 }
 
+/** Tickers with an open shadow alert or an open paper trade. Cron scans these every run. */
+export async function openScanTickers(): Promise<string[]> {
+  const [shadowText, tradeText] = await Promise.all([readShadowBookText(), readTradeLogText()]);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const add = (ticker: string) => {
+    const symbol = ticker.trim().toUpperCase();
+    if (!symbol || seen.has(symbol)) return;
+    seen.add(symbol);
+    out.push(symbol);
+  };
+  const shadows = parseShadowBook(shadowText).records;
+  for (let i = 0; i < shadows.length; i++) {
+    if (shadows[i].status === "open") add(shadows[i].ticker);
+  }
+  const trades = parseTradeLog(tradeText).trades;
+  for (let i = 0; i < trades.length; i++) {
+    if (trades[i].closedAt == null) add(trades[i].ticker);
+  }
+  return out;
+}
+
 export async function shadowCsv(): Promise<string> {
   const [text, tradeText] = await Promise.all([readShadowBookText(), readTradeLogText()]);
   const book = parseShadowBook(text);
