@@ -1001,18 +1001,24 @@ function cloneStoreStatus(status: PersistedStoreStatus): PersistedStoreStatus {
 }
 
 export async function readScanHealth(): Promise<ScanHealth> {
-  const status = await loadPersistedStatus();
+  // Cron and /api/health run in different instances. The process copy is only
+  // for a failure the shared store refused to save. Health must read the store.
+  if (resolveStoreKind() === "memory") {
+    const status = await loadPersistedStatus();
+    return { ...status.scan };
+  }
+  const status = await readStatusFromStore();
   return { ...status.scan };
 }
 
-export async function writeScanHealth(scan: ScanHealth): Promise<void> {
-  const status = await loadPersistedStatus();
+export async function writeScanHealth(scan: ScanHealth): Promise<boolean> {
+  const status = await loadStatusForWrite();
   status.scan = parseScanHealth(scan);
-  await persistStoreStatus(status);
+  return persistStoreStatus(status);
 }
 
 export async function noteAlertSentUnsaved(now: Date): Promise<void> {
-  const status = await loadPersistedStatus();
+  const status = await loadStatusForWrite();
   status.alertsSentUnsavedAt = now.getTime();
   await persistStoreStatus(status);
 }
@@ -1073,8 +1079,43 @@ function countAlertRecords(text: string | null): number | null {
 async function loadPersistedStatus(): Promise<PersistedStoreStatus> {
   if (memoryStoreStatus) return cloneStoreStatus(memoryStoreStatus);
   const loaded = await readStatusFromStore();
-  memoryStoreStatus = loaded;
+  memoryStoreStatus = cloneStoreStatus(loaded);
   return cloneStoreStatus(loaded);
+}
+
+function statusHasSharedData(status: PersistedStoreStatus): boolean {
+  if (status.alertsSentUnsavedAt != null) return true;
+  if (Object.keys(status.failures).length > 0) return true;
+  const scan = status.scan;
+  return scan.lastSuccessAt != null
+    || scan.lastRunAt != null
+    || scan.runStartedAt != null
+    || scan.lastShadowAt != null
+    || scan.lastBrowserScanAt != null
+    || scan.lastOutcome != null
+    || scan.lastReason != null
+    || scan.skipNotifiedAt != null
+    || scan.tastytradeOk != null
+    || scan.tastytradeStatus != null
+    || scan.tastytradeCheckedAt != null
+    || scan.tastytradeMessage != null;
+}
+
+/**
+ * Start a shared write from the blob or KV record so a warm instance does not
+ * put its older process copy over a scan another instance just finished.
+ * When that read is empty, keep a failure this process recorded after the
+ * store rejected the write.
+ */
+async function loadStatusForWrite(): Promise<PersistedStoreStatus> {
+  const kind = resolveStoreKind();
+  if (kind === "blob" || kind === "kv") {
+    const shared = await readStatusFromStore();
+    if (statusHasSharedData(shared)) return cloneStoreStatus(shared);
+    if (memoryStoreStatus) return cloneStoreStatus(memoryStoreStatus);
+    return cloneStoreStatus(shared);
+  }
+  return loadPersistedStatus();
 }
 
 async function readStatusFromStore(): Promise<PersistedStoreStatus> {
@@ -1128,21 +1169,29 @@ function parseStoreStatus(text: string): PersistedStoreStatus {
   }
 }
 
-async function persistStoreStatus(status: PersistedStoreStatus): Promise<void> {
+async function persistStoreStatus(status: PersistedStoreStatus): Promise<boolean> {
   memoryStoreStatus = cloneStoreStatus(status);
   const kind = resolveStoreKind();
+  if (kind === "memory") return true;
+  if (kind === "unconfigured") {
+    warnScanHealthWrite("Scan health storage is not configured");
+    return false;
+  }
   const body = JSON.stringify(memoryStoreStatus);
-  if (kind === "memory" || kind === "unconfigured") return;
   if (kind === "kv") {
     try {
       await kvCommand(["SET", STORE_STATUS_KEY, body]);
+      return true;
     } catch (err) {
-      logStoreFailure("Store status could not be written", err);
+      warnScanHealthWrite(err);
+      return false;
     }
-    return;
   }
   const token = blobToken();
-  if (!token) return;
+  if (!token) {
+    warnScanHealthWrite("Blob storage is not configured");
+    return false;
+  }
   try {
     await blobClient.put(SCHWAB_BLOB_STORE_STATUS_PATH, body, {
       access: "private",
@@ -1152,15 +1201,27 @@ async function persistStoreStatus(status: PersistedStoreStatus): Promise<void> {
       contentType: "application/json",
       token,
     });
+    return true;
   } catch (err) {
-    logStoreFailure("Store status could not be written", err);
+    warnScanHealthWrite(err);
+    return false;
   }
+}
+
+function warnScanHealthWrite(err: unknown): void {
+  const message = typeof err === "string"
+    ? err
+    : redactSecrets(err instanceof Error ? err.message : "Unknown error");
+  const status = typeof err === "string" ? null : storeErrorStatus(err);
+  console.warn(status == null
+    ? `Scan health could not be written: ${message}`
+    : `Scan health could not be written: ${message} (status ${status})`);
 }
 
 async function recordStoreFailure(target: JsonStoreTarget, operation: "read" | "write", err: unknown): Promise<void> {
   const sentence = operation === "read" ? `${storeLabel(target)} could not be read` : `${storeLabel(target)} could not be written`;
   logStoreFailure(sentence, err);
-  const status = await loadPersistedStatus();
+  const status = await loadStatusForWrite();
   status.failures[target] = {
     target,
     operation,
@@ -1172,9 +1233,10 @@ async function recordStoreFailure(target: JsonStoreTarget, operation: "read" | "
 }
 
 async function clearStoreFailure(target: JsonStoreTarget): Promise<void> {
-  const status = await loadPersistedStatus();
-  const hadFailure = Boolean(status.failures[target]);
-  const hadUnsaved = target === "alert-book" && status.alertsSentUnsavedAt != null;
+  const status = await loadStatusForWrite();
+  const remembered = memoryStoreStatus;
+  const hadFailure = Boolean(status.failures[target] || remembered?.failures[target]);
+  const hadUnsaved = target === "alert-book" && (status.alertsSentUnsavedAt != null || remembered?.alertsSentUnsavedAt != null);
   if (!hadFailure && !hadUnsaved) return;
   delete status.failures[target];
   if (target === "alert-book") status.alertsSentUnsavedAt = null;
