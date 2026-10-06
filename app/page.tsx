@@ -1128,7 +1128,7 @@ export default function OptionsEdgeScanner() {
               <span style={{ color: "#06b6d4" }}>◆</span> OPTIONS EDGE SCANNER
             </h1>
             <p style={{ margin: "3px 0 0", color: "#475569", fontSize: 14 }}>
-              Estimated flow · Verdict · Alert Report · Trade Gate · Trade log
+              Estimated flow · Verdict · Alert Report · Grade · Trade Gate · Trade log
             </p>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1152,6 +1152,10 @@ export default function OptionsEdgeScanner() {
             padding: "12px 18px", fontSize: 14, fontWeight: 600,
             color: "#475569", letterSpacing: "0.03em", whiteSpace: "nowrap", textDecoration: "none",
           }}>▣ Alert scorecard</a>
+          <a href="/grade" style={{
+            padding: "12px 18px", fontSize: 14, fontWeight: 600,
+            color: "#475569", letterSpacing: "0.03em", whiteSpace: "nowrap", textDecoration: "none",
+          }}>▣ Grade</a>
           <a href="/gate" style={{
             padding: "12px 18px", fontSize: 14, fontWeight: 600,
             color: "#475569", letterSpacing: "0.03em", whiteSpace: "nowrap", textDecoration: "none",

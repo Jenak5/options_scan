@@ -20,6 +20,7 @@ import {
   weeklySummary,
   type DailyStopState,
   type OpenTradeInput,
+  type StoredGradeCheck,
   type StoredTrade,
   type TradeLog,
   type TradeMetrics,
@@ -203,6 +204,85 @@ export async function openPaperLoggedTrade(
     alreadyOpen: held.already != null,
     focusAlertId: held.already ? held.already.alertId : drafted.alertId,
   };
+}
+
+export async function openGradedTrade(
+  input: {
+    ticker: string;
+    putCall: string;
+    strike: number;
+    expiration: string;
+    entryPrice: number;
+    entryPriceSource: "ask" | "typed";
+    flowPremium: number | null;
+    alertGrade: "A" | "B" | "C" | "D" | null;
+    alertVerdict: string | null;
+    gradeOverall: "A" | "B" | "Fail";
+    thesis: string | null;
+    gradeChecks: StoredGradeCheck[] | null;
+    quotedAt: number | null;
+  },
+  now: Date,
+): Promise<{ ok: true; page: TradePage; alreadyOpen: boolean } | { ok: false; error: string }> {
+  const cost = paperCostError(input.entryPrice, 1);
+  if (cost) return { ok: false, error: cost };
+
+  const book = await loadAlertBook();
+  const alert = resolvePaperAlert(book.records, input);
+  const held: { already: StoredTrade | null; error: string | null; blocked: string | null } = {
+    already: null,
+    error: null,
+    blocked: null,
+  };
+  const saved = await updateTradeLog((current) => {
+    const log = parseTradeLog(current);
+    const open = findOpenContract(log.trades, {
+      ticker: input.ticker.trim().toUpperCase(),
+      putCall: input.putCall.trim().toLowerCase() === "put" ? "put" : "call",
+      strike: input.strike,
+      expiration: input.expiration,
+      ask: input.entryPrice,
+      grade: input.alertGrade,
+      verdict: input.alertVerdict,
+      flowPremium: input.flowPremium,
+      alertId: alert?.id ?? null,
+    });
+    if (open) {
+      held.already = open;
+      return JSON.stringify(log);
+    }
+    if (dailyStopState(log.trades, now).dailyStop) {
+      held.blocked = DAILY_STOP_PAPER_MESSAGE;
+      return JSON.stringify(log);
+    }
+    const built = buildTrade({
+      ticker: input.ticker,
+      putCall: input.putCall,
+      strike: input.strike,
+      expiration: input.expiration,
+      contracts: 1,
+      entryPrice: input.entryPrice,
+      structure: "single",
+      alertId: alert?.id ?? null,
+      alertVerdict: input.alertVerdict,
+      alertGrade: input.alertGrade,
+      entryPriceSource: input.entryPriceSource,
+      flowPremium: input.flowPremium,
+      gradeOverall: input.gradeOverall,
+      thesis: input.thesis,
+      gradeChecks: input.gradeChecks,
+      quotedAt: input.quotedAt,
+    }, newTradeId(), now);
+    if (!built.ok) {
+      held.error = built.error;
+      return JSON.stringify(log);
+    }
+    return JSON.stringify(addTrade(log, built.trade));
+  });
+  if (!saved) return { ok: false, error: STORE_MESSAGE };
+  if (held.blocked) return { ok: false, error: held.blocked };
+  if (held.error) return { ok: false, error: held.error };
+  return { ok: true, page: await loadTradePage(now), alreadyOpen: held.already != null };
 }
 
 export async function openLoggedTrade(input: OpenTradeInput, now: Date): Promise<{ ok: true; page: TradePage } | { ok: false; error: string }> {

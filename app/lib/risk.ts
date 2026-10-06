@@ -9,10 +9,22 @@
 export const ACCOUNT_SIZE_DOLLARS = 3_000;
 
 /**
- * Hard loss cap for one trade: $875.
- * The Gate, the checklist, alert sizing, and the paper trade log all read this.
+ * Hard loss cap for one trade. The code uses $875.
+ * The Gate, the checklist, alert sizing, and the paper trade log all read
+ * MAX_LOSS_DOLLARS, so this is the only place to change the cap.
+ * Set MAX_LOSS_DOLLARS in the environment to override it. An empty or
+ * invalid value keeps $875.
  */
-export const MAX_LOSS_DOLLARS = 875;
+export const DEFAULT_MAX_LOSS_DOLLARS = 875;
+
+export function readMaxLossDollars(raw: string | undefined): number {
+  if (raw == null || raw.trim() === "") return DEFAULT_MAX_LOSS_DOLLARS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 100_000) return DEFAULT_MAX_LOSS_DOLLARS;
+  return parsed;
+}
+
+export const MAX_LOSS_DOLLARS = readMaxLossDollars(process.env.MAX_LOSS_DOLLARS);
 
 /** Minimum open interest at the chosen strike. */
 export const MIN_OPEN_INTEREST = 500;

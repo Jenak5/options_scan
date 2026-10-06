@@ -180,6 +180,32 @@ export function gradeContract(input: {
   });
 }
 
+export interface SetupFacts {
+  dteFit: "ideal" | "short" | "long" | "poor";
+  distanceFits: boolean;
+  distanceIdeal: boolean;
+  flowSignalCount: number;
+  qualifiesForA: boolean;
+  level: { checked: boolean; poor: boolean; sentence: string };
+  premiumLimit: ReturnType<typeof premiumLimitForAsk>;
+  flowFit: ReturnType<typeof flowPremiumFit>;
+}
+
+/** The same facts gradeSetup uses. Grade my trade reads these instead of copying the rules. */
+export function readSetupFacts(input: SetupInput): SetupFacts {
+  const signals = flowSignals(input);
+  return {
+    dteFit: dteClass(input.dte),
+    distanceFits: distanceFits(input),
+    distanceIdeal: distanceIdeal(input),
+    flowSignalCount: signals.length,
+    qualifiesForA: qualifiesForA(input, signals),
+    level: assessLevels(input),
+    premiumLimit: premiumLimitForAsk(input.ask, input.definedRiskSpread),
+    flowFit: flowPremiumFit(input.notionalPremium),
+  };
+}
+
 export function gradeSetup(input: SetupInput): AlertVerdict {
   const market = evaluateQuoteChecks(toContract(input), input.delayed);
   const expired = input.dte != null && input.dte < 0;
@@ -188,26 +214,26 @@ export function gradeSetup(input: SetupInput): AlertVerdict {
     || !market.liquidityPasses
     || market.maxContracts == null;
 
-  const signals = flowSignals(input);
-  const distanceOk = distanceFits(input);
-  const dteFit = dteClass(input.dte);
-  const premiumLimit = premiumLimitForAsk(input.ask, input.definedRiskSpread);
-  const flowFit = flowPremiumFit(input.notionalPremium);
+  const facts = readSetupFacts(input);
+  const distanceOk = facts.distanceFits;
+  const dteFit = facts.dteFit;
+  const premiumLimit = facts.premiumLimit;
+  const flowFit = facts.flowFit;
   const dailyStop = input.consecutiveLosses != null && !dailyStopPasses(input.consecutiveLosses);
 
   let checklist: "TAKE" | "WATCH" | "SKIP" = "WATCH";
   let uncapped: LetterGrade = "C";
-  const take = dteFit === "ideal" && distanceOk && signals.length >= ALERT_RULES.takeMinFlowSignals;
+  const take = dteFit === "ideal" && distanceOk && facts.flowSignalCount >= ALERT_RULES.takeMinFlowSignals;
   if (hardSkip) {
     checklist = "SKIP";
     uncapped = "D";
-  } else if (take && qualifiesForA(input, signals)) {
+  } else if (take && facts.qualifiesForA) {
     checklist = "TAKE";
     uncapped = "A";
   } else if (take) {
     checklist = "TAKE";
     uncapped = "B";
-  } else if (signals.length >= 1 || dteFit === "ideal" || dteFit === "short" || distanceOk) {
+  } else if (facts.flowSignalCount >= 1 || dteFit === "ideal" || dteFit === "short" || distanceOk) {
     checklist = "WATCH";
     uncapped = "C";
   } else {
@@ -222,7 +248,7 @@ export function gradeSetup(input: SetupInput): AlertVerdict {
     uncapped = noHigherThan(uncapped, "B");
   }
 
-  const levelsRead = assessLevels(input);
+  const levelsRead = facts.level;
   if (levelsRead.poor && !hardSkip) {
     if (checklist === "TAKE") {
       checklist = "WATCH";
@@ -263,7 +289,7 @@ export function gradeSetup(input: SetupInput): AlertVerdict {
     reasons: buildReasons(
       input,
       market,
-      signals.length,
+      facts.flowSignalCount,
       verdict,
       expired,
       levelsRead.sentence,

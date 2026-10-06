@@ -76,6 +76,7 @@ Set every secret in Vercel as a **Sensitive** variable. Do not leave them readab
 | `ALERT_MAX_PER_DAY` | No | Max Telegram alerts per Chicago trading day. Default 5. Only 1–50 is accepted. |
 | `FLOW_WATCHLIST` | No | Comma-separated tickers for the flow scan and cron. Optional. |
 | `NEXT_PUBLIC_DEFAULT_WATCHLIST` | No | Browser-visible default tickers |
+| `MAX_LOSS_DOLLARS` | No | Loss cap and grade cost ceiling for one contract. Default 875. The Gate, alerts, Grade my trade, and the paper trade log all read this. Empty or invalid keeps 875. |
 
 Tastytrade auth is the **OAuth refresh-token grant only**. Do not set a tastytrade username or password. Username/password session login was removed by tastytrade on 2026-02-11.
 
@@ -89,7 +90,7 @@ curl -H "Authorization: Bearer $CRON_SECRET" "https://<your-deployment>/api/cron
 
 ## Account size
 
-The account is **$3,000**. The most one trade can lose is **$875**. That ceiling lives in `app/lib/risk.ts`. The Gate, the checklist, the alerts, and the paper trade log all use it.
+The account is **$3,000**. The most one trade can lose is **$875**. That ceiling lives in `app/lib/risk.ts` as `MAX_LOSS_DOLLARS`. Set the `MAX_LOSS_DOLLARS` environment variable to change it in one place. An empty or invalid value keeps 875. The Gate, the checklist, the alerts, Grade my trade, and the paper trade log all use it.
 
 The old Kelly Lab assumed a **$5,000** account and a **55%** win rate. That model is retired. The Kelly tab is only an illustration, and it is not used to size a trade.
 
@@ -201,6 +202,8 @@ Alert Report (session required, same as the other tabs) lists recent alerts and 
 - If one contract at the ask is already over $875, the result says so and suggests a debit spread
 - The underlying stop, time stop, and profit rule have to be filled in. Time and profit start from the exit defaults: take half off at +40% of the debit, stop at -25% of the debit and never more than $875, and get out if the trade is still flat after 3 trading days. Be out before the last week to expiration. A debit spread uses those same percents on the net debit. Change `TRADE_RULES` to tune them. The 3:00pm Chicago checkpoint is only for grading an alert's midpoint, not for this exit.
 - Two losing closes in a row, from the trade log, is a NO for the day. It is not a broker fill log.
+
+`/grade` (session required) is Grade my trade. Enter a ticker, expiration, strike, and call or put. A planned entry and a short thesis are optional. `POST /api/grade` reads the live Schwab chain and grades that contract with the same checklist as the alerts (`gradeContract` in `app/lib/verdict.ts`). The page shows A, B, or Fail, one row per check (pass, fail, or unknown), and the quote time. A missing quote, no flow for that strike, a provider error, a closed market, or a stale quote is unknown, never a pass. An unknown on a required check cannot be an A. Save to Trade Log writes an open paper trade through the existing trade log, including the grade, the check rows, the entry, the thesis, and the quote time. One contract over the loss cap is refused, and so is a new paper trade while the daily stop is on.
 
 `/trades` (session required) is the paper trade log. An A or B Telegram alert includes a Paper trade link that opens this page for that contract. The Flow card and the Alert Report have a Paper trade button that records the same simulated entry. The entry price is the ask (ask × 100 is the cost of one contract). One contract over $875 is refused, and so is a size whose total cost is over $875. Open trades show mark-to-market P/L from the Schwab midpoint when a quote is available. She can close at that midpoint or type an exit. Stats are split by grade A and grade B: win rate, average win, average loss, and total P/L. Two losing closes in a row stop new paper trades for the Chicago day. CSV is `GET /api/trades?format=csv`. Nothing on this page places an order.
 

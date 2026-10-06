@@ -26,6 +26,10 @@ interface TradeRow {
   closedAt: number | null;
   exitPrice: number | null;
   exitNote: string | null;
+  gradeOverall?: "A" | "B" | "Fail" | null;
+  thesis?: string | null;
+  quotedAt?: number | null;
+  gradeChecks?: { id: string; label: string; status: "pass" | "fail" | "unknown"; detail: string }[] | null;
   metrics: TradeMetrics;
   mark: number | null;
   markSource: "mid" | null;
@@ -352,7 +356,7 @@ function TradeCard({
           <div style={{ color: "#94a3b8", fontSize: 15, marginTop: 2 }}>{trade.expiration} · {trade.contracts} contract{trade.contracts === 1 ? "" : "s"}</div>
         </div>
         <div style={{ textAlign: "right" }}>
-          <div style={{ fontSize: 20, fontWeight: 700 }}>{trade.alertGrade ?? "—"}</div>
+          <div style={{ fontSize: 20, fontWeight: 700 }}>{trade.gradeOverall ?? trade.alertGrade ?? "—"}</div>
           <div style={{ color: "#94a3b8", fontSize: 13 }}>{trade.alertVerdict ?? (trade.alertId ? "Unlinked" : "No alert")}</div>
         </div>
       </div>
@@ -363,6 +367,20 @@ function TradeCard({
         Flow premium {formatFlowPremium(trade.flowPremium)}
         {trade.alertId ? " · linked to the alert" : ""}
       </p>
+      {trade.thesis && <p style={{ margin: "8px 0 0", fontSize: 15, lineHeight: 1.45 }}>{trade.thesis}</p>}
+      {trade.quotedAt != null && (
+        <p style={{ margin: "4px 0 0", color: "#64748b", fontSize: 13 }}>Quote {stamp(trade.quotedAt)}</p>
+      )}
+      {trade.gradeChecks && trade.gradeChecks.length > 0 && (
+        <details style={{ marginTop: 8 }}>
+          <summary style={{ cursor: "pointer", color: "#94a3b8", fontSize: 14 }}>Grade checks</summary>
+          <ul style={{ margin: "8px 0 0", paddingLeft: 18, color: "#94a3b8", fontSize: 14, lineHeight: 1.45 }}>
+            {trade.gradeChecks.map((check) => (
+              <li key={check.id}>{check.label}: {check.status.toUpperCase()}. {check.detail}</li>
+            ))}
+          </ul>
+        </details>
+      )}
       <p style={{ margin: "8px 0 0", fontSize: 18, fontWeight: 700, color: pnlColor(pnl, open ? null : trade.metrics.result) }}>
         {open
           ? (pnl == null ? "No quote right now" : `${money(pnl)} open`)
