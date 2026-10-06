@@ -1,4 +1,5 @@
 import { OUTCOME_RULES, type LetterGrade } from "@/app/lib/alertConfig";
+import { parseFeatureSnapshot, snapshotFromFlow, type AlertFeatureSnapshot } from "@/app/lib/alertFeatures";
 import { chicagoClock, chicagoDate } from "@/app/lib/marketHours";
 import type { EstimatedSideLabel, FlowRow } from "@/app/lib/flow";
 import type { StoredPriceLevels } from "@/app/lib/levels";
@@ -50,6 +51,11 @@ export interface StoredAlert {
   levelsNote: string | null;
   /** Earnings and macro line at send time. Null on alerts saved before this field existed. */
   eventLine: string | null;
+  /**
+   * Grading inputs at send time.
+   * Missing on alerts saved before learning mode. Those are backfilled only from fields already stored.
+   */
+  features?: AlertFeatureSnapshot | null;
   maxContracts: number | null;
   checkpoints: Record<CheckpointName, CheckpointQuote>;
   outcome: OutcomeGrade;
@@ -148,6 +154,7 @@ export function buildStoredAlert(row: FlowRow, verdict: AlertVerdict, now: Date)
     levels: verdict.levels,
     levelsNote: verdict.levelsNote,
     eventLine: verdict.eventLine,
+    features: snapshotFromFlow(row, now),
     maxContracts: verdict.maxContracts,
     checkpoints: {
       m15: emptyCheckpoint(),
@@ -495,6 +502,7 @@ function parseAlert(value: unknown): StoredAlert | null {
     eventLine: typeof row.eventLine === "string" && row.eventLine.trim()
       ? row.eventLine.trim().slice(0, 500)
       : null,
+    features: parseFeatureSnapshot(row.features),
     maxContracts: optionalCount(row.maxContracts),
     checkpoints,
     outcome: "pending",

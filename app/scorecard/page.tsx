@@ -35,6 +35,29 @@ interface Row {
   countNote: string | null;
 }
 
+interface ExperimentRow extends Omit<Row, "grade"> {
+  grade: "test";
+  experimentLabel: string | null;
+  probeNote: string | null;
+}
+
+interface Experiment {
+  label: string;
+  note: string;
+  trustNote: string;
+  resolved: number;
+  open: number;
+  tooFew: boolean;
+  wins: number;
+  losses: number;
+  flats: number;
+  winRate: number | null;
+  averageWin: number | null;
+  averageLoss: number | null;
+  totalPnl: number;
+  rows: ExperimentRow[];
+}
+
 interface Scorecard {
   stored: boolean;
   estimateNote: string;
@@ -55,6 +78,7 @@ interface Scorecard {
   byTicker: Bucket[];
   byRight: Bucket[];
   rows: Row[];
+  experimental?: Experiment;
 }
 
 export default function ScorecardPage() {
@@ -133,6 +157,61 @@ export default function ScorecardPage() {
             <div style={{ display: "grid", gap: 10 }}>
               {page.byTicker.map((bucket) => <BucketCard key={bucket.key} bucket={bucket} title={bucket.key} />)}
             </div>
+
+            {page.experimental && (
+              <section style={{ ...cardStyle, borderColor: "rgba(251,191,36,0.45)", marginTop: 18 }}>
+                <h2 style={{ ...heading, color: "#fbbf24" }}>{page.experimental.label}</h2>
+                <Note color="#fbbf24">{page.experimental.note}</Note>
+                <Note color={page.experimental.tooFew ? "#fbbf24" : "#94a3b8"}>{page.experimental.trustNote}</Note>
+                <Stats
+                  closed={page.experimental.resolved}
+                  open={page.experimental.open}
+                  winRate={page.experimental.winRate}
+                  averageWin={page.experimental.averageWin}
+                  averageLoss={page.experimental.averageLoss}
+                  totalPnl={page.experimental.totalPnl}
+                  wins={page.experimental.wins}
+                  losses={page.experimental.losses}
+                  flats={page.experimental.flats}
+                />
+                {page.experimental.rows.length === 0 && (
+                  <p style={{ color: "#94a3b8", fontSize: 15, margin: "10px 0 0" }}>
+                    No test shadows yet. A contract already in a scanned chain, with 43 to 60 days to expiry, is recorded here when the other rules would have made it an A or a B.
+                  </p>
+                )}
+                {page.experimental.rows.length > 0 && (
+                  <div style={{ overflowX: "auto", marginTop: 10 }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+                      <thead>
+                        <tr>
+                          {["Ticker", "Right", "Status", "Exit", "P/L"].map((label) => (
+                            <th key={label} style={thStyle}>{label}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {page.experimental.rows.map((row) => {
+                          const pnl = row.status === "closed" ? row.pnlDollars : row.unrealizedPnl;
+                          return (
+                            <tr key={row.id}>
+                              <td style={tdStyle}>
+                                {row.ticker}
+                                <div style={{ color: "#fbbf24", fontSize: 12, marginTop: 2 }}>{row.experimentLabel ?? "Test: 43-60 DTE"}</div>
+                                {row.probeNote && <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>{row.probeNote}</div>}
+                              </td>
+                              <td style={tdStyle}>{row.putCall === "put" ? "Put" : "Call"}</td>
+                              <td style={tdStyle}>{row.status === "open" ? "Open" : "Closed"}</td>
+                              <td style={tdStyle}>{row.exitLabel || "n/a"}</td>
+                              <td style={{ ...tdStyle, color: pnlColor(pnl) }}>{pnl == null ? "n/a" : signed(pnl)}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+            )}
 
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, marginTop: 22 }}>
               <h2 style={{ ...heading, margin: 0 }}>Recent alerts</h2>

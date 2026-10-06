@@ -1,11 +1,16 @@
 import { loadAlertBook } from "@/app/lib/alertStore";
 import { quoteContractMarks } from "@/app/lib/tradeQuotes";
 import { parseTradeLog } from "@/app/lib/trades";
+import { chooseExperimental, experimentalShadow } from "@/app/lib/experiment";
+import type { FlowRow } from "@/app/lib/flow";
 import {
   addMissingShadows,
+  addShadowRecords,
   applyShadowQuote,
+  attachMissingFeatures,
   contractKey,
   emptyShadowBook,
+  isExperimentShadow,
   mergeShadowBooks,
   parseShadowBook,
   shadowsToCsv,
@@ -61,7 +66,7 @@ export async function openScanTickers(): Promise<string[]> {
   };
   const shadows = parseShadowBook(shadowText).records;
   for (let i = 0; i < shadows.length; i++) {
-    if (shadows[i].status === "open") add(shadows[i].ticker);
+    if (shadows[i].status === "open" && !isExperimentShadow(shadows[i])) add(shadows[i].ticker);
   }
   const trades = parseTradeLog(tradeText).trades;
   for (let i = 0; i < trades.length; i++) {
@@ -83,11 +88,13 @@ export async function shadowCsv(): Promise<string> {
 export async function runShadowPass(now: Date): Promise<ShadowPassResult> {
   const [alertBook, currentText] = await Promise.all([loadAlertBook(), readShadowBookText()]);
   const synced = addMissingShadows(parseShadowBook(currentText), alertBook.records);
-  const due = shadowsToQuote(synced.book.records);
+  const withFeatures = attachMissingFeatures(synced.book.records, alertBook.records);
+  const featured: ShadowBook = { version: 1, records: withFeatures };
+  const due = shadowsToQuote(featured.records);
   const dueIds = new Set(due.map((row) => row.id));
   const quotes = await quoteContractMarks(due.map(asQuotable));
   const quotedIds = new Set<string>();
-  const nextRecords = synced.book.records.map((row) => {
+  const nextRecords = featured.records.map((row) => {
     if (row.status !== "open") return row;
     if (!dueIds.has(row.id)) return applyShadowQuote(row, null, now);
     const quote = quotes[row.id] ?? null;
@@ -96,8 +103,8 @@ export async function runShadowPass(now: Date): Promise<ShadowPassResult> {
   });
   const quoted = quotedIds.size;
   const edited: ShadowBook = { version: 1, records: nextRecords };
-  const closed = countClosed(synced.book.records, edited.records);
-  if (sameBook(synced.book, edited) && synced.opened === 0) {
+  const closed = countClosed(featured.records, edited.records);
+  if (sameBook(featured, edited) && synced.opened === 0) {
     return { opened: 0, quoted, closed: 0, saved: true };
   }
   const saved = await updateShadowBook((current) => {
@@ -105,6 +112,35 @@ export async function runShadowPass(now: Date): Promise<ShadowPassResult> {
     return JSON.stringify(merged);
   });
   return { opened: synced.opened, quoted, closed, saved };
+}
+
+/**
+ * Open test shadows from contracts the scan already scored.
+ * No chain read. Quotes wait for a later shadow pass, inside the existing cap.
+ */
+export async function recordExperimentalShadows(
+  rows: readonly FlowRow[],
+  consecutiveLosses: number | null,
+  now: Date,
+): Promise<{ opened: number; saved: boolean }> {
+  const current = parseShadowBook(await readShadowBookText());
+  if (chooseExperimental({ rows, consecutiveLosses, now, existing: current.records }).length === 0) {
+    return { opened: 0, saved: true };
+  }
+  let opened = 0;
+  const saved = await updateShadowBook((text) => {
+    const latest = parseShadowBook(text);
+    const picks = chooseExperimental({ rows, consecutiveLosses, now, existing: latest.records });
+    const added: ShadowTrade[] = [];
+    for (let i = 0; i < picks.length; i++) {
+      const shadow = experimentalShadow(picks[i].row, picks[i].probe, now);
+      if (shadow) added.push(shadow);
+    }
+    opened = added.length;
+    if (added.length === 0) return JSON.stringify(latest);
+    return JSON.stringify(addShadowRecords(latest, added));
+  });
+  return { opened: saved ? opened : 0, saved };
 }
 
 function paperAlertIds(tradeText: string | null): Set<string> {

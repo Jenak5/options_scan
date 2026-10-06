@@ -293,7 +293,7 @@ describe("estimated flow scoring", () => {
       range: "NTM",
       strikeCount: 6,
       fromDate: "2026-10-01",
-      toDate: "2026-11-15",
+      toDate: "2026-11-30",
     });
   });
 
@@ -448,6 +448,18 @@ describe("scan expirations", () => {
       contract({ expiration: "2026-12-01", strike: 3 }),
     ], 2, "2026-10-01");
     expect(kept.map((row) => row.expiration).sort()).toEqual(["2026-10-15", "2026-10-22"]);
+  });
+
+  it("keeps a few 43 to 60 day dates from the same chain and drops a date past 60", () => {
+    const kept = keepScanExpirations([
+      contract({ expiration: "2026-10-02" }),
+      contract({ expiration: "2026-10-08" }),
+      contract({ expiration: "2026-10-15", strike: 1 }),
+      contract({ expiration: "2026-10-22", strike: 2 }),
+      contract({ expiration: "2026-11-20", strike: 3 }),
+      contract({ expiration: "2026-12-18", strike: 4 }),
+    ], 2, "2026-10-01");
+    expect(kept.map((row) => row.expiration).sort()).toEqual(["2026-10-15", "2026-10-22", "2026-11-20"]);
   });
 });
 

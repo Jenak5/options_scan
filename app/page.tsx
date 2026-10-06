@@ -1156,6 +1156,10 @@ export default function OptionsEdgeScanner() {
             padding: "12px 18px", fontSize: 14, fontWeight: 600,
             color: "#475569", letterSpacing: "0.03em", whiteSpace: "nowrap", textDecoration: "none",
           }}>▣ Grade</a>
+          <a href="/learn" style={{
+            padding: "12px 18px", fontSize: 14, fontWeight: 600,
+            color: "#475569", letterSpacing: "0.03em", whiteSpace: "nowrap", textDecoration: "none",
+          }}>▣ Learning mode</a>
           <a href="/gate" style={{
             padding: "12px 18px", fontSize: 14, fontWeight: 600,
             color: "#475569", letterSpacing: "0.03em", whiteSpace: "nowrap", textDecoration: "none",

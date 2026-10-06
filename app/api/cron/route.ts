@@ -13,7 +13,7 @@ import { lastAlertBookWriteError, noteAlertSentUnsaved } from "@/app/lib/schwabS
 import { hasValidBearer } from "@/app/lib/auth";
 import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
-import { openScanTickers, runShadowPass } from "@/app/lib/shadowStore";
+import { openScanTickers, recordExperimentalShadows, runShadowPass } from "@/app/lib/shadowStore";
 import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { planExitsForAsk } from "@/app/lib/exits";
@@ -251,6 +251,14 @@ export async function GET(request: NextRequest) {
       log.push(`Chain errors: ${scan.errors.map((item) => item.ticker).join(", ")}`);
     }
     log.push(`Scored ${scan.rows.length} contracts across ${scan.watchlist.length} tickers${scan.cached ? " (cached)" : ""}`);
+
+    try {
+      const experiment = await recordExperimentalShadows(scan.rows, losses, now);
+      log.push(`Test 43-60 DTE: ${experiment.opened} new shadow${experiment.opened === 1 ? "" : "s"} (not alerted)`);
+    } catch (err) {
+      if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+      log.push("Test 43-60 DTE update failed");
+    }
 
     const minPremium = alertScanMinPremium(process.env.ALERT_MIN_PREMIUM);
     const otmOnly = process.env.ALERT_OTM_ONLY === "true";
