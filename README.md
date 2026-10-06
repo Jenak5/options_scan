@@ -29,6 +29,17 @@ Jena: add one GitHub Actions secret or that backup exits before it calls the sca
 - Where: the GitHub repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
 - Value: the same `CRON_SECRET` already stored in Vercel. Do not paste it into the repo or a pull request.
 
+Opening the Flow tab scans Schwab and shows grades on the screen. That used to be display-only: an A or a B on the page was not saved, so Scorecard and Learning mode stayed empty unless the scheduled scan also ran. A Flow load now saves a new A or B (same daily cap and one-setup-per-day rule), opens its shadow, marks that shadow from the chain it already read, and stores the learning snapshot. It does not add a Schwab request for the mark. The scheduled scan still runs on its own clock. A page load does not take the cron slot, so the two do not block each other. Each Flow request writes the same one-line scan log, with the reason `Flow page`.
+
+`GET /api/health` is a read-only check for a monitor that calls it about once an hour during market hours. Send `Authorization: Bearer <HEALTH_TOKEN>`. If `HEALTH_TOKEN` is not set in Vercel, the same header may carry `CRON_SECRET` instead. A signed-in browser session is not enough. The JSON has the last scan time and outcome (the newer of the scheduled scan and a Flow page load), whether Schwab is connected, whether Tastytrade is enabled, alerts saved today, open shadows, the last shadow mark time, learning snapshots saved today, resolved shadows, and the rules version. It does not include tokens or account numbers, and it does not call Tastytrade.
+
+Jena: add `HEALTH_TOKEN` in Vercel if the monitor should not reuse the cron secret.
+
+- Name: `HEALTH_TOKEN`
+- Where: Vercel project **options-scan** → **Settings** → **Environment Variables** → Production. Store it as Sensitive.
+- Value: a long random string, different from `CRON_SECRET`. The monitor sends it as `Authorization: Bearer <HEALTH_TOKEN>` to `https://options-scan.vercel.app/api/health`.
+- Until that variable exists, the monitor can send the existing `CRON_SECRET` the same way.
+
 The handler then checks **America/Chicago** and exits immediately outside **8:30–15:00 Central**, weekdays, except for a short close check. A run can pass `?manual=true` to skip that hours check. That flag is not a secret. The request still needs the bearer token.
 
 From **15:00 through 15:20 Central** the same route only re-quotes alerts already sent that day. It does not send new Telegram alerts in that window. That quote is the same-day close. 15-minute and 1-hour checks run on the regular in-session crons.
@@ -46,6 +57,7 @@ Middleware requires that cookie, or `Authorization: Bearer <CRON_SECRET>`, on ev
 - `/login` and `POST /api/auth/login`
 - `POST /api/auth/logout`
 - `GET /api/cron` (bearer check inside the route)
+- `GET /api/health` (bearer `HEALTH_TOKEN`, or `CRON_SECRET` when `HEALTH_TOKEN` is unset)
 
 `GET /api/schwab/callback` requires the app session. It is not a public route.
 
@@ -61,7 +73,8 @@ Set every secret in Vercel as a **Sensitive** variable. Do not leave them readab
 
 | Variable | Sensitive | Purpose |
 |----------|-----------|---------|
-| `CRON_SECRET` | Yes | Bearer token Vercel cron sends |
+| `CRON_SECRET` | Yes | Bearer token Vercel cron sends. Also accepted by `/api/health` when `HEALTH_TOKEN` is unset |
+| `HEALTH_TOKEN` | Yes | Optional bearer for `GET /api/health`. When set, the health check accepts this token and does not accept `CRON_SECRET` |
 | `APP_PASSWORD` | Yes | Password for `/login` |
 | `SESSION_SECRET` | Yes | Signs the session cookie and the Schwab OAuth state cookie |
 | `TASTYTRADE_ENABLED` | No | Must be exactly `true`, and the three Tastytrade values below must be set, or Tastytrade stays off |

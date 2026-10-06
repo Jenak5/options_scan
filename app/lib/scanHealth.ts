@@ -23,6 +23,11 @@ export interface ScanHealth {
   runStartedAt: number | null;
   /** Last time a shadow was opened, marked, or closed. */
   lastShadowAt: number | null;
+  /**
+   * Last Flow page load or Alerts scan action that finished.
+   * This does not claim the cron slot. A page load must not block the scheduled scan.
+   */
+  lastBrowserScanAt: number | null;
   lastOutcome: ScanOutcome | null;
   lastReason: string | null;
   skipNotifiedAt: number | null;
@@ -60,6 +65,7 @@ export function emptyScanHealth(): ScanHealth {
     lastRunAt: null,
     runStartedAt: null,
     lastShadowAt: null,
+    lastBrowserScanAt: null,
     lastOutcome: null,
     lastReason: null,
     skipNotifiedAt: null,
@@ -82,6 +88,7 @@ export function parseScanHealth(value: unknown): ScanHealth {
     lastRunAt: timeOrNull(row.lastRunAt),
     runStartedAt: timeOrNull(row.runStartedAt),
     lastShadowAt: timeOrNull(row.lastShadowAt),
+    lastBrowserScanAt: timeOrNull(row.lastBrowserScanAt),
     lastOutcome: outcome,
     lastReason: clip(row.lastReason),
     skipNotifiedAt: timeOrNull(row.skipNotifiedAt),
@@ -119,13 +126,24 @@ export function formatScanRunLine(summary: ScanRunSummary): string {
   return `Scan ${summary.outcome}: ${tickers} ticker${tickers === 1 ? "" : "s"}, ${saved} alert${saved === 1 ? "" : "s"} saved, ${opened} shadow${opened === 1 ? "" : "s"} opened, ${marked} marked, ${closed} closed.${tail}`;
 }
 
+/** The newer of the scheduled scan and a Flow page load. */
+export function latestScan(health: ScanHealth): { at: number | null; outcome: ScanOutcome | null } {
+  const browser = health.lastBrowserScanAt;
+  const cron = health.lastRunAt;
+  if (browser != null && (cron == null || browser > cron)) {
+    return { at: browser, outcome: "success" };
+  }
+  return { at: cron, outcome: health.lastOutcome };
+}
+
 export function scanFreshness(health: ScanHealth): ScanFreshness {
-  const outcome = health.lastOutcome ? ` (${health.lastOutcome})` : "";
+  const latest = latestScan(health);
+  const outcome = latest.outcome ? ` (${latest.outcome})` : "";
   return {
-    lastScanAt: health.lastRunAt,
-    lastScan: health.lastRunAt == null
+    lastScanAt: latest.at,
+    lastScan: latest.at == null
       ? "Last scan: not recorded yet"
-      : `Last scan: ${formatChicagoStamp(health.lastRunAt)}${outcome}`,
+      : `Last scan: ${formatChicagoStamp(latest.at)}${outcome}`,
     lastShadowAt: health.lastShadowAt,
     lastShadow: health.lastShadowAt == null
       ? "Last shadow update: not recorded yet"

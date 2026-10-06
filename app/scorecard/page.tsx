@@ -242,7 +242,7 @@ export default function ScorecardPage() {
                 <tbody>
                   {page.rows.length === 0 && (
                     <tr>
-                      <td colSpan={10} style={{ ...tdStyle, color: "#94a3b8" }}>No shadow alerts yet. An A or a B saved in the alert book shows up here on the next scan.</td>
+                      <td colSpan={10} style={{ ...tdStyle, color: "#94a3b8" }}>No shadow alerts yet. An A or a B is saved when the Flow page loads and when the scheduled scan runs.</td>
                     </tr>
                   )}
                   {page.rows.map((row) => {

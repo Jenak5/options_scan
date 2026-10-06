@@ -190,5 +190,12 @@ describe("scan log line", () => {
     expect(fresh.lastShadow).toContain("Last shadow update:");
     expect(formatChicagoStamp(Date.parse("2026-10-06T18:05:00Z"))).toMatch(/1:05/);
     expect(formatChicagoStamp(Date.parse("2026-10-06T18:05:00Z"))).toMatch(/CT|CDT|CST/);
+    const browser = scanFreshness(health({
+      lastRunAt: Date.parse("2026-10-06T17:00:00Z"),
+      lastOutcome: "skipped",
+      lastBrowserScanAt: Date.parse("2026-10-06T18:05:00Z"),
+    }));
+    expect(browser.lastScan).toContain("success");
+    expect(browser.lastScanAt).toBe(Date.parse("2026-10-06T18:05:00Z"));
   });
 });

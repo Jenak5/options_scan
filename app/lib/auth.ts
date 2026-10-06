@@ -218,6 +218,40 @@ export async function verifySessionToken(token: string | undefined | null): Prom
   }
 }
 
+/**
+ * Health monitor. HEALTH_TOKEN when it is set. CRON_SECRET only when HEALTH_TOKEN is unset.
+ * A session cookie is not enough. The token is never logged.
+ */
+export async function hasHealthBearer(
+  request: Request,
+  env: Record<string, string | undefined> = process.env,
+): Promise<boolean> {
+  const token = bearerToken(request);
+  if (!token) return false;
+  const health = readEnvFrom(env, "HEALTH_TOKEN");
+  if (health) return timingSafeEqual(token, health);
+  const cron = readEnvFrom(env, "CRON_SECRET");
+  if (!cron) return false;
+  return timingSafeEqual(token, cron);
+}
+
+function bearerToken(request: Request): string | null {
+  const header = request.headers.get("authorization");
+  if (!header) return null;
+  if (header.length < BEARER_PREFIX.length) return null;
+  if (header.slice(0, BEARER_PREFIX.length).toLowerCase() !== BEARER_PREFIX) return null;
+  const token = header.slice(BEARER_PREFIX.length).trim();
+  if (token.length === 0 || token.length > 4096) return null;
+  return token;
+}
+
+function readEnvFrom(env: Record<string, string | undefined>, name: string): string | null {
+  const value = env[name];
+  if (typeof value !== "string") return null;
+  if (value.length === 0 || value.trim().length === 0) return null;
+  return value;
+}
+
 /** Bearer token or a valid app session. Either missing secret fails that path closed. */
 export async function isAuthorized(request: Request): Promise<boolean> {
   if (await hasValidBearer(request)) return true;

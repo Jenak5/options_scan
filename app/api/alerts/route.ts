@@ -11,7 +11,8 @@ import { lastAlertBookWriteError, noteAlertSentUnsaved } from "@/app/lib/schwabS
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
-import { openScanTickers } from "@/app/lib/shadowStore";
+import { noteBrowserScan } from "@/app/lib/pageScan";
+import { markShadowsFromRows, openMissingShadows, openScanTickers } from "@/app/lib/shadowStore";
 import { chicagoDate } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { sendTelegramAlert, formatFlowAlert } from "@/app/lib/telegram";
@@ -84,6 +85,16 @@ export async function GET(request: NextRequest) {
             log.push(`${item.row.ticker}: Telegram alert sent and saved`);
           }
           await new Promise((r) => setTimeout(r, 1100));
+        }
+
+        try {
+          const opened = await openMissingShadows();
+          const marks = await markShadowsFromRows(scan.rows, now);
+          const touched = (opened.saved && opened.opened > 0) || (marks.saved && (marks.marked > 0 || marks.closed > 0));
+          await noteBrowserScan(now, touched ? now.getTime() : null);
+          log.push(`Shadows: ${opened.opened} opened, ${marks.marked} marked from this scan`);
+        } catch {
+          log.push("Shadow update failed");
         }
 
         return NextResponse.json({
