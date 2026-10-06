@@ -338,9 +338,9 @@ describe("graded trade log", () => {
     });
     expect(report.resolved).toBe(1);
     expect(report.trades[0].source).toBe("paper");
-    expect(report.trades[0].rulesVersion).toBe(2);
+    expect(report.trades[0].rulesVersion).toBe(3);
     expect(report.trades[0].checks?.some((row) => row.id === "spread" && row.status === "pass")).toBe(true);
-    expect(report.factors.find((factor) => factor.id === "rulesVersion")?.buckets.map((bucket) => bucket.key)).toContain("Version 2");
+    expect(report.factors.find((factor) => factor.id === "rulesVersion")?.buckets.map((bucket) => bucket.key)).toContain("Version 3");
     expect(report.factors.find((factor) => factor.id === "check:spread")?.buckets.map((bucket) => bucket.key)).toEqual(["Pass"]);
   });
 });

@@ -37,6 +37,7 @@ import {
   type QuoteChecks,
 } from "@/app/lib/gate";
 import { openingNoise, trendFromPrices, type PairedFlow, type TrendAlignment } from "@/app/lib/marketContext";
+import { buyerCapSentence, likelySideFromEstimate } from "@/app/lib/quoteSide";
 import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 
 /**
@@ -465,6 +466,8 @@ function levelSentence(
  * Quality filters that change an A or a B.
  * Unknown trend, market, or pairing does not change the grade.
  * The first 15 minutes after the open cannot be an A or a B.
+ * An A also requires buyers: the last price at or near the ask.
+ * The next-day open-interest check is not an input. It is recorded later.
  */
 function qualityFilter(input: SetupInput): { cap: LetterGrade | null; blockTake: boolean; sentence: string | null } {
   const notes: string[] = [];
@@ -487,6 +490,10 @@ function qualityFilter(input: SetupInput): { cap: LetterGrade | null; blockTake:
   if (trend === "against" && input.marketAlignment === "against") {
     cap = cap === "C" ? "C" : "B";
     notes.push("Price is on the wrong side of both VWAP and the 20-day average, and SPY and QQQ point the other way. The grade stops at B.");
+  }
+  if (likelySideFromEstimate(input.side) !== "buyers" && cap !== "C") {
+    cap = "B";
+    notes.push(buyerCapSentence(input.side));
   }
   return { cap, blockTake, sentence: notes.length > 0 ? notes.join(" ") : null };
 }
@@ -535,6 +542,7 @@ function buildReasons(
   const priceText = premiumText?.trim() ?? "";
   const qualityLine = qualityText?.trim() ?? "";
   const rest = unique.filter((line) => line !== levelSentenceText && line !== eventText && line !== printText && line !== priceText && line !== qualityLine);
+  preferTimeOverPass(rest);
   const picked: string[] = [];
   if (qualityLine) picked.push(qualityLine);
   if (priceText) picked.push(priceText);
@@ -545,6 +553,17 @@ function buildReasons(
   for (let i = 1; i < rest.length && picked.length < 4; i++) picked.push(rest[i]);
   if (picked.length < 2) picked.push(ALERT_RULES.note);
   return picked.slice(0, 4);
+}
+
+/** The hold-time line explains a weak grade. The gate-pass line only confirms liquidity. */
+function preferTimeOverPass(rest: string[]): void {
+  const pass = "Open interest, volume, and the bid-ask spread pass the Gate.";
+  if (rest[0] !== pass) return;
+  const timeIndex = rest.findIndex((line) => /days to expiration|expires today|Days to expiration/i.test(line));
+  if (timeIndex <= 0) return;
+  const time = rest[timeIndex];
+  rest.splice(timeIndex, 1);
+  rest.unshift(time);
 }
 
 function premiumSentence(input: SetupInput): string | null {

@@ -175,6 +175,24 @@ describe("today's alerts on Flow", () => {
     expect(pinned[0].verdict.grade).toBe("B");
     expect(pinned[0].notionalPremium).toBeCloseTo(1.975 * 1200 * 100);
     expect(pinned[0].verdict.eventLine).toContain("2026-11-15");
+    expect(Number.isFinite(pinned[0].last)).toBe(false);
+    expect(pinned[0].openingLabel).toBeNull();
+  });
+
+  it("shows the saved last price and the opening label, and does not copy the ask into last", () => {
+    const pinned = pinTodayAlerts([], [saved({
+      last: 1.9,
+      openingCheck: {
+        status: "pending",
+        priorOpenInterest: 400,
+        volume: 1200,
+        nextOpenInterest: null,
+        checkedOn: null,
+      },
+    })], TODAY, NOW, "");
+    expect(pinned[0].last).toBe(1.9);
+    expect(pinned[0].last).not.toBe(pinned[0].ask);
+    expect(pinned[0].openingLabel).toBe("Pending (checks tomorrow)");
   });
 
   it("ignores yesterday, a C, and a different ticker when one is typed", () => {

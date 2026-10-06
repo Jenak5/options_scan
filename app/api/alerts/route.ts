@@ -6,7 +6,7 @@ import {
   gradeAlertCandidates,
   indexSentAlerts,
 } from "@/app/lib/alertPolicy";
-import { currentDailyLoss, loadAlertBook, rememberSentAlert } from "@/app/lib/alertStore";
+import { currentDailyLoss, loadAlertBook, recordOpeningChecks, rememberSentAlert } from "@/app/lib/alertStore";
 import { lastAlertBookWriteError, noteAlertSentUnsaved } from "@/app/lib/schwabStore";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv } from "@/app/lib/flow";
@@ -62,6 +62,12 @@ export async function GET(request: NextRequest) {
         });
         let alertsSent = 0;
         const log: string[] = [flowCronSliceNote(plan, watchlist.length, process.env.FLOW_WATCHLIST)];
+        try {
+          const checked = await recordOpeningChecks(scan.chainInterest, now);
+          log.push(`Opening check: ${checked} alert${checked === 1 ? "" : "s"} updated from this chain`);
+        } catch {
+          log.push("Opening check was not saved");
+        }
 
         for (const item of picks) {
           if (alertsSent >= room) break;

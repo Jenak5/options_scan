@@ -20,6 +20,7 @@ import type { FlowRow } from "@/app/lib/flow";
 import { chicagoDate } from "@/app/lib/marketHours";
 import { readAlertBookText, readTradeLogText, updateAlertBook } from "@/app/lib/schwabStore";
 import { dailyStopState, parseTradeLog, weeklyFlagSentence, weeklySummary } from "@/app/lib/trades";
+import { applyOpeningChecks, type ChainInterest } from "@/app/lib/openingCheck";
 import type { AlertVerdict } from "@/app/lib/verdict";
 
 /**
@@ -86,6 +87,23 @@ export async function rememberSentAlert(row: FlowRow, verdict: AlertVerdict, now
     return JSON.stringify(next);
   });
   return saved && kept;
+}
+
+/**
+ * Record the next-day open-interest check from a chain this scan already fetched.
+ * Alerts still waiting, and tickers this scan did not read, are left pending.
+ */
+export async function recordOpeningChecks(interest: ChainInterest | null | undefined, now: Date): Promise<number> {
+  if (!interest || interest.tickers.length === 0) return 0;
+  const preview = applyOpeningChecks(await loadAlertBook(), interest, now);
+  if (preview.updated === 0) return 0;
+  let updated = 0;
+  const saved = await updateAlertBook((current) => {
+    const result = applyOpeningChecks(parseAlertBook(current), interest, now);
+    updated = result.updated;
+    return JSON.stringify(result.book);
+  });
+  return saved ? updated : 0;
 }
 
 export async function saveFollowUps(

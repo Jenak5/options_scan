@@ -7,6 +7,7 @@ import {
 } from "@/app/lib/alertFeatures";
 import type { StoredAlert } from "@/app/lib/alertBook";
 import { calendarDaysBetween, newYorkDate } from "@/app/lib/flow";
+import { likelySideFromEstimate, likelySideText, openingLabel } from "@/app/lib/quoteSide";
 import { MAX_BID_ASK_SPREAD_OF_MID, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import { chicagoClock } from "@/app/lib/marketHours";
 import { SHADOW_MIN_TRUST, isExperimentShadow, shadowExitLabel, type ShadowTrade } from "@/app/lib/shadow";
@@ -175,7 +176,7 @@ export function learningCsv(report: LearnReport): string {
     "openedAt", "closedAt", "exitReason", "pnlDollars", "pnlPercent", "result",
     "flowPremium", "volOiRatio", "volumeJump", "flowSignalCount", "spreadFraction",
     "iv", "delta", "otmFraction", "itmFraction", "dte", "rewardDistance", "riskDistance",
-    "earnings", "side", "maxFavorablePct", "maxAdversePct", "marksSeen",
+    "earnings", "side", "likelySide", "opening", "maxFavorablePct", "maxAdversePct", "marksSeen",
   ];
   const lines = [header.join(",")];
   for (let i = 0; i < report.trades.length; i++) {
@@ -210,6 +211,8 @@ export function learningCsv(report: LearnReport): string {
       num(features.riskDistance),
       features.earnings,
       features.side ?? "",
+      csvLikelySide(features),
+      features.openingCheck == null ? "" : openingLabel(features.openingCheck),
       row.maxFavorablePct == null ? "" : (row.maxFavorablePct * 100).toFixed(2),
       row.maxAdversePct == null ? "" : (row.maxAdversePct * 100).toFixed(2),
       String(row.marksSeen),
@@ -370,14 +373,24 @@ function resolveFeatures(
   alert: StoredAlert | null,
   trade: StoredTrade | null,
 ): AlertFeatureSnapshot {
-  if (shadow?.features?.capturedAtAlert) return shadow.features;
-  if (alert?.features?.capturedAtAlert) return alert.features;
-  if (trade?.features?.capturedAtAlert) return trade.features;
-  if (alert) return featuresForAlert(alert);
-  if (shadow?.features) return shadow.features;
-  if (shadow) return featuresFromWhen(shadow.openedAt, shadow.expiration, null);
-  if (trade) return featuresFromWhen(trade.openedAt, trade.expiration, trade.flowPremium);
-  return emptyFeatures();
+  let features: AlertFeatureSnapshot;
+  if (shadow?.features?.capturedAtAlert) features = shadow.features;
+  else if (alert?.features?.capturedAtAlert) features = alert.features;
+  else if (trade?.features?.capturedAtAlert) features = trade.features;
+  else if (alert) features = featuresForAlert(alert);
+  else if (shadow?.features) features = shadow.features;
+  else if (shadow) features = featuresFromWhen(shadow.openedAt, shadow.expiration, null);
+  else if (trade) features = featuresFromWhen(trade.openedAt, trade.expiration, trade.flowPremium);
+  else features = emptyFeatures();
+  return withRecordedOpening(features, alert);
+}
+
+/** The open-interest check lands the next day, after the snapshot was saved. */
+function withRecordedOpening(features: AlertFeatureSnapshot, alert: StoredAlert | null): AlertFeatureSnapshot {
+  const likelySide = features.likelySide ?? likelySideFromEstimate(features.side);
+  const openingCheck = alert?.openingCheck?.status ?? features.openingCheck;
+  if (likelySide === features.likelySide && openingCheck === features.openingCheck) return features;
+  return { ...features, likelySide, openingCheck };
 }
 
 function featuresFromWhen(openedAt: number, expiration: string, flowPremium: number | null): AlertFeatureSnapshot {
@@ -592,6 +605,22 @@ function factorSpecs(): FactorSpec[] {
       includeTest: false,
       order: ["estimated at ask", "estimated at bid", "estimated mid", "estimated unknown"],
       bucketOf: (row) => row.features.side,
+    },
+    {
+      id: "likelySide",
+      label: "Likely side",
+      cuts: "Estimate from the last price versus the bid and ask. Buyers paying up means at or near the ask. Sellers means at or near the bid. Between them is unclear. This is not a trade print. Unknown is left out.",
+      includeTest: false,
+      order: ["Buyers paying up", "Sellers", "Unclear"],
+      bucketOf: (row) => likelyBucket(row.features.likelySide ?? likelySideFromEstimate(row.features.side)),
+    },
+    {
+      id: "opening",
+      label: "Opening or closing",
+      cuts: "Open interest on the first chain of the next Chicago trading day, compared with the open interest and volume saved on the alert. A rise of at least half that volume is Opening confirmed. Flat, down, or a smaller rise is Likely closing. The check is recorded after the alert and does not change the grade. Alerts saved before this check are left out.",
+      includeTest: false,
+      order: ["Opening confirmed", "Likely closing", "Pending (checks tomorrow)", "Not in the next day's chain"],
+      bucketOf: (row) => row.features.openingCheck == null ? null : openingLabel(row.features.openingCheck),
     },
     {
       id: "right",
@@ -864,6 +893,17 @@ function jumpBucket(value: number | null): string | null {
   if (value == null || !Number.isFinite(value)) return null;
   if (value >= ALERT_RULES.strongVolumeJump) return "Volume jump of 100 or more";
   return "Volume jump under 100";
+}
+
+function csvLikelySide(features: AlertFeatureSnapshot): string {
+  const side = features.likelySide ?? likelySideFromEstimate(features.side);
+  if (side == null) return "";
+  return likelySideText(side);
+}
+
+function likelyBucket(side: AlertFeatureSnapshot["likelySide"]): string | null {
+  if (side == null || side === "unknown") return null;
+  return likelySideText(side);
 }
 
 function alignmentBucket(value: AlertFeatureSnapshot["trendAlignment"]): string | null {

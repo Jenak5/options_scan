@@ -10,6 +10,12 @@ import {
   type EstimatedSideLabel,
   type FlowRow,
 } from "@/app/lib/flow";
+import {
+  likelySideFromEstimate,
+  parseOpeningStatus,
+  type LikelySide,
+  type OpeningStatus,
+} from "@/app/lib/quoteSide";
 import { checkBidAskSpread } from "@/app/lib/gate";
 import type { StoredPriceLevels } from "@/app/lib/levels";
 import {
@@ -74,6 +80,13 @@ export interface AlertFeatureSnapshot {
   aggressor: AggressorSide | null;
   repeatFlow: RepeatFlow | null;
   pairedFlow: PairedFlow | null;
+  /** Buyers, sellers, or unclear, from the stored side. Null when the side was not stored. */
+  likelySide: LikelySide | null;
+  /**
+   * Next-day open interest versus the alert. Null when this snapshot is not an alert check.
+   * Pending until the next trading day's chain is read. The grade does not use this field.
+   */
+  openingCheck: OpeningStatus | null;
 }
 
 const SIDES: EstimatedSideLabel[] = ["estimated at ask", "estimated at bid", "estimated mid", "estimated unknown"];
@@ -108,6 +121,8 @@ export function emptyFeatures(): AlertFeatureSnapshot {
     aggressor: null,
     repeatFlow: null,
     pairedFlow: null,
+    likelySide: null,
+    openingCheck: null,
   };
 }
 
@@ -169,6 +184,8 @@ export function snapshotFromFlow(row: FlowRow, now: Date): AlertFeatureSnapshot 
     aggressor: context?.aggressor ?? aggressorFromSide(row.side),
     repeatFlow: context?.repeatFlow ?? null,
     pairedFlow: context?.pairedFlow ?? null,
+    likelySide: likelySideFromEstimate(row.side),
+    openingCheck: null,
   };
 }
 
@@ -212,6 +229,8 @@ export function backfillFeatures(alert: StoredAlert): AlertFeatureSnapshot {
     aggressor: aggressorFromSide(alert.side),
     repeatFlow: null,
     pairedFlow: null,
+    likelySide: likelySideFromEstimate(alert.side),
+    openingCheck: alert.openingCheck?.status ?? null,
   };
 }
 
@@ -268,7 +287,14 @@ export function parseFeatureSnapshot(value: unknown): AlertFeatureSnapshot | nul
     aggressor: aggressorValue(row.aggressor) ?? aggressorFromSide(side),
     repeatFlow: repeatValue(row.repeatFlow),
     pairedFlow: pairedValue(row.pairedFlow),
+    likelySide: likelyValue(row.likelySide) ?? likelySideFromEstimate(side),
+    openingCheck: parseOpeningStatus(row.openingCheck),
   };
+}
+
+function likelyValue(value: unknown): LikelySide | null {
+  if (value === "buyers" || value === "sellers" || value === "unclear" || value === "unknown") return value;
+  return null;
 }
 
 function minuteCount(value: unknown): number | null {

@@ -103,7 +103,7 @@ export const FLOW_FUNCTION_BUDGET_MS = 300_000;
 export const FLOW_CACHE_MS = 60_000;
 
 export const SIDE_NOTE =
-  "Estimated from the last price versus the bid and ask. Not a sweep print.";
+  "Estimate from the last price versus the bid and ask. Not a trade print and not a sweep.";
 
 export type EstimatedSideLabel =
   | "estimated at ask"

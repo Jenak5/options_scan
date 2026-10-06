@@ -6,6 +6,14 @@ import { formatContractCost, formatFlowPremium } from "@/app/lib/alertConfig";
 import { arrangeFlowCards, type FlowSort, type RightFilter, type VerdictFilter } from "@/app/components/flowArrange";
 import { defaultTimeStop, planExitsForAsk } from "@/app/lib/exits";
 import { FLOW_DISCLAIMER, gateCheckHref, type FlowRow } from "@/app/lib/flow";
+import {
+  LIKELY_SIDE_NOTE,
+  OPENING_NOTE,
+  formatOptionPrice,
+  formatSpread,
+  likelySideFromEstimate,
+  likelySideText,
+} from "@/app/lib/quoteSide";
 import { openInterestPasses, volumePasses } from "@/app/lib/gate";
 import { formatLevelDistance, formatPrice } from "@/app/lib/levels";
 import { MAX_BID_ASK_SPREAD_OF_MID, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
@@ -14,6 +22,7 @@ import type { AlertVerdict } from "@/app/lib/verdict";
 interface ScoredFlow extends FlowRow {
   verdict?: AlertVerdict;
   alertId?: string | null;
+  openingLabel?: string | null;
 }
 
 const INPUT: React.CSSProperties = {
@@ -246,12 +255,26 @@ function FlowCard({ row }: { row: ScoredFlow }) {
       <p style={{ margin: "12px 0 16px", fontSize: 16, lineHeight: 1.45, color: "#e2e8f0" }}>{reason}</p>
 
       <div className="flow-sections">
+        <Box title="Quote">
+          <Fact label="Bid" value={formatOptionPrice(row.bid)} />
+          <Fact label="Ask" value={formatOptionPrice(row.ask)} />
+          <Fact label="Last" value={formatOptionPrice(row.last)} />
+          <Fact label="Mid" value={formatOptionPrice(row.mid)} />
+          <Fact label="Spread" value={formatSpread(spreadDollars(row), row.spreadFraction)} />
+          <Fact label="Likely side" value={likelySideText(likelySideFromEstimate(row.side))} />
+          <p style={{ margin: "6px 0 0", color: "#94a3b8", fontSize: 13, lineHeight: 1.4 }}>{LIKELY_SIDE_NOTE}</p>
+          {row.openingLabel && (
+            <>
+              <Fact label="Opening check" value={row.openingLabel} />
+              <p style={{ margin: "6px 0 0", color: "#94a3b8", fontSize: 13, lineHeight: 1.4 }}>{OPENING_NOTE}</p>
+            </>
+          )}
+        </Box>
         <Box title="Flow">
           <Fact label="Volume" value={count(row.volume)} />
           <Fact label="Open interest" value={count(row.openInterest)} />
           <Fact label="Vol/OI" value={row.volOiRatio == null ? "—" : `${row.volOiRatio.toFixed(2)}×`} />
           <Fact label="Flow premium" value={formatFlowPremium(row.notionalPremium)} />
-          <Fact label="Side" value={sideText(row.side)} />
           <Fact label="Prints" value={printText(row)} />
         </Box>
         <Box title="Liquidity">
@@ -295,13 +318,13 @@ function FlowCard({ row }: { row: ScoredFlow }) {
             </ul>
           )}
           {verdict?.levelsNote && <p style={{ margin: "0 0 8px" }}>{verdict.levelsNote}</p>}
-          <p style={{ margin: "0 0 8px" }}>{row.sideNote}</p>
+          <p style={{ margin: "0 0 8px" }}>{LIKELY_SIDE_NOTE}</p>
           <p style={{ margin: "0 0 8px" }}>{row.prints?.summary ?? "No print was detected from Schwab quotes on this contract."}</p>
           <p style={{ margin: "0 0 8px" }}>
             IV {row.iv != null && row.iv > 0 ? `${(row.iv * 100).toFixed(0)}%` : "—"}
             {" · "}Vol jump {row.volumeJump == null ? "—" : signed(row.volumeJump)}
             {" · "}Score {Number.isFinite(row.score) ? Math.round(row.score) : "—"}
-            {" · "}Bid {price(row.bid)} · Ask {price(row.ask)}
+            {" · "}Bid {formatOptionPrice(row.bid)} · Ask {formatOptionPrice(row.ask)} · Last {formatOptionPrice(row.last)} · Mid {formatOptionPrice(row.mid)}
           </p>
           {plan && plan.lines.map((line) => <p key={line} style={{ margin: "0 0 6px" }}>{line}</p>)}
           {plan && <p style={{ margin: "0 0 8px", color: "#94a3b8" }}>{plan.note}</p>}
@@ -483,11 +506,9 @@ function printText(row: ScoredFlow): string {
   return "Print, from Schwab quotes";
 }
 
-function sideText(side: FlowRow["side"]): string {
-  if (side === "estimated at ask") return "At the ask";
-  if (side === "estimated at bid") return "At the bid";
-  if (side === "estimated mid") return "Between bid and ask";
-  return "Unknown";
+function spreadDollars(row: ScoredFlow): number | null {
+  if (!Number.isFinite(row.bid) || !Number.isFinite(row.ask) || row.ask < row.bid || row.bid < 0) return null;
+  return row.ask - row.bid;
 }
 
 function count(value: number): string {

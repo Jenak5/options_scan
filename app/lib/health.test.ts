@@ -49,7 +49,7 @@ describe("health report", () => {
       lastShadowAt: "2026-10-06T18:05:00.000Z",
       learningSnapshotsToday: 1,
       resolvedShadows: 4,
-      rulesVersion: 2,
+      rulesVersion: 3,
     });
     expect(JSON.stringify(report)).not.toContain("token");
     expect(JSON.stringify(report)).not.toContain("secret");

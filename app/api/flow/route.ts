@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verdictBanner } from "@/app/lib/alertConfig";
-import { loadAlertBook, loadRiskStatus } from "@/app/lib/alertStore";
+import { loadAlertBook, loadRiskStatus, recordOpeningChecks } from "@/app/lib/alertStore";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import {
   FLOW_DISCLAIMER,
@@ -86,6 +86,11 @@ export async function GET(request: NextRequest) {
       }));
     }
     let data = graded;
+    try {
+      await recordOpeningChecks(scan.chainInterest, now);
+    } catch {
+      // The page still shows this chain. The next scan can record the check.
+    }
     try {
       const book = await loadAlertBook();
       data = pinTodayAlerts(graded, book.records, chicagoDate(now), now, ticker);

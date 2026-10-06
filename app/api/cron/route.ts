@@ -8,7 +8,7 @@ import {
   indexSentAlerts,
   screenQueueLimit,
 } from "@/app/lib/alertPolicy";
-import { currentDailyLoss, loadAlertBook, rememberSentAlert } from "@/app/lib/alertStore";
+import { currentDailyLoss, loadAlertBook, recordOpeningChecks, rememberSentAlert } from "@/app/lib/alertStore";
 import { lastAlertBookWriteError, noteAlertSentUnsaved } from "@/app/lib/schwabStore";
 import { hasValidBearer } from "@/app/lib/auth";
 import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
@@ -276,6 +276,13 @@ export async function GET(request: NextRequest) {
       log.push(`Chain errors: ${scan.errors.map((item) => item.ticker).join(", ")}`);
     }
     log.push(`Scored ${scan.rows.length} contracts across ${scan.watchlist.length} tickers${scan.cached ? " (cached)" : ""}`);
+    try {
+      const checked = await recordOpeningChecks(scan.chainInterest, now);
+      log.push(`Opening check: ${checked} alert${checked === 1 ? "" : "s"} updated from this chain`);
+    } catch (err) {
+      if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+      log.push("Opening check was not saved");
+    }
 
     try {
       const experiment = await recordExperimentalShadows(scan.rows, losses, now);
