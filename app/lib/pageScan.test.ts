@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isAlertGrade } from "@/app/lib/alertConfig";
 import { loadAlertBook } from "@/app/lib/alertStore";
 import type { FlowRow } from "@/app/lib/flow";
-import { recordDisplayedAlerts } from "@/app/lib/pageScan";
+import { isChicagoMarketHours } from "@/app/lib/marketHours";
+import { chainInterestFromContracts } from "@/app/lib/openingCheck";
+import { recordDisplayedAlerts, recordFlowPageSession } from "@/app/lib/pageScan";
 import { EMPTY_PRINTS } from "@/app/lib/prints";
 import { clearMemoryStoreForTests } from "@/app/lib/schwabStore";
 import { loadShadowPage } from "@/app/lib/shadowStore";
@@ -109,6 +111,37 @@ describe("Flow page alerts", () => {
     expect(again.opened).toBe(0);
     expect(again.marked).toBe(0);
     expect((await loadAlertBook()).records).toHaveLength(1);
+  });
+
+  it("does not save, mark, or check open interest after the Central close", async () => {
+    const session = new Date("2026-05-14T15:00:00Z");
+    const sample = row();
+    const first = await recordDisplayedAlerts([sample], null, session);
+    expect(first.saved).toBe(1);
+    expect(first.opened).toBe(1);
+    const before = await loadShadowPage(session);
+    expect(before.open).toBe(1);
+    const markAtOpen = before.rows[0].mark;
+
+    const afterClose = new Date("2026-05-15T21:00:00Z");
+    expect(isChicagoMarketHours(afterClose)).toBe(false);
+    const crashed = row({ bid: 0.05, ask: 0.1, last: 0.05, mid: 0.075 });
+    const interest = chainInterestFromContracts([{
+      ticker: "SPY",
+      contracts: [{ expiration: "2026-06-04", strike: 104, putCall: "call", openInterest: 5000 }],
+    }]);
+    const recorded = await recordFlowPageSession([crashed], interest, null, afterClose);
+    expect(recorded).toEqual({ saved: 0, opened: 0, marked: 0, closed: 0 });
+
+    const book = await loadAlertBook();
+    expect(book.records).toHaveLength(1);
+    expect(book.records[0].openingCheck?.status).toBe("pending");
+    expect(book.records[0].features?.capturedAtAlert).toBe(true);
+    const page = await loadShadowPage(afterClose);
+    expect(page.open).toBe(1);
+    expect(page.rows[0].status).toBe("open");
+    expect(page.rows[0].exitReason).toBeNull();
+    expect(page.rows[0].mark).toBe(markAtOpen);
   });
 
   it("does not save a contract that is not an A or a B", async () => {

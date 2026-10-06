@@ -1,12 +1,13 @@
 import { alertScanMinPremium, alertsPerDayLimit } from "@/app/lib/alertConfig";
-import { loadAlertBook, rememberSentAlert } from "@/app/lib/alertStore";
+import { loadAlertBook, recordOpeningChecks, rememberSentAlert } from "@/app/lib/alertStore";
 import {
   chooseAlerts,
   gradeAlertCandidates,
   indexSentAlerts,
 } from "@/app/lib/alertPolicy";
 import { selectAlertRows, type FlowRow } from "@/app/lib/flow";
-import { chicagoDate } from "@/app/lib/marketHours";
+import { chicagoDate, isChicagoMarketHours } from "@/app/lib/marketHours";
+import type { ChainInterest } from "@/app/lib/openingCheck";
 import { emptyScanHealth } from "@/app/lib/scanHealth";
 import { readScanHealth, writeScanHealth } from "@/app/lib/schwabStore";
 import { markShadowsFromRows, openMissingShadows } from "@/app/lib/shadowStore";
@@ -16,8 +17,9 @@ import { formatFlowAlert, sendTelegramAlert } from "@/app/lib/telegram";
  * The Flow page grades contracts when it loads. That used to stay on the screen
  * and never reach the alert book, so Scorecard and Learning mode stayed stale
  * unless the scheduled scan also ran.
- * This writes the same A/B rows the scheduled scan would save, opens their shadows,
- * and marks them from the chain already in hand. No extra Schwab read.
+ * During weekdays 8:30–15:00 Central this writes the same A/B rows the scheduled
+ * scan would save, opens their shadows, and marks them from the chain already in hand.
+ * Outside that window it writes nothing. No extra Schwab read.
  */
 
 export interface PageScanRecord {
@@ -25,6 +27,31 @@ export interface PageScanRecord {
   opened: number;
   marked: number;
   closed: number;
+}
+
+/**
+ * Persist what the Flow page just displayed.
+ * Outside weekdays 8:30–15:00 Central this returns without writing.
+ * The page can still show the chain. After-close quotes are not used to
+ * save alerts, open or mark shadows, store a learning snapshot, or run the
+ * next-day open-interest check.
+ */
+export async function recordFlowPageSession(
+  rows: readonly FlowRow[],
+  chainInterest: ChainInterest | null | undefined,
+  consecutiveLosses: number | null,
+  now: Date,
+): Promise<PageScanRecord> {
+  if (!isChicagoMarketHours(now)) {
+    return { saved: 0, opened: 0, marked: 0, closed: 0 };
+  }
+  const recorded = await recordDisplayedAlerts(rows, consecutiveLosses, now);
+  try {
+    await recordOpeningChecks(chainInterest, now);
+  } catch {
+    // The page still shows this chain. The next in-session scan can record the check.
+  }
+  return recorded;
 }
 
 export async function recordDisplayedAlerts(
