@@ -51,6 +51,7 @@ export const ALERT_RULES = {
   /**
    * Inclusive days to expiration for an A or a B.
    * 14 to 42 is about 2 to 6 weeks. Shorter or longer stays C or below.
+   * The 43–60 day test does not change these two numbers.
    */
   alertDteMin: 14,
   alertDteMax: 42,
@@ -128,6 +129,30 @@ export function formatFlowPremium(value: number | null | undefined): string {
   if (value >= 1_000) return `$${Math.round(value / 1_000).toLocaleString("en-US")}K`;
   return `$${Math.round(value).toLocaleString("en-US")}`;
 }
+
+/**
+ * Test-only shadows for contracts that would qualify except for days to expiration.
+ * Not a grade, not a Telegram alert, and not part of the 14–42 day rule above.
+ * 30 resolved results are the minimum before considering a wider window.
+ * Quotes per run are taken from the existing shadow quote cap, not added on top.
+ */
+export const EXPERIMENT_DTE = {
+  min: 43,
+  max: 60,
+  label: "Test: 43-60 DTE",
+  minTrust: 30,
+  /** New test shadows written on one cron run. */
+  opensPerRun: 2,
+  /** New test shadows written on one Chicago day. */
+  opensPerDay: 4,
+  /**
+   * Test contracts marked on one run.
+   * Real A/B shadows are quoted first. The run's total unique quotes stay at SHADOW_QUOTES_PER_RUN.
+   */
+  quotesPerRun: 4,
+  /** Expirations in this window kept from a chain the scan already fetched. */
+  keptExpirations: 4,
+} as const;
 
 export type FlowPremiumFit = "below-b" | "below-a" | "ok";
 

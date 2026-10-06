@@ -1,4 +1,5 @@
 import type { OptionContract, PutCall } from "@/app/lib/contract";
+import { CHEAP_CONTRACT_MID, CHEAP_MAX_SPREAD_DOLLARS } from "@/app/lib/marketContext";
 import {
   DAILY_STOP_CONSECUTIVE_LOSSES,
   MAX_BID_ASK_SPREAD_OF_MID,
@@ -98,10 +99,19 @@ export function checkBidAskSpread(
   const fraction = spread / mid;
   const pct = (fraction * 100).toFixed(1);
   const capPct = (maxFraction * 100).toFixed(0);
-  if (fraction <= maxFraction) {
-    return { pass: true, spread, mid, fraction, detail: `Spread is ${pct}% of mid. Maximum is ${capPct}%.` };
+  if (fraction > maxFraction) {
+    return { pass: false, spread, mid, fraction, detail: `Spread is ${pct}% of mid. Maximum is ${capPct}%.` };
   }
-  return { pass: false, spread, mid, fraction, detail: `Spread is ${pct}% of mid. Maximum is ${capPct}%.` };
+  if (mid <= CHEAP_CONTRACT_MID && spread > CHEAP_MAX_SPREAD_DOLLARS + 1e-9) {
+    return {
+      pass: false,
+      spread,
+      mid,
+      fraction,
+      detail: `Spread is $${spread.toFixed(2)}. On a contract at or under $${CHEAP_CONTRACT_MID}, the spread also has to be $${CHEAP_MAX_SPREAD_DOLLARS.toFixed(2)} or less. The ${capPct}% rule still applies.`,
+    };
+  }
+  return { pass: true, spread, mid, fraction, detail: `Spread is ${pct}% of mid. Maximum is ${capPct}%.` };
 }
 
 /** Long option: contracts × ask × 100. Returns null when the inputs cannot be priced. */

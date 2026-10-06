@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeKeyLevels, formatLevelsSummary, toStoredLevels } from "@/app/lib/levels";
+import { computeKeyLevels, formatLevelsSummary, sma20FromDaily, toStoredLevels } from "@/app/lib/levels";
 import type { PriceCandle } from "@/app/lib/schwabParse";
 
 const NOW = new Date("2026-10-01T15:00:00Z");
@@ -33,6 +33,18 @@ describe("key levels", () => {
     expect(levels.resistance).toMatchObject({ price: 112, label: "prior day high" });
     expect(levels.support?.distance).toBeCloseTo(2 / 110);
     expect(levels.resistance?.distance).toBeCloseTo(2 / 110);
+    expect(levels.sma20).toBeNull();
+  });
+
+  it("averages the last 20 completed daily closes and ignores today", () => {
+    const daily = [];
+    for (let i = 0; i < 20; i++) {
+      const day = String(i + 1).padStart(2, "0");
+      daily.push(candle(`2026-09-${day}T13:30:00Z`, { close: i + 1 }));
+    }
+    daily.push(candle("2026-10-01T13:30:00Z", { close: 999 }));
+    expect(sma20FromDaily(daily, "2026-10-01")).toBeCloseTo(10.5);
+    expect(computeKeyLevels({ spot: 110, now: NOW, daily, intraday: [] }).sma20).toBeCloseTo(10.5);
   });
 
   it("reads pre-market, the open, the open range, and the regular-session high and low", () => {

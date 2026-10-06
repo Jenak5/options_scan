@@ -1,4 +1,6 @@
 import { formatContractCost, longContractCost, TRADE_RULES, type LetterGrade } from "@/app/lib/alertConfig";
+import { parseFeatureSnapshot, type AlertFeatureSnapshot } from "@/app/lib/alertFeatures";
+import { parseRulesVersion, RULES_VERSION } from "@/app/lib/rulesVersion";
 import { chicagoClock, chicagoDate, chicagoTradingDaysElapsed } from "@/app/lib/marketHours";
 import { ACCOUNT_SIZE_DOLLARS, DAILY_STOP_CONSECUTIVE_LOSSES, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import type { VerdictName } from "@/app/lib/verdict";
@@ -21,6 +23,14 @@ export type TradeStructure = "single" | "debit-spread";
 export type TradeResult = "win" | "loss" | "flat";
 /** Ask is the scanner's contract price. Typed is a price entered by hand. */
 export type EntryPriceSource = "ask" | "typed";
+export type GradeOverall = "A" | "B" | "Fail";
+
+export interface StoredGradeCheck {
+  id: string;
+  label: string;
+  status: "pass" | "fail" | "unknown";
+  detail: string;
+}
 
 const VERDICTS: VerdictName[] = ["TAKE", "WATCH", "SKIP", "STOP"];
 const GRADES: LetterGrade[] = ["A", "B", "C", "D"];
@@ -45,6 +55,16 @@ export interface StoredTrade {
   alertId: string | null;
   alertVerdict: VerdictName | null;
   alertGrade: LetterGrade | null;
+  /** A, B, or Fail from Grade my trade. Null on older rows. */
+  gradeOverall: GradeOverall | null;
+  thesis: string | null;
+  gradeChecks: StoredGradeCheck[] | null;
+  /** Checklist version when the paper trade was saved. Null on older rows. */
+  rulesVersion: number | null;
+  /** Snapshot from Grade my trade when one was saved. Alerts still keep their own. */
+  features?: AlertFeatureSnapshot | null;
+  /** Quote time used for the grade, when Schwab sent one. */
+  quotedAt: number | null;
   closedAt: number | null;
   exitPrice: number | null;
   exitNote: string | null;
@@ -129,6 +149,12 @@ export interface OpenTradeInput {
   alertGrade?: string | null;
   entryPriceSource?: EntryPriceSource | null;
   flowPremium?: number | null;
+  gradeOverall?: GradeOverall | null;
+  thesis?: string | null;
+  gradeChecks?: StoredGradeCheck[] | null;
+  quotedAt?: number | null;
+  rulesVersion?: number | null;
+  features?: AlertFeatureSnapshot | null;
 }
 
 export function emptyTradeLog(): TradeLog {
@@ -329,6 +355,12 @@ export function buildTrade(input: OpenTradeInput, id: string, now: Date): { ok: 
       alertId,
       alertVerdict,
       alertGrade,
+      gradeOverall: parseOverall(input.gradeOverall),
+      thesis: cleanNote(input.thesis),
+      gradeChecks: cleanChecks(input.gradeChecks),
+      rulesVersion: input.rulesVersion === undefined ? RULES_VERSION : parseRulesVersion(input.rulesVersion),
+      features: input.features ? parseFeatureSnapshot(input.features) : null,
+      quotedAt: input.quotedAt == null ? null : asTime(input.quotedAt),
       closedAt: null,
       exitPrice: null,
       exitNote: null,
@@ -463,6 +495,7 @@ export function tradesToCsv(trades: readonly StoredTrade[]): string {
   const header = [
     "id", "openedAt", "ticker", "putCall", "strike", "expiration", "contracts",
     "entryPrice", "entryPriceSource", "flowPremium", "structure", "alertId", "alertVerdict", "alertGrade",
+    "gradeOverall", "thesis", "quotedAt",
     "closedAt", "exitPrice", "exitNote", "pnlDollars", "pnlPercent",
     "riskDollars", "riskBreach", "result", "holdMinutes",
   ];
@@ -485,6 +518,9 @@ export function tradesToCsv(trades: readonly StoredTrade[]): string {
       trade.alertId ?? "",
       trade.alertVerdict ?? "",
       trade.alertGrade ?? "",
+      trade.gradeOverall ?? "",
+      trade.thesis ?? "",
+      trade.quotedAt == null ? "" : new Date(trade.quotedAt).toISOString(),
       trade.closedAt == null ? "" : new Date(trade.closedAt).toISOString(),
       trade.exitPrice == null ? "" : String(trade.exitPrice),
       trade.exitNote ?? "",
@@ -645,6 +681,12 @@ function parseTrade(value: unknown): StoredTrade | null {
     alertId: cleanId(typeof row.alertId === "string" ? row.alertId : null),
     alertVerdict: parseVerdict(row.alertVerdict),
     alertGrade: parseGrade(row.alertGrade),
+    gradeOverall: parseOverall(row.gradeOverall),
+    thesis: cleanNote(typeof row.thesis === "string" ? row.thesis : null),
+    gradeChecks: cleanChecks(row.gradeChecks),
+    rulesVersion: parseRulesVersion(row.rulesVersion),
+    features: parseFeatureSnapshot(row.features),
+    quotedAt: row.quotedAt == null ? null : asTime(row.quotedAt),
     closedAt,
     exitPrice,
     exitNote: cleanNote(typeof row.exitNote === "string" ? row.exitNote : null),
@@ -667,6 +709,28 @@ function parseVerdict(value: unknown): VerdictName | null {
     if (VERDICTS[i] === value) return VERDICTS[i];
   }
   return null;
+}
+
+function parseOverall(value: unknown): GradeOverall | null {
+  if (value === "A" || value === "B" || value === "Fail") return value;
+  return null;
+}
+
+function cleanChecks(value: unknown): StoredGradeCheck[] | null {
+  if (!Array.isArray(value)) return null;
+  const checks: StoredGradeCheck[] = [];
+  for (let i = 0; i < value.length && checks.length < 24; i++) {
+    const row = value[i];
+    if (!row || typeof row !== "object") continue;
+    const item = row as Record<string, unknown>;
+    const id = typeof item.id === "string" ? item.id.trim().slice(0, 40) : "";
+    const label = typeof item.label === "string" ? item.label.trim().slice(0, 80) : "";
+    const status = item.status === "pass" || item.status === "fail" || item.status === "unknown" ? item.status : null;
+    const detail = typeof item.detail === "string" ? item.detail.replace(/[\r\n]+/g, " ").trim().slice(0, 400) : "";
+    if (!id || !label || !status || !detail) continue;
+    checks.push({ id, label, status, detail });
+  }
+  return checks.length > 0 ? checks : null;
 }
 
 function parseGrade(value: unknown): LetterGrade | null {

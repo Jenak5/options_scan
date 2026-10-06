@@ -14,7 +14,7 @@ import {
   type SchwabBlobPutOptions,
 } from "@/app/lib/schwabStore";
 import type { StoredTokens } from "@/app/lib/schwabParse";
-import { closeLoggedTrade, openLoggedTrade, openPaperLoggedTrade, paperPreviewForAlert, tradeLogCsv } from "@/app/lib/tradeStore";
+import { closeLoggedTrade, openGradedTrade, openLoggedTrade, openPaperLoggedTrade, paperPreviewForAlert, tradeLogCsv } from "@/app/lib/tradeStore";
 import { gradeFlowRow } from "@/app/lib/verdict";
 import { BlobPreconditionFailedError } from "@vercel/blob";
 
@@ -244,6 +244,94 @@ function entry(alertId: string | null) {
     alertId,
   };
 }
+
+describe("graded paper trade", () => {
+  it("links a matching alert so the scorecard treats it like any other paper trade", async () => {
+    const verdict = { ...gradeFlowRow(row(), null), grade: "A" as const, verdict: "TAKE" as const };
+    await saveAlert(verdict, NOW, {
+      id: "NVDA|2026-06-04|104|call",
+      ticker: "NVDA",
+      strike: 104,
+      expiration: "2026-06-04",
+    });
+    const opened = await openGradedTrade({
+      ticker: "NVDA",
+      putCall: "call",
+      strike: 104,
+      expiration: "2026-06-04",
+      entryPrice: 2.05,
+      entryPriceSource: "typed",
+      flowPremium: 80_000,
+      alertGrade: "B",
+      alertVerdict: "TAKE",
+      gradeOverall: "B",
+      thesis: null,
+      quotedAt: NOW.getTime(),
+      gradeChecks: null,
+    }, NOW);
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    expect(opened.page.trades[0].alertId).toBe(alertId(NOW, "NVDA|2026-06-04|104|call"));
+    expect(opened.page.trades[0].alertGrade).toBe("B");
+    expect(opened.page.trades[0].gradeOverall).toBe("B");
+    expect(opened.page.trades[0].closedAt).toBeNull();
+  });
+
+  it("saves an open trade with the grade, checks, and thesis, and counts it once it is closed", async () => {
+    const opened = await openGradedTrade({
+      ticker: "nvda",
+      putCall: "call",
+      strike: 104,
+      expiration: "2026-06-04",
+      entryPrice: 2.05,
+      entryPriceSource: "ask",
+      flowPremium: 162_000,
+      alertGrade: "A",
+      alertVerdict: "TAKE",
+      gradeOverall: "A",
+      thesis: "Room to the next high",
+      quotedAt: NOW.getTime(),
+      gradeChecks: [{ id: "openInterest", label: "Open interest", status: "pass", detail: "Open interest 1,000. Minimum is 500." }],
+    }, NOW);
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    expect(opened.alreadyOpen).toBe(false);
+    const trade = opened.page.trades[0];
+    expect(trade.closedAt).toBeNull();
+    expect(trade.gradeOverall).toBe("A");
+    expect(trade.alertGrade).toBe("A");
+    expect(trade.thesis).toBe("Room to the next high");
+    expect(trade.gradeChecks?.[0]?.status).toBe("pass");
+    expect(trade.entryPriceSource).toBe("ask");
+    expect(opened.page.stats.open).toBe(1);
+
+    const again = await openGradedTrade({
+      ticker: "NVDA",
+      putCall: "call",
+      strike: 104,
+      expiration: "2026-06-04",
+      entryPrice: 2.05,
+      entryPriceSource: "ask",
+      flowPremium: 162_000,
+      alertGrade: "A",
+      alertVerdict: "TAKE",
+      gradeOverall: "A",
+      thesis: "Room to the next high",
+      quotedAt: NOW.getTime(),
+      gradeChecks: null,
+    }, new Date(NOW.getTime() + 1000));
+    expect(again.ok).toBe(true);
+    if (!again.ok) return;
+    expect(again.alreadyOpen).toBe(true);
+    expect(again.page.trades).toHaveLength(1);
+
+    const closed = await closeLoggedTrade(trade.id, { exitPrice: 3 }, new Date(NOW.getTime() + 60_000));
+    expect(closed.ok).toBe(true);
+    if (!closed.ok) return;
+    expect(closed.page.stats.byGrade.find((row) => row.key === "A")?.closed).toBe(1);
+    expect(closed.page.stats.byGrade.find((row) => row.key === "A")?.pnlDollars).toBeCloseTo(95);
+  });
+});
 
 function row(over: Partial<FlowRow> = {}): FlowRow {
   return {

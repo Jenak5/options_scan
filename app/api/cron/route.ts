@@ -13,9 +13,13 @@ import { lastAlertBookWriteError, noteAlertSentUnsaved } from "@/app/lib/schwabS
 import { hasValidBearer } from "@/app/lib/auth";
 import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
-import { openScanTickers, runShadowPass } from "@/app/lib/shadowStore";
+import { openScanTickers, recordExperimentalShadows, runShadowPass } from "@/app/lib/shadowStore";
 import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
+import { readScanHealth, writeScanHealth } from "@/app/lib/schwabStore";
+import { emptyScanHealth, skipNotifyDue, skipTelegramText, skipWarning, type ScanHealth } from "@/app/lib/scanHealth";
+import { sendTelegramAlert } from "@/app/lib/telegram";
+import { probeTastytrade } from "@/app/lib/tastytrade";
 import { planExitsForAsk } from "@/app/lib/exits";
 import { formatVerdictHtml, paperTradeLinkHtml } from "@/app/lib/telegram";
 import type { AlertVerdict } from "@/app/lib/verdict";
@@ -237,6 +241,7 @@ export async function GET(request: NextRequest) {
     }
 
     if (!inSession && !isManual) {
+      await rememberScan("success", now, null);
       return NextResponse.json({ alertsSent: 0, followUpOnly: true, followUps, log });
     }
 
@@ -251,6 +256,14 @@ export async function GET(request: NextRequest) {
       log.push(`Chain errors: ${scan.errors.map((item) => item.ticker).join(", ")}`);
     }
     log.push(`Scored ${scan.rows.length} contracts across ${scan.watchlist.length} tickers${scan.cached ? " (cached)" : ""}`);
+
+    try {
+      const experiment = await recordExperimentalShadows(scan.rows, losses, now);
+      log.push(`Test 43-60 DTE: ${experiment.opened} new shadow${experiment.opened === 1 ? "" : "s"} (not alerted)`);
+    } catch (err) {
+      if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+      log.push("Test 43-60 DTE update failed");
+    }
 
     const minPremium = alertScanMinPremium(process.env.ALERT_MIN_PREMIUM);
     const otmOnly = process.env.ALERT_OTM_ONLY === "true";
@@ -351,17 +364,56 @@ export async function GET(request: NextRequest) {
         log.push(`${row.ticker}: Telegram alert ${delivered ? "sent" : "not sent"}, but the alert book was not saved${saveDetail(failure)}`);
       }
     }
+    await rememberScan("success", now, null);
   } catch (err) {
     if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) {
+      console.warn(skipWarning(err.message));
       log.push(err.message);
+      await rememberScan("skipped", now, err.message);
       return NextResponse.json({ alertsSent: 0, skipped: true, reason: err.message, log });
     }
     const message = err instanceof Error && err.message.startsWith("Schwab ")
       ? err.message.slice(0, 180)
       : "Estimated flow scan failed";
+    console.warn(skipWarning(message));
     log.push(message);
+    await rememberScan("failed", now, message);
     return NextResponse.json({ error: message, log }, { status: 500 });
   }
 
   return NextResponse.json({ alertsSent, log });
+}
+
+async function rememberScan(
+  outcome: "success" | "skipped" | "failed",
+  now: Date,
+  reason: string | null,
+): Promise<void> {
+  try {
+    const current = await readScanHealth().catch(() => emptyScanHealth());
+    let tasty: { ok: boolean; status: number | null; message: string } | null = null;
+    try {
+      tasty = await probeTastytrade();
+    } catch {
+      tasty = null;
+    }
+    const next: ScanHealth = {
+      ...current,
+      lastRunAt: now.getTime(),
+      lastOutcome: outcome,
+      lastReason: reason,
+      lastSuccessAt: outcome === "success" ? now.getTime() : current.lastSuccessAt,
+      tastytradeOk: tasty ? tasty.ok : current.tastytradeOk,
+      tastytradeStatus: tasty ? tasty.status : current.tastytradeStatus,
+      tastytradeCheckedAt: tasty ? now.getTime() : current.tastytradeCheckedAt,
+      tastytradeMessage: tasty && !tasty.ok ? tasty.message : tasty ? null : current.tastytradeMessage,
+    };
+    if (outcome === "skipped" && skipNotifyDue(current.skipNotifiedAt, now.getTime())) {
+      const sent = await sendTelegramAlert(skipTelegramText(reason ?? "Schwab is not connected."));
+      if (sent) next.skipNotifiedAt = now.getTime();
+    }
+    await writeScanHealth(next);
+  } catch (err) {
+    console.warn(skipWarning(err instanceof Error ? err.message : "Could not record the scan outcome"));
+  }
 }

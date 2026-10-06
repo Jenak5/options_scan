@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { SchwabBanner } from "@/app/components/SchwabBanner";
 
 export const metadata: Metadata = {
   title: "Options Edge Scanner",
@@ -47,7 +48,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
         ` }} />
       </head>
-      <body>{children}</body>
+      <body>
+        <SchwabBanner />
+        {children}
+      </body>
     </html>
   );
 }

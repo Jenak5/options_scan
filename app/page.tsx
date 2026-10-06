@@ -4,7 +4,6 @@ import React, { useState, useEffect, useCallback } from "react";
 import { FlowTab } from "@/app/components/FlowTab";
 import { PaperTradeButton } from "@/app/components/PaperTradeButton";
 import { StoreStatusLine } from "@/app/components/StoreStatusLine";
-import { SchwabBanner } from "@/app/components/SchwabBanner";
 import { formatContractPriceLine, formatFlowPremium } from "@/app/lib/alertConfig";
 import type { AlertSummary, StoredAlert } from "@/app/lib/alertBook";
 import { notionalPremium } from "@/app/lib/flow";
@@ -515,7 +514,7 @@ function KellyTab() {
   return (
     <div style={{ maxWidth: 680 }}>
       <div style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 8, padding: "12px 14px", marginBottom: 16, color: "#fbbf24", fontSize: 14, lineHeight: 1.5 }}>
-        Retired as the sizing model. This lab used to assume a $5,000 account and a 55% win rate. Those assumptions are not used. The account is ${ACCOUNT_SIZE_DOLLARS.toLocaleString()}, and the Gate caps a trade at ${MAX_LOSS_DOLLARS}. The sliders below are only an illustration.
+        Retired as the sizing model. This lab used to assume a 55% win rate. That assumption is not used. The account is ${ACCOUNT_SIZE_DOLLARS.toLocaleString()}, and the Gate caps a trade at ${MAX_LOSS_DOLLARS}. The sliders below are only an illustration.
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 24 }}>
         {([
@@ -1128,7 +1127,7 @@ export default function OptionsEdgeScanner() {
               <span style={{ color: "#06b6d4" }}>◆</span> OPTIONS EDGE SCANNER
             </h1>
             <p style={{ margin: "3px 0 0", color: "#475569", fontSize: 14 }}>
-              Estimated flow · Verdict · Alert Report · Trade Gate · Trade log
+              Estimated flow · Verdict · Alert Report · Grade · Trade Gate · Trade log
             </p>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1152,6 +1151,14 @@ export default function OptionsEdgeScanner() {
             padding: "12px 18px", fontSize: 14, fontWeight: 600,
             color: "#475569", letterSpacing: "0.03em", whiteSpace: "nowrap", textDecoration: "none",
           }}>▣ Alert scorecard</a>
+          <a href="/grade" style={{
+            padding: "12px 18px", fontSize: 14, fontWeight: 600,
+            color: "#475569", letterSpacing: "0.03em", whiteSpace: "nowrap", textDecoration: "none",
+          }}>▣ Grade</a>
+          <a href="/learn" style={{
+            padding: "12px 18px", fontSize: 14, fontWeight: 600,
+            color: "#475569", letterSpacing: "0.03em", whiteSpace: "nowrap", textDecoration: "none",
+          }}>▣ Learning mode</a>
           <a href="/gate" style={{
             padding: "12px 18px", fontSize: 14, fontWeight: 600,
             color: "#475569", letterSpacing: "0.03em", whiteSpace: "nowrap", textDecoration: "none",
@@ -1170,7 +1177,6 @@ export default function OptionsEdgeScanner() {
 
       {/* Content */}
       <div style={{ padding: 24 }}>
-        <SchwabBanner />
         {tab === "flow"     && <FlowTab     />}
         {tab === "volArb"   && <VolArbTab   />}
         {tab === "account"  && <AccountTab  />}

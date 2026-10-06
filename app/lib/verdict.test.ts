@@ -54,6 +54,7 @@ function levels(over: Partial<KeyLevels> = {}): KeyLevels {
     support: { price: 99, label: "prior day low", distance: 0.01 },
     resistance: { price: 102, label: "session high", distance: 0.02 },
     vwap: 100.4,
+    sma20: null,
     priorClose: 99.5,
     callWall: 105,
     putWall: 95,
@@ -408,6 +409,47 @@ describe("alert checklist", () => {
     expect(thin.verdict).toBe("SKIP");
     expect(thin.grade).toBe("D");
     expect(thin.liquidityPasses).toBe(false);
+  });
+
+  it("caps a likely spread or hedge at B and leaves an unknown pairing alone", () => {
+    const spread = gradeSetup(excellent({ pairedFlow: "spread" }));
+    expect(spread.verdict).toBe("TAKE");
+    expect(spread.grade).toBe("B");
+    expect(spread.reasons.join(" ")).toMatch(/spread or hedge/i);
+
+    const hedge = gradeSetup(excellent({ pairedFlow: "hedge" }));
+    expect(hedge.verdict).toBe("TAKE");
+    expect(hedge.grade).toBe("B");
+
+    const unknown = gradeSetup(excellent({ pairedFlow: "unknown" }));
+    expect(unknown.grade).toBe("A");
+    expect(unknown.verdict).toBe("TAKE");
+  });
+
+  it("caps a trade at B when it fights both the ticker trend and the market, and leaves an unknown alone", () => {
+    const both = gradeSetup(excellent({ trendAlignment: "against", marketAlignment: "against" }));
+    expect(both.verdict).toBe("TAKE");
+    expect(both.grade).toBe("B");
+    expect(both.reasons.join(" ")).toMatch(/stops at B/);
+
+    const trendOnly = gradeSetup(excellent({ trendAlignment: "against", marketAlignment: "unknown" }));
+    expect(trendOnly.grade).toBe("A");
+    const marketOnly = gradeSetup(excellent({ trendAlignment: "with", marketAlignment: "against" }));
+    expect(marketOnly.grade).toBe("A");
+    const missing = gradeSetup(excellent());
+    expect(missing.grade).toBe("A");
+  });
+
+  it("does not alert in the first 15 minutes after the open", () => {
+    const noisy = gradeSetup(excellent({ now: new Date("2026-05-14T13:40:00Z") }));
+    expect(noisy.grade).not.toBe("A");
+    expect(noisy.grade).not.toBe("B");
+    expect(noisy.verdict).not.toBe("TAKE");
+    expect(noisy.reasons.join(" ")).toMatch(/first 15 minutes/i);
+
+    const open = gradeSetup(excellent({ now: new Date("2026-05-14T13:45:00Z") }));
+    expect(open.grade).toBe("A");
+    expect(open.verdict).toBe("TAKE");
   });
 
   it("grades an exceptional quiet setup as an A", () => {

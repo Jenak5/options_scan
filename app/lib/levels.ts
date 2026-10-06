@@ -21,6 +21,8 @@ export interface KeyLevels {
   support: LevelPoint | null;
   resistance: LevelPoint | null;
   vwap: number | null;
+  /** Simple average of the last 20 completed daily closes. Null when fewer than 20 closes were stored. */
+  sma20: number | null;
   priorClose: number | null;
   callWall: number | null;
   putWall: number | null;
@@ -64,6 +66,7 @@ export function emptyLevels(spot: number | null = null): KeyLevels {
     support: null,
     resistance: null,
     vwap: null,
+    sma20: null,
     priorClose: null,
     callWall: null,
     putWall: null,
@@ -113,6 +116,7 @@ export function computeKeyLevels(input: {
   const vwapSource = todayParts.regular.length > 0 ? todayParts.regular : todayParts.premarket;
   const vwap = typicalVwap(vwapSource);
   base.vwap = vwap;
+  base.sma20 = sma20FromDaily(daily, today);
   push(candidates, vwap, "VWAP");
 
   for (let i = 0; i < swings.lows.length; i++) push(candidates, swings.lows[i], "swing low");
@@ -207,6 +211,23 @@ function dedupe(candidates: Candidate[]): Candidate[] {
     if (!prior || SOURCE_RANK[level.source] < SOURCE_RANK[prior.source]) byCent.set(key, level);
   }
   return Array.from(byCent.values());
+}
+
+/** Last 20 completed daily closes before today. Fewer than 20 stays null. Today's unfinished bar is not included. */
+export function sma20FromDaily(daily: PriceCandle[], today: string): number | null {
+  const closes: number[] = [];
+  const sorted = sortedCandles(daily);
+  for (let i = 0; i < sorted.length; i++) {
+    const candle = sorted[i];
+    if (newYorkDate(new Date(candle.datetime)) >= today) continue;
+    if (!Number.isFinite(candle.close) || !(candle.close > 0)) continue;
+    closes.push(candle.close);
+  }
+  if (closes.length < 20) return null;
+  const last = closes.slice(-20);
+  let sum = 0;
+  for (let i = 0; i < last.length; i++) sum += last[i];
+  return sum / 20;
 }
 
 function priorDay(daily: PriceCandle[], today: string): PriceCandle | null {

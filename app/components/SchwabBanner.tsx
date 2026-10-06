@@ -3,6 +3,11 @@
 import { useEffect, useState } from "react";
 import { SCHWAB_STORAGE_UNCONFIGURED_MESSAGE, type SchwabStoreKind } from "@/app/lib/schwabStorage";
 
+interface ConnectionNotice {
+  severity: "down" | "warn" | "ok";
+  lines: string[];
+}
+
 interface SchwabStatus {
   configured: boolean;
   storage: SchwabStoreKind;
@@ -13,6 +18,7 @@ interface SchwabStatus {
   refreshDaysLeft: number | null;
   warnRefreshSoon: boolean;
   message: string;
+  notice?: ConnectionNotice;
 }
 
 type NoticeKind = "success" | "error" | null;
@@ -27,6 +33,7 @@ const FAILURES: Record<string, string> = {
 export function SchwabBanner() {
   const [status, setStatus] = useState<SchwabStatus | null>(null);
   const [loadError, setLoadError] = useState(false);
+  const [hidden, setHidden] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
   const [noticeKind, setNoticeKind] = useState<NoticeKind>(null);
 
@@ -46,11 +53,21 @@ export function SchwabBanner() {
     (async () => {
       try {
         const res = await fetch("/api/schwab/status");
+        if (res.status === 401) {
+          if (!cancelled) setHidden(true);
+          return;
+        }
         if (!res.ok) throw new Error("status");
         const json = await res.json();
-        if (!cancelled) setStatus(json as SchwabStatus);
+        if (!cancelled) {
+          setStatus(json as SchwabStatus);
+          setHidden(false);
+        }
       } catch {
-        if (!cancelled) setLoadError(true);
+        if (!cancelled) {
+          setLoadError(true);
+          setHidden(false);
+        }
       }
     })();
     return () => {
@@ -58,73 +75,85 @@ export function SchwabBanner() {
     };
   }, []);
 
+  if (hidden) return null;
+
   const storageWarning = status?.storageWarning ?? (status?.storage === "unconfigured" ? SCHWAB_STORAGE_UNCONFIGURED_MESSAGE : null);
   const showStorage = Boolean(storageWarning) && storageWarning !== notice;
-  const warn = Boolean(status?.warnRefreshSoon || status?.refreshExpired || noticeKind === "error" || storageWarning);
-  const success = noticeKind === "success" && !warn;
+  const severity = status?.notice?.severity ?? "ok";
+  const lines = status?.notice?.lines ?? [];
+  const urgent = severity === "down" || severity === "warn" || noticeKind === "error" || Boolean(storageWarning);
+  const success = noticeKind === "success" && !urgent;
 
   const border = success
     ? "rgba(16,185,129,0.45)"
-    : warn
-      ? "rgba(245,158,11,0.45)"
-      : "rgba(255,255,255,0.08)";
+    : severity === "down" || noticeKind === "error"
+      ? "rgba(239,68,68,0.55)"
+      : urgent
+        ? "rgba(245,158,11,0.55)"
+        : "rgba(255,255,255,0.08)";
   const background = success
     ? "rgba(16,185,129,0.1)"
-    : warn
-      ? "rgba(245,158,11,0.1)"
-      : "rgba(255,255,255,0.03)";
-  const color = success ? "#6ee7b7" : warn ? "#fbbf24" : "#94a3b8";
+    : severity === "down" || noticeKind === "error"
+      ? "rgba(239,68,68,0.12)"
+      : urgent
+        ? "rgba(245,158,11,0.12)"
+        : "rgba(255,255,255,0.03)";
+  const color = success ? "#6ee7b7" : urgent ? "#fde68a" : "#94a3b8";
 
   return (
-    <div style={{
-      background,
-      border: `1px solid ${border}`,
-      borderRadius: 8,
-      padding: "10px 14px",
-      display: "flex",
-      gap: 12,
-      alignItems: "center",
-      justifyContent: "space-between",
-      flexWrap: "wrap",
-      marginBottom: 16,
-    }}>
-      <div style={{ fontSize: 14, color, lineHeight: 1.45 }}>
-        {notice && (
-          <div role={noticeKind === "error" ? "alert" : "status"} style={{ color: success ? "#6ee7b7" : "#e2e8f0", marginBottom: 4, fontWeight: 700 }}>
-            {notice}
-          </div>
-        )}
-        {showStorage && (
-          <div role="alert" style={{ color: "#fbbf24", marginBottom: 4, fontWeight: 700 }}>{storageWarning}</div>
-        )}
-        {loadError && "Schwab status is unavailable."}
-        {!loadError && status?.message && status.message !== notice && status.message !== storageWarning && status.message}
-        {!loadError && !status && "Checking Schwab…"}
-        {status?.warnRefreshSoon && (
-          <div style={{ marginTop: 4, fontWeight: 700 }}>
-            Refresh token has under 2 days left. Reconnect before the weekly login lapses.
-          </div>
-        )}
-        {status?.connected && status.accessExpired && !status.refreshExpired && (
-          <div style={{ marginTop: 4 }}>The access token will refresh on the next quote.</div>
-        )}
-      </div>
-      <a
-        href="/api/schwab/connect"
+    <div style={{ padding: "12px 24px 0" }}>
+      <div
+        role={urgent ? "alert" : "status"}
         style={{
-          background: "rgba(6,182,212,0.15)",
-          color: "#06b6d4",
-          border: "1px solid rgba(6,182,212,0.35)",
-          borderRadius: 6,
-          padding: "8px 14px",
-          fontSize: 14,
-          fontWeight: 700,
-          textDecoration: "none",
-          whiteSpace: "nowrap",
+          background,
+          border: `1px solid ${border}`,
+          borderRadius: 8,
+          padding: "10px 14px",
+          display: "flex",
+          gap: 12,
+          alignItems: "center",
+          justifyContent: "space-between",
+          flexWrap: "wrap",
         }}
       >
-        Reconnect Schwab
-      </a>
+        <div style={{ fontSize: 14, color, lineHeight: 1.45 }}>
+          {notice && (
+            <div style={{ color: success ? "#6ee7b7" : "#fecaca", marginBottom: 4, fontWeight: 700 }}>
+              {notice}
+            </div>
+          )}
+          {showStorage && (
+            <div style={{ color: "#fbbf24", marginBottom: 4, fontWeight: 700 }}>{storageWarning}</div>
+          )}
+          {lines.map((line) => (
+            <div key={line} style={{ marginTop: 4, fontWeight: 700, color: severity === "down" ? "#fecaca" : "#fde68a" }}>
+              {line}
+            </div>
+          ))}
+          {loadError && "Schwab status is unavailable."}
+          {!loadError && status?.message && status.message !== notice && status.message !== storageWarning && !lines.includes(status.message) && status.message}
+          {!loadError && !status && "Checking Schwab…"}
+          {status?.connected && status.accessExpired && !status.refreshExpired && (
+            <div style={{ marginTop: 4 }}>The access token will refresh on the next quote.</div>
+          )}
+        </div>
+        <a
+          href="/api/schwab/connect"
+          style={{
+            background: "rgba(6,182,212,0.15)",
+            color: "#06b6d4",
+            border: "1px solid rgba(6,182,212,0.35)",
+            borderRadius: 6,
+            padding: "8px 14px",
+            fontSize: 14,
+            fontWeight: 700,
+            textDecoration: "none",
+            whiteSpace: "nowrap",
+          }}
+        >
+          Reconnect Schwab
+        </a>
+      </div>
     </div>
   );
 }

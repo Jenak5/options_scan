@@ -62,7 +62,7 @@ function check(result: GateResult, id: string) {
 
 describe("account constants", () => {
   it("caps one trade at $875", () => {
-    expect(ACCOUNT_SIZE_DOLLARS).toBe(3000);
+    expect(ACCOUNT_SIZE_DOLLARS).toBe(5000);
     expect(MAX_LOSS_DOLLARS).toBe(875);
   });
 });
@@ -103,6 +103,20 @@ describe("bid-ask spread", () => {
     const result = checkBidAskSpread(1.95, 2.06);
     expect(result.pass).toBe(false);
     expect(check(evaluateGate(input({ contract: contract({ bid: 1.95, ask: 2.06 }) })), "spread").status).toBe("FAIL");
+  });
+
+  it("also fails a cheap contract when the dollar spread is over $0.10 even if the percent rule would pass", () => {
+    const cheap = checkBidAskSpread(2.44, 2.56);
+    expect(cheap.mid).toBe(2.5);
+    expect(cheap.fraction).toBeLessThan(0.05);
+    expect(cheap.pass).toBe(false);
+    expect(cheap.detail).toMatch(/\$0\.10/);
+    expect(check(evaluateGate(input({ contract: contract({ bid: 2.44, ask: 2.56 }) })), "spread").status).toBe("FAIL");
+
+    const widerMid = checkBidAskSpread(3.9, 4.05);
+    expect(widerMid.mid).toBeCloseTo(3.975);
+    expect(widerMid.fraction).toBeLessThan(0.05);
+    expect(widerMid.pass).toBe(true);
   });
 
   it("fails a zero midpoint, a crossed market, a zero bid, and a missing quote", () => {

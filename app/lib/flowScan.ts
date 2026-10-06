@@ -18,6 +18,7 @@ import { earningsForTicker } from "@/app/lib/earnings";
 import { UNKNOWN_EARNINGS, type EarningsFact } from "@/app/lib/eventRisk";
 import type { KeyLevels } from "@/app/lib/levels";
 import { keyLevelsForTicker } from "@/app/lib/levelScan";
+import { annotateFlowRows, carryPriorSession } from "@/app/lib/marketContext";
 import { quotePointFromContract, type FlowQuotePoint } from "@/app/lib/prints";
 import { getOptionChain, getSchwabStatus, SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { readFlowSnapshots, writeFlowSnapshots } from "@/app/lib/schwabStore";
@@ -161,7 +162,7 @@ export async function scanEstimatedFlow(options?: {
       livePoints,
     }).map((row) => ({ ...row, levels: pass.levels, earnings: pass.earnings }));
     rows.push(...scored);
-    const snap = snapshotFromRows(scored, now);
+    const snap = carryPriorSession(prior, snapshotFromRows(scored, now), asOf);
     snap.quotes = quotesForRows(scored, prior, livePoints, asOf);
     updates[pass.ticker] = snap;
   }
@@ -170,8 +171,9 @@ export async function scanEstimatedFlow(options?: {
     await writeFlowSnapshots(updates);
   }
 
+  const withContext = annotateFlowRows(rows, { ...previous, ...updates }, asOf);
   const result: FlowScanResult = {
-    rows,
+    rows: withContext,
     scannedAt: now,
     cached: false,
     watchlist: tickers,
