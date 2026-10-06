@@ -25,7 +25,7 @@ import {
   summarizeShadows,
   type ShadowTrade,
 } from "@/app/lib/shadow";
-import { loadShadowPage, openScanTickers, runShadowPass, shadowCsv } from "@/app/lib/shadowStore";
+import { loadShadowPage, openMissingShadows, openScanTickers, runShadowPass, shadowCsv } from "@/app/lib/shadowStore";
 import { addTrade, buildTrade, emptyTradeLog } from "@/app/lib/trades";
 
 const OPEN = new Date("2026-10-01T15:00:00Z");
@@ -254,8 +254,13 @@ describe("shadow store", () => {
   it("saves an A from the alert book and leaves a paper trade out of the totals", async () => {
     const saved = alert();
     expect(await updateAlertBook(() => JSON.stringify({ version: 1, records: [saved], dailyLoss: null }))).toBe(true);
+    const openedOnly = await openMissingShadows();
+    expect(openedOnly.opened).toBe(1);
+    expect(openedOnly.saved).toBe(true);
+    const again = await openMissingShadows();
+    expect(again.opened).toBe(0);
     const first = await runShadowPass(OPEN);
-    expect(first.opened).toBe(1);
+    expect(first.opened).toBe(0);
     expect(first.saved).toBe(true);
     const second = await runShadowPass(OPEN);
     expect(second.opened).toBe(0);

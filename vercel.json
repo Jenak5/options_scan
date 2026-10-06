@@ -1,13 +1,16 @@
 {
   "functions": {
     "app/api/cron/route.ts": {
-      "maxDuration": 300
+      "maxDuration": 300,
+      "memory": 3008
     },
     "app/api/alerts/route.ts": {
-      "maxDuration": 300
+      "maxDuration": 300,
+      "memory": 3008
     },
     "app/api/flow/route.ts": {
-      "maxDuration": 300
+      "maxDuration": 300,
+      "memory": 3008
     }
   },
   "crons": [

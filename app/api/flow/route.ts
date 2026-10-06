@@ -14,6 +14,8 @@ import {
 import { pinTodayAlerts } from "@/app/lib/flowAlerts";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import { chicagoDate } from "@/app/lib/marketHours";
+import { noteBrowserScan, recordDisplayedAlerts } from "@/app/lib/pageScan";
+import { formatScanRunLine } from "@/app/lib/scanHealth";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { gradeFlowRow } from "@/app/lib/verdict";
 
@@ -58,6 +60,31 @@ export async function GET(request: NextRequest) {
     const losses = risk.stop.consecutiveLosses;
     const graded = filterFlowRows(scan.rows, { minPremium, otmOnly, liquidOnly, limit })
       .map((row) => ({ ...row, verdict: gradeFlowRow(row, losses), alertId: null as string | null }));
+    let recorded = { saved: 0, opened: 0, marked: 0, closed: 0 };
+    try {
+      recorded = await recordDisplayedAlerts(scan.rows, losses, now);
+      const touched = recorded.opened > 0 || recorded.marked > 0 || recorded.closed > 0;
+      await noteBrowserScan(now, touched ? now.getTime() : null);
+      console.info(formatScanRunLine({
+        outcome: "success",
+        tickers: scan.watchlist.length,
+        alertsSaved: recorded.saved,
+        shadowsOpened: recorded.opened,
+        shadowsMarked: recorded.marked,
+        shadowsClosed: recorded.closed,
+        reason: scan.cached ? "Flow page, cached chain" : "Flow page",
+      }));
+    } catch {
+      console.info(formatScanRunLine({
+        outcome: "failed",
+        tickers: scan.watchlist.length,
+        alertsSaved: 0,
+        shadowsOpened: 0,
+        shadowsMarked: 0,
+        shadowsClosed: 0,
+        reason: "Flow page could not save shadows",
+      }));
+    }
     let data = graded;
     try {
       const book = await loadAlertBook();

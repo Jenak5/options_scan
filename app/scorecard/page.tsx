@@ -58,8 +58,14 @@ interface Experiment {
   rows: ExperimentRow[];
 }
 
+interface Freshness {
+  lastScan: string;
+  lastShadow: string;
+}
+
 interface Scorecard {
   stored: boolean;
+  freshness?: Freshness;
   estimateNote: string;
   sampleNote: string;
   resolved: number;
@@ -114,6 +120,13 @@ export default function ScorecardPage() {
         )}
         {page && (
           <>
+            {page.freshness && (
+              <p style={{ margin: "0 0 12px", color: "#cbd5e1", fontSize: 14, lineHeight: 1.45 }}>
+                {page.freshness.lastScan}
+                <span style={{ color: "#64748b" }}> · </span>
+                {page.freshness.lastShadow}
+              </p>
+            )}
             <Note color="#94a3b8">{page.estimateNote}</Note>
             <Note color={page.tooFew ? "#fbbf24" : "#94a3b8"}>{page.sampleNote}</Note>
             {page.excludedPaper > 0 && (
@@ -229,7 +242,7 @@ export default function ScorecardPage() {
                 <tbody>
                   {page.rows.length === 0 && (
                     <tr>
-                      <td colSpan={10} style={{ ...tdStyle, color: "#94a3b8" }}>No shadow alerts yet. An A or a B saved in the alert book shows up here on the next scan.</td>
+                      <td colSpan={10} style={{ ...tdStyle, color: "#94a3b8" }}>No shadow alerts yet. An A or a B is saved when the Flow page loads and when the scheduled scan runs.</td>
                     </tr>
                   )}
                   {page.rows.map((row) => {

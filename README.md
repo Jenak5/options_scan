@@ -10,7 +10,7 @@ Read-only scan-and-alert tool for a small personal options account ($5,000, max 
 |-----|--------|--------------|
 | Flow | Schwab | Estimated flow from volume and open interest. Not sweeps. |
 | Vol Arb | Schwab | ATM implied vol versus 20-day realized vol, plus term structure and skew |
-| Account | Tastytrade | Positions, P&L, balances, buying power (read-only) |
+| Account | Tastytrade, off unless enabled | Positions, P&L, balances, buying power (read-only). Hidden until `TASTYTRADE_ENABLED=true` and the Tastytrade values are set. |
 | Gate | Schwab | Live chain check. Overall PASS only if every rule passes. |
 | Kelly Lab | Local | Retired sizing illustration. Not the account model. |
 | Research | Grok (xAI) | Chat grounded in the scanner's current data |
@@ -19,7 +19,26 @@ Read-only scan-and-alert tool for a small personal options account ($5,000, max 
 
 ## Schedule
 
-Vercel cron calls `GET /api/cron` every 15 minutes from **13:30 through 21:00 UTC**, Monday–Friday. That span covers the US cash session in both Central Daylight Time and Central Standard Time.
+Vercel cron calls `GET /api/cron` every 15 minutes from **13:30 through 21:00 UTC**, Monday–Friday. That span covers the US cash session in both Central Daylight Time and Central Standard Time. This team is on the Pro plan, so that schedule is allowed. A finished run writes one info log line: outcome, tickers scanned, alerts saved, and shadows opened, marked, and closed.
+
+A GitHub Actions workflow (`.github/workflows/market-scan.yml`) calls the same production URL on the same clock. It is the backup for a slot Vercel does not deliver. If a scan already finished in the last 10 minutes, the route exits without reading Schwab, so the two callers do not double the request budget.
+
+Jena: add one GitHub Actions secret or that backup exits before it calls the scanner.
+
+- Secret name: `CRON_SECRET`
+- Where: the GitHub repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
+- Value: the same `CRON_SECRET` already stored in Vercel. Do not paste it into the repo or a pull request.
+
+Opening the Flow tab scans Schwab and shows grades on the screen. That used to be display-only: an A or a B on the page was not saved, so Scorecard and Learning mode stayed empty unless the scheduled scan also ran. A Flow load now saves a new A or B (same daily cap and one-setup-per-day rule), opens its shadow, marks that shadow from the chain it already read, and stores the learning snapshot. It does not add a Schwab request for the mark. The scheduled scan still runs on its own clock. A page load does not take the cron slot, so the two do not block each other. Each Flow request writes the same one-line scan log, with the reason `Flow page`.
+
+`GET /api/health` is a read-only check for a monitor that calls it about once an hour during market hours. Send `Authorization: Bearer <HEALTH_TOKEN>`. If `HEALTH_TOKEN` is not set in Vercel, the same header may carry `CRON_SECRET` instead. A signed-in browser session is not enough. The JSON has the last scan time and outcome (the newer of the scheduled scan and a Flow page load), whether Schwab is connected, whether Tastytrade is enabled, alerts saved today, open shadows, the last shadow mark time, learning snapshots saved today, resolved shadows, and the rules version. It does not include tokens or account numbers, and it does not call Tastytrade.
+
+Jena: add `HEALTH_TOKEN` in Vercel if the monitor should not reuse the cron secret.
+
+- Name: `HEALTH_TOKEN`
+- Where: Vercel project **options-scan** → **Settings** → **Environment Variables** → Production. Store it as Sensitive.
+- Value: a long random string, different from `CRON_SECRET`. The monitor sends it as `Authorization: Bearer <HEALTH_TOKEN>` to `https://options-scan.vercel.app/api/health`.
+- Until that variable exists, the monitor can send the existing `CRON_SECRET` the same way.
 
 The handler then checks **America/Chicago** and exits immediately outside **8:30–15:00 Central**, weekdays, except for a short close check. A run can pass `?manual=true` to skip that hours check. That flag is not a secret. The request still needs the bearer token.
 
@@ -38,6 +57,7 @@ Middleware requires that cookie, or `Authorization: Bearer <CRON_SECRET>`, on ev
 - `/login` and `POST /api/auth/login`
 - `POST /api/auth/logout`
 - `GET /api/cron` (bearer check inside the route)
+- `GET /api/health` (bearer `HEALTH_TOKEN`, or `CRON_SECRET` when `HEALTH_TOKEN` is unset)
 
 `GET /api/schwab/callback` requires the app session. It is not a public route.
 
@@ -53,10 +73,12 @@ Set every secret in Vercel as a **Sensitive** variable. Do not leave them readab
 
 | Variable | Sensitive | Purpose |
 |----------|-----------|---------|
-| `CRON_SECRET` | Yes | Bearer token Vercel cron sends |
+| `CRON_SECRET` | Yes | Bearer token Vercel cron sends. Also accepted by `/api/health` when `HEALTH_TOKEN` is unset |
+| `HEALTH_TOKEN` | Yes | Optional bearer for `GET /api/health`. When set, the health check accepts this token and does not accept `CRON_SECRET` |
 | `APP_PASSWORD` | Yes | Password for `/login` |
 | `SESSION_SECRET` | Yes | Signs the session cookie and the Schwab OAuth state cookie |
-| `TASTYTRADE_CLIENT_SECRET` | Yes | OAuth client secret |
+| `TASTYTRADE_ENABLED` | No | Must be exactly `true`, and the three Tastytrade values below must be set, or Tastytrade stays off |
+| `TASTYTRADE_CLIENT_SECRET` | Yes | OAuth client secret. Unused while Tastytrade is off |
 | `TASTYTRADE_REFRESH_TOKEN` | Yes | OAuth refresh token |
 | `TASTYTRADE_ACCOUNT_NUMBER` | Yes | Account to read |
 | `TASTYTRADE_ENV` | No | `production` for the live account. `sandbox` is the cert API. |
@@ -78,6 +100,8 @@ Set every secret in Vercel as a **Sensitive** variable. Do not leave them readab
 | `NEXT_PUBLIC_DEFAULT_WATCHLIST` | No | Browser-visible default tickers |
 | `ACCOUNT_SIZE_DOLLARS` | No | Account size used for the weekly drawdown flag (25% of this). Default 5000. Empty, zero, or invalid keeps 5000. Not a secret. |
 | `MAX_LOSS_DOLLARS` | No | Loss cap and grade cost ceiling for one contract. Default 875 (17.5% of the $5,000 account). The Gate, alerts, Grade my trade, and the paper trade log all read this. Empty or invalid keeps 875. |
+
+Tastytrade stays **off** unless `TASTYTRADE_ENABLED` is exactly `true` and `TASTYTRADE_CLIENT_SECRET`, `TASTYTRADE_REFRESH_TOKEN`, and `TASTYTRADE_ACCOUNT_NUMBER` are all set. While it is off, the app does not call Tastytrade, does not log a login failure, and does not put a Tastytrade warning on the banner. The Account tab says Tastytrade isn't connected. The code is still there. Set the flag and replace the refresh token to turn it back on.
 
 Tastytrade auth is the **OAuth refresh-token grant only**. Do not set a tastytrade username or password. Username/password session login was removed by tastytrade on 2026-02-11.
 
@@ -109,7 +133,7 @@ Set the same callback URL on the Schwab developer app. A mismatch is the usual r
 
 OAuth is the authorization-code flow. The access token lasts about **30 minutes** and is refreshed on the server. The refresh token lasts **7 days**, so she re-authorizes in the browser about once a week. The dashboard banner has **Reconnect Schwab**. When fewer than **2 days** are left, the banner warns and Telegram gets a note (same sender as the other alerts). A failed refresh sends a Telegram note too. Neither message contains a token.
 
-The same banner sits on every signed-in page. It says so when Schwab is disconnected, when the refresh token is near expiry (with a countdown), or when no successful scan has been recorded for more than 30 minutes during Chicago market hours. Outside those hours a quiet market is not treated as a failed scan. A skipped cron run writes a warning to the log and sends the same Telegram channel used for A/B alerts, at most once every 30 minutes. The last successful scan and the last run outcome are stored with the other app records. Tastytrade is checked on that same cron run (one login attempt, not a Schwab request). An HTTP 400 means the refresh token was rejected. Positions and balances stay blank until that token is replaced. Schwab quotes are separate.
+The same banner sits on every signed-in page. It says so when Schwab is disconnected, when the refresh token is near expiry (with a countdown), or when no successful scan has been recorded for more than 30 minutes during Chicago market hours. Outside those hours a quiet market is not treated as a failed scan. A skipped cron run writes a warning to the log and sends the same Telegram channel used for A/B alerts, at most once every 30 minutes. The last successful scan and the last run outcome are stored with the other app records. Scorecard and Learning mode show the last scan time and the last shadow update. Tastytrade is checked on that cron run only when it is turned on (one login attempt, not a Schwab request). An HTTP 400 means the refresh token was rejected. Schwab quotes are separate.
 
 Sign in to the scanner first, then use Reconnect Schwab. `/api/schwab/connect` stores a signed OAuth `state` in a short-lived **httpOnly, Secure, SameSite=Lax** cookie (`oes_schwab_oauth_state`, 10 minutes, HMAC-signed with `SESSION_SECRET`). Schwab sends the browser to `/api/schwab/callback`. That request must include both the app session and a `state` query value that matches the signed cookie. The code is exchanged on the server. Tokens are not put in the redirect, the page, or the status JSON.
 
@@ -166,7 +190,7 @@ The extra facts saved with an alert (trend versus VWAP and the 20-day average, S
 
 The planning figure is about 800ms per request, so this pass is about 76 seconds. That is longer than the old 60 second route limit. `maxDuration` on the cron, alerts, and flow routes is 300 seconds. Fluid compute allows 300 seconds on Hobby and defaults to 300 seconds on Pro (Pro can go higher). 300 seconds covers this pass, a slower Schwab response, and one rate-limit wait. Reading all 43 names in one pass would go over the 60 per minute history cap. The planning math is in `plannedCronBudget`.
 
-The Flow tab still asks for 9 names at a time so one browser request can finish. Search is one ticker. If many open names outside the core 15 fill the history budget, the added-name group gets smaller so the run still fits, and the cron log states that slower refresh. The normal book does not need that. Cron stays on the existing every-15-minute schedule, so no extra cron entries were added. Sub-daily cron jobs need a paid Vercel plan. This project already runs every 15 minutes, and the schedule is still 3 entries, under the 100 cron jobs per project allowed on every plan.
+The Flow tab still asks for 9 names at a time so one browser request can finish. Search is one ticker. If many open names outside the core 15 fill the history budget, the added-name group gets smaller so the run still fits, and the cron log states that slower refresh. The normal book does not need that. Cron stays on the existing every-15-minute schedule, so no extra cron entries were added. Sub-daily cron jobs need a paid Vercel plan. This team is on Pro, and the schedule is still 3 entries, under the 100 cron jobs per project allowed on every plan. The cron, alerts, and flow routes ask for 3008 MB. A new A or B is opened as a shadow and marked in that same run, still inside the 16 shadow quotes. The scan keeps one chain per ticker instead of every follow-up copy.
 
 Chain requests stay on the chains endpoint, with `range=NTM`, `strikeCount=6`, and a date window of 60 days. The extra days are the same one chain request per ticker, so a 43–60 day contract is in that response for the test shadows. It does not add a Schwab call, and it does not change the 14–42 day rule for an A or a B. Each ticker also gets two price-history reads: about a month of daily candles, and today's 5-minute candles with the extended session. Those history reads are cached per ticker for a few minutes. Schwab has no parameter for "how many expirations," so after the response the scorer keeps up to 24. Dates about 14 to 42 days out are kept ahead of the very short-dated ones, so a 2 to 6 week expiration is not dropped to make room for this week. Up to 4 expirations in the 43–60 day window are kept from that same response even when nearer dates already filled the 24. A date past 60 days is not kept for the test. Chain results are cached for about 60 seconds.
 
@@ -192,7 +216,7 @@ The daily stop reads closed trades in the trade log for the Chicago day. Two los
 
 New alerts, shadows, and paper trades are stamped with a rules version so Learning mode can compare results before and after a checklist change. Older rows stay "Not stamped". Version 2 adds four quality filters. These are filters to be checked on the scorecard. They are not a claim that the next trade makes money. The first 15 minutes after the Chicago open cannot be an A or a B. A likely spread or hedge (similar size on a neighboring strike or the opposite side, same expiration) cannot be an A. A trade that fights both the ticker's trend and SPY and QQQ cannot be an A. Unknown trend, market, or pairing does not change the grade. Earnings on or before expiration still drop the letter and name IV crush. An unknown earnings date still cannot be an A. A short-dated single with earnings today or tomorrow is still skipped unless it is a defined-risk spread. The $875 cap, premium-only risk, unknown-is-not-a-pass, and the two-loss daily stop are unchanged. Nothing places an order.
 
-After a Telegram send for an A or a B, the cron stores the contract, the quote, the verdict, and the grade. Later runs re-read the Schwab chain and store the **mid** (not the last trade) and the underlying at about 15 minutes, 1 hour, and the close, plus the percent change in the option mid versus the alert mid. A missing quote or an expired contract is marked and skipped. The outcome label is **win** if the mid is up 20% or more at any of those checks, **miss** if the close mid is down 20% or more and nothing earlier won, and **flat** otherwise. Pending and unscored alerts are left out of the hit rate. That label is an estimate. It is not a fill and it is not trade profit or loss. A daily stop that turns a TAKE into STOP for today does not send a new alert.
+After a Telegram send for an A or a B, the cron stores the contract, the quote, the verdict, and the grade, then opens the shadow and marks it on that same run. Later runs re-read the Schwab chain and store the **mid** (not the last trade) and the underlying at about 15 minutes, 1 hour, and the close, plus the percent change in the option mid versus the alert mid. A missing quote or an expired contract is marked and skipped. The outcome label is **win** if the mid is up 20% or more at any of those checks, **miss** if the close mid is down 20% or more and nothing earlier won, and **flat** otherwise. Pending and unscored alerts are left out of the hit rate. That label is an estimate. It is not a fill and it is not trade profit or loss. A daily stop that turns a TAKE into STOP for today does not send a new alert.
 
 Alert Report (session required, same as the other tabs) lists recent alerts and summarizes hit rate, average mid move at 1 hour and at the close, and the same numbers by ticker, by Gate liquidity, and by TAKE versus SKIP. The sample is small until many alerts are graded.
 

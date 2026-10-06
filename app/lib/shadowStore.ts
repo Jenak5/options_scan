@@ -82,6 +82,85 @@ export async function shadowCsv(): Promise<string> {
 }
 
 /**
+ * Open a shadow row for every saved A or B that does not have one yet.
+ * No Schwab quote. A later pass marks the open rows.
+ */
+/** Skip a second mark when this shadow was already marked a few minutes ago. */
+const MARK_REUSE_MS = 10 * 60 * 1000;
+
+/**
+ * Mark open shadows from chain rows this scan already scored.
+ * No extra Schwab read. A shadow marked in the last 10 minutes is left as it is.
+ */
+export async function markShadowsFromRows(
+  rows: readonly FlowRow[],
+  now: Date,
+): Promise<{ marked: number; closed: number; saved: boolean }> {
+  const quotes = quotesFromRows(rows);
+  if (quotes.size === 0) return { marked: 0, closed: 0, saved: true };
+  const preview = applyRowMarks(parseShadowBook(await readShadowBookText()), quotes, now);
+  if (preview.marked === 0) return { marked: 0, closed: 0, saved: true };
+  let marked = 0;
+  let closed = 0;
+  const saved = await updateShadowBook((text) => {
+    const applied = applyRowMarks(parseShadowBook(text), quotes, now);
+    marked = applied.marked;
+    closed = applied.closed;
+    if (applied.marked === 0) return text ?? JSON.stringify({ version: 1, records: applied.records });
+    return JSON.stringify({ version: 1, records: applied.records });
+  });
+  return { marked: saved ? marked : 0, closed: saved ? closed : 0, saved };
+}
+
+function quotesFromRows(rows: readonly FlowRow[]): Map<string, { mid: number | null; bid: number | null }> {
+  const quotes = new Map<string, { mid: number | null; bid: number | null }>();
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const mid = row.mid != null && Number.isFinite(row.mid) && row.mid > 0 ? row.mid : null;
+    const bid = Number.isFinite(row.bid) && row.bid > 0 ? row.bid : null;
+    if (mid == null && bid == null) continue;
+    quotes.set(row.id, { mid, bid });
+  }
+  return quotes;
+}
+
+function applyRowMarks(
+  book: ShadowBook,
+  quotes: ReadonlyMap<string, { mid: number | null; bid: number | null }>,
+  now: Date,
+): { records: ShadowTrade[]; marked: number; closed: number } {
+  let marked = 0;
+  let closed = 0;
+  const nowMs = now.getTime();
+  const records = book.records.map((shadow) => {
+    if (shadow.status !== "open") return shadow;
+    if (shadow.lastMarkedAt != null && nowMs >= shadow.lastMarkedAt && nowMs - shadow.lastMarkedAt < MARK_REUSE_MS) {
+      return shadow;
+    }
+    const quote = quotes.get(contractKey(shadow));
+    if (!quote) return shadow;
+    const updated = applyShadowQuote(shadow, quote, now);
+    if (updated.lastMarkedAt !== nowMs) return shadow;
+    marked += 1;
+    if (updated.status === "closed") closed += 1;
+    return updated;
+  });
+  return { records, marked, closed };
+}
+
+export async function openMissingShadows(): Promise<{ opened: number; saved: boolean }> {
+  const [alertBook, currentText] = await Promise.all([loadAlertBook(), readShadowBookText()]);
+  const synced = addMissingShadows(parseShadowBook(currentText), alertBook.records);
+  if (synced.opened === 0) return { opened: 0, saved: true };
+  const saved = await updateShadowBook((current) => {
+    const latest = parseShadowBook(current);
+    const again = addMissingShadows(latest, alertBook.records);
+    return JSON.stringify({ version: 1, records: attachMissingFeatures(again.book.records, alertBook.records) });
+  });
+  return { opened: saved ? synced.opened : 0, saved };
+}
+
+/**
  * Open a shadow for every new A or B, then mark the open ones and apply the exit rules.
  * Quote work is outside the store write so a retried save does not fetch the chain again.
  */

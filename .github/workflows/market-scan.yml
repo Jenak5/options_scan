@@ -1,0 +1,43 @@
+# Calls the production scan every 15 minutes during US market hours.
+# Vercel cron stays in vercel.json. This is the backup caller.
+# If a scan already finished in the last 10 minutes, the route exits
+# without reading Schwab, so the two callers do not double the request budget.
+#
+# Jena: add one GitHub Actions secret before this will run.
+# Name: CRON_SECRET
+# Where: GitHub repo → Settings → Secrets and variables → Actions → New repository secret
+# Value: the same CRON_SECRET already stored in Vercel. Do not paste it into the repo.
+
+name: Market scan
+
+on:
+  schedule:
+    # UTC. Covers 8:30am–3:20pm America/Chicago in both daylight and standard time.
+    - cron: "30,45 13 * * 1-5"
+    - cron: "*/15 14-20 * * 1-5"
+    - cron: "0 21 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: none
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Call the production scan
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "CRON_SECRET is not set."
+            echo "Add it under GitHub → Settings → Secrets and variables → Actions."
+            echo "Use the same value as the CRON_SECRET already stored in Vercel."
+            exit 1
+          fi
+          curl --fail-with-body --silent --show-error \
+            --max-time 330 \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "https://options-scan.vercel.app/api/cron"
+          echo

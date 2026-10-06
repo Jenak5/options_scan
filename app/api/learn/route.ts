@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import { learnCsv, loadLearnPage } from "@/app/lib/learnStore";
+import { emptyScanHealth, scanFreshness } from "@/app/lib/scanHealth";
+import { readScanHealth } from "@/app/lib/schwabStore";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +25,9 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  const page = await loadLearnPage(now);
-  return NextResponse.json(page);
+  const [page, health] = await Promise.all([
+    loadLearnPage(now),
+    readScanHealth().catch(() => emptyScanHealth()),
+  ]);
+  return NextResponse.json({ ...page, freshness: scanFreshness(health) });
 }
