@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verdictBanner } from "@/app/lib/alertConfig";
-import { loadAlertBook, loadRiskStatus, recordOpeningChecks } from "@/app/lib/alertStore";
+import { loadAlertBook, loadRiskStatus } from "@/app/lib/alertStore";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import {
   FLOW_DISCLAIMER,
@@ -13,8 +13,8 @@ import {
 } from "@/app/lib/flow";
 import { pinTodayAlerts } from "@/app/lib/flowAlerts";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
-import { chicagoDate } from "@/app/lib/marketHours";
-import { noteBrowserScan, recordDisplayedAlerts } from "@/app/lib/pageScan";
+import { chicagoDate, isChicagoMarketHours } from "@/app/lib/marketHours";
+import { noteBrowserScan, recordFlowPageSession } from "@/app/lib/pageScan";
 import { formatScanRunLine } from "@/app/lib/scanHealth";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { gradeFlowRow } from "@/app/lib/verdict";
@@ -60,37 +60,45 @@ export async function GET(request: NextRequest) {
     const losses = risk.stop.consecutiveLosses;
     const graded = filterFlowRows(scan.rows, { minPremium, otmOnly, liquidOnly, limit })
       .map((row) => ({ ...row, verdict: gradeFlowRow(row, losses), alertId: null as string | null }));
+    const inSession = isChicagoMarketHours(now);
     let recorded = { saved: 0, opened: 0, marked: 0, closed: 0 };
-    try {
-      recorded = await recordDisplayedAlerts(scan.rows, losses, now);
-      const touched = recorded.opened > 0 || recorded.marked > 0 || recorded.closed > 0;
-      await noteBrowserScan(now, touched ? now.getTime() : null);
+    if (inSession) {
+      try {
+        recorded = await recordFlowPageSession(scan.rows, scan.chainInterest, losses, now);
+        const touched = recorded.opened > 0 || recorded.marked > 0 || recorded.closed > 0;
+        await noteBrowserScan(now, touched ? now.getTime() : null);
+        console.info(formatScanRunLine({
+          outcome: "success",
+          tickers: scan.watchlist.length,
+          alertsSaved: recorded.saved,
+          shadowsOpened: recorded.opened,
+          shadowsMarked: recorded.marked,
+          shadowsClosed: recorded.closed,
+          reason: scan.cached ? "Flow page, cached chain" : "Flow page",
+        }));
+      } catch {
+        console.info(formatScanRunLine({
+          outcome: "failed",
+          tickers: scan.watchlist.length,
+          alertsSaved: 0,
+          shadowsOpened: 0,
+          shadowsMarked: 0,
+          shadowsClosed: 0,
+          reason: "Flow page could not save shadows",
+        }));
+      }
+    } else {
       console.info(formatScanRunLine({
         outcome: "success",
-        tickers: scan.watchlist.length,
-        alertsSaved: recorded.saved,
-        shadowsOpened: recorded.opened,
-        shadowsMarked: recorded.marked,
-        shadowsClosed: recorded.closed,
-        reason: scan.cached ? "Flow page, cached chain" : "Flow page",
-      }));
-    } catch {
-      console.info(formatScanRunLine({
-        outcome: "failed",
         tickers: scan.watchlist.length,
         alertsSaved: 0,
         shadowsOpened: 0,
         shadowsMarked: 0,
         shadowsClosed: 0,
-        reason: "Flow page could not save shadows",
+        reason: "Flow page, outside Central market hours",
       }));
     }
     let data = graded;
-    try {
-      await recordOpeningChecks(scan.chainInterest, now);
-    } catch {
-      // The page still shows this chain. The next scan can record the check.
-    }
     try {
       const book = await loadAlertBook();
       data = pinTodayAlerts(graded, book.records, chicagoDate(now), now, ticker);
