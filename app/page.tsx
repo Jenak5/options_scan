@@ -417,10 +417,18 @@ function AccountTab() {
   const [balances,  setBalances]  = useState<any>(null);
   const [loading,   setLoading]   = useState(true);
   const [error,     setError]     = useState<string | null>(null);
+  const [off,       setOff]       = useState(false);
 
   const load = useCallback(async () => {
-    setLoading(true); setError(null);
+    setLoading(true); setError(null); setOff(false);
     try {
+      const statusRes = await fetch("/api/tastytrade?action=status");
+      const status = await statusRes.json();
+      if (!statusRes.ok) throw new Error(typeof status.error === "string" ? status.error : "Account status failed");
+      if (!status.enabled) {
+        setOff(true);
+        return;
+      }
       const [pos, bal] = await Promise.all([tt({ action: "positions" }), tt({ action: "balances" })]);
       setPositions(Array.isArray(pos) ? pos : pos?.items ?? []);
       setBalances(bal);
@@ -439,7 +447,12 @@ function AccountTab() {
     <div>
       {loading && <Spinner />}
       {error   && <ErrorBox message={error} onRetry={load} />}
-      {!loading && !error && (
+      {!loading && !error && off && (
+        <div style={{ color: "#94a3b8", fontSize: 15, lineHeight: 1.5 }}>
+          Tastytrade isn't connected.
+        </div>
+      )}
+      {!loading && !error && !off && (
         <>
           <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
             {[
@@ -593,8 +606,9 @@ function AlertsTab() {
     { name: "APP_PASSWORD",             note: "App sign-in" },
     { name: "SESSION_SECRET",           note: "Signs the session cookie" },
     { name: "CRON_SECRET",              note: "Bearer header only — never in a URL" },
-    { name: "TASTYTRADE_CLIENT_SECRET", note: "OAuth, read-only scope" },
-    { name: "TASTYTRADE_REFRESH_TOKEN", note: "OAuth refresh token" },
+    { name: "TASTYTRADE_ENABLED",       note: "Off unless this is true and the Tastytrade values are set" },
+    { name: "TASTYTRADE_CLIENT_SECRET", note: "OAuth, read-only scope. Unused while Tastytrade is off" },
+    { name: "TASTYTRADE_REFRESH_TOKEN", note: "OAuth refresh token. Unused while Tastytrade is off" },
     { name: "XAI_API_KEY",              note: "Grok API key" },
     { name: "TELEGRAM_BOT_TOKEN",       note: "From @BotFather" },
     { name: "TELEGRAM_CHAT_ID",         note: "Your chat ID" },
@@ -693,13 +707,16 @@ function ResearchTab() {
   useEffect(() => {
     (async () => {
       try {
+        const statusRes = await fetch("/api/tastytrade?action=status");
+        const status = statusRes.ok ? await statusRes.json() : { enabled: false };
+        const volSymbols = status.enabled ? ["SPY","QQQ","AAPL","MSFT","NVDA","TSLA"] : [];
         const [flowData, ...volData] = await Promise.allSettled([
           fetch("/api/flow?limit=20&minPremium=50000").then(async (res) => {
             const json = await res.json();
             if (!res.ok || json.connected === false) return [];
             return json.data ?? [];
           }),
-          ...["SPY","QQQ","AAPL","MSFT","NVDA","TSLA"].map((t) =>
+          ...volSymbols.map((t) =>
             tt({ action: "volatility", symbol: t })
               .then((d: any) => ({
                 ticker: t,

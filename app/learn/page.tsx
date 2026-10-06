@@ -61,8 +61,14 @@ interface Trade {
   };
 }
 
+interface Freshness {
+  lastScan: string;
+  lastShadow: string;
+}
+
 interface Page {
   stored: boolean;
+  freshness?: Freshness;
   estimateNote: string;
   resolved: number;
   testResolved: number;
@@ -132,6 +138,13 @@ export default function LearnPage() {
         )}
         {page && (
           <>
+            {page.freshness && (
+              <p style={{ margin: "0 0 12px", color: "#cbd5e1", fontSize: 14, lineHeight: 1.45 }}>
+                {page.freshness.lastScan}
+                <span style={{ color: "#64748b" }}> · </span>
+                {page.freshness.lastShadow}
+              </p>
+            )}
             <Note color="#94a3b8">{page.estimateNote}</Note>
             {page.tooFew && page.resolved > 0 && (
               <Note color="#fbbf24">Fewer than 30 resolved results is too few to trust.</Note>

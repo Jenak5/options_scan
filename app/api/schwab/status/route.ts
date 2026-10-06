@@ -3,6 +3,7 @@ import { denyIfUnauthorized } from "@/app/lib/auth";
 import { connectionNotice, emptyScanHealth } from "@/app/lib/scanHealth";
 import { getSchwabStatus, noteRefreshWindow } from "@/app/lib/schwab";
 import { readScanHealth } from "@/app/lib/schwabStore";
+import { tastytradeEnabled } from "@/app/lib/tastytrade";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +24,7 @@ export async function GET(request: NextRequest) {
     refreshDaysLeft: status.refreshDaysLeft,
     now,
     health,
+    showTastytrade: tastytradeEnabled(),
   });
   return NextResponse.json({
     configured: status.configured,

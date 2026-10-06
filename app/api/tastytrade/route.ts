@@ -9,6 +9,8 @@ import {
   getMarketMetrics,
   getNetLiqHistory,
   getLiveOrders,
+  TASTYTRADE_OFF_MESSAGE,
+  tastytradeEnabled,
 } from "@/app/lib/tastytrade";
 
 // Read-only. There is no POST/PUT/DELETE on this route, and no order placement.
@@ -16,7 +18,14 @@ export async function GET(request: NextRequest) {
   const denied = await denyIfUnauthorized(request);
   if (denied) return denied;
 
+  if (!tastytradeEnabled()) {
+    return NextResponse.json({ enabled: false, message: TASTYTRADE_OFF_MESSAGE });
+  }
+
   const action = request.nextUrl.searchParams.get("action");
+  if (action === "status") {
+    return NextResponse.json({ enabled: true });
+  }
   const symbol = request.nextUrl.searchParams.get("symbol");
 
   try {

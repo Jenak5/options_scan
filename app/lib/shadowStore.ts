@@ -82,6 +82,22 @@ export async function shadowCsv(): Promise<string> {
 }
 
 /**
+ * Open a shadow row for every saved A or B that does not have one yet.
+ * No Schwab quote. A later pass marks the open rows.
+ */
+export async function openMissingShadows(): Promise<{ opened: number; saved: boolean }> {
+  const [alertBook, currentText] = await Promise.all([loadAlertBook(), readShadowBookText()]);
+  const synced = addMissingShadows(parseShadowBook(currentText), alertBook.records);
+  if (synced.opened === 0) return { opened: 0, saved: true };
+  const saved = await updateShadowBook((current) => {
+    const latest = parseShadowBook(current);
+    const again = addMissingShadows(latest, alertBook.records);
+    return JSON.stringify({ version: 1, records: attachMissingFeatures(again.book.records, alertBook.records) });
+  });
+  return { opened: saved ? synced.opened : 0, saved };
+}
+
+/**
  * Open a shadow for every new A or B, then mark the open ones and apply the exit rules.
  * Quote work is outside the store write so a retried save does not fetch the chain again.
  */

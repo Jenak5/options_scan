@@ -13,13 +13,13 @@ import { lastAlertBookWriteError, noteAlertSentUnsaved } from "@/app/lib/schwabS
 import { hasValidBearer } from "@/app/lib/auth";
 import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
-import { openScanTickers, recordExperimentalShadows, runShadowPass } from "@/app/lib/shadowStore";
+import { openMissingShadows, openScanTickers, recordExperimentalShadows, runShadowPass } from "@/app/lib/shadowStore";
 import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { readScanHealth, writeScanHealth } from "@/app/lib/schwabStore";
-import { emptyScanHealth, skipNotifyDue, skipTelegramText, skipWarning, type ScanHealth } from "@/app/lib/scanHealth";
+import { emptyScanHealth, formatScanRunLine, scanSlotDecision, skipNotifyDue, skipTelegramText, skipWarning, type ScanHealth, type ScanRunSummary } from "@/app/lib/scanHealth";
 import { sendTelegramAlert } from "@/app/lib/telegram";
-import { probeTastytrade } from "@/app/lib/tastytrade";
+import { probeTastytrade, tastytradeEnabled } from "@/app/lib/tastytrade";
 import { planExitsForAsk } from "@/app/lib/exits";
 import { formatVerdictHtml, paperTradeLinkHtml } from "@/app/lib/telegram";
 import type { AlertVerdict } from "@/app/lib/verdict";
@@ -200,6 +200,7 @@ async function sendTelegram(message: string): Promise<boolean> {
 export async function GET(request: NextRequest) {
   // Step 1 auth: Bearer only. Do not read ?secret= or x-cron-secret.
   if (!(await hasValidBearer(request))) {
+    console.info(formatScanRunLine(emptySummary("unauthorized", "Bearer token rejected.")));
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -211,15 +212,28 @@ export async function GET(request: NextRequest) {
     OUTCOME_RULES.closeCheckpointMinutes,
     OUTCOME_RULES.closeCheckpointMinutes + OUTCOME_RULES.closeWindowMinutes,
   );
+  const summary = emptySummary("skipped");
   if (!inSession && !closeWindow && !isManual) {
+    summary.reason = "Outside Central market hours (8:30–15:00 America/Chicago)";
+    console.info(formatScanRunLine(summary));
     return NextResponse.json({
       skipped: true,
-      reason: "Outside Central market hours (8:30–15:00 America/Chicago)",
+      reason: summary.reason,
     });
+  }
+
+  const slot = await claimScanSlot(now.getTime(), isManual);
+  if (slot !== "ok") {
+    summary.reason = slot === "busy"
+      ? "Another scan is already running."
+      : "A scan already finished in the last 10 minutes.";
+    console.info(formatScanRunLine(summary));
+    return NextResponse.json({ skipped: true, reason: summary.reason });
   }
 
   const log: string[] = [];
   let alertsSent = 0;
+  let shadowAt: number | null = null;
 
   try {
     let followUps = { updated: 0, quoted: 0 };
@@ -232,22 +246,28 @@ export async function GET(request: NextRequest) {
     }
 
     try {
-      const shadow = await runShadowPass(now);
-      const saved = shadow.saved ? "saved" : "not saved";
-      log.push(`Shadow alerts: ${shadow.opened} opened, ${shadow.quoted} quoted, ${shadow.closed} closed (${saved})`);
+      const openedEarly = await openMissingShadows();
+      noteShadows(summary, openedEarly.opened, 0, 0, openedEarly.saved);
+      if (openedEarly.opened > 0 && openedEarly.saved) shadowAt = now.getTime();
     } catch (err) {
       if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
-      log.push("Shadow alert update failed");
+      log.push("Shadow alert open failed");
     }
 
     if (!inSession && !isManual) {
-      await rememberScan("success", now, null);
+      const shadow = await markShadows(now, log);
+      noteShadows(summary, shadow.opened, shadow.quoted, shadow.closed, shadow.saved);
+      if (shadowTouched(shadow)) shadowAt = now.getTime();
+      summary.outcome = "success";
+      await rememberScan("success", now, null, shadowAt);
+      console.info(formatScanRunLine(summary));
       return NextResponse.json({ alertsSent: 0, followUpOnly: true, followUps, log });
     }
 
     const losses = await currentDailyLoss(now);
     const watchlist = watchlistFromEnv(process.env.FLOW_WATCHLIST);
     const plan = planCronScan(watchlist, now, await openScanTickers());
+    summary.tickers = plan.tickers.length;
     log.push(flowCronSliceNote(plan, watchlist.length, process.env.FLOW_WATCHLIST));
     const scan = await scanEstimatedFlow({
       tickers: plan.tickers,
@@ -348,6 +368,7 @@ export async function GET(request: NextRequest) {
 
       const alertId = `${now.getTime()}-${row.id}`;
       const saved = await rememberSentAlert(row, verdict, now);
+      if (saved) summary.alertsSaved += 1;
       if (saved) {
         handledContractIds.add(dayKey(tradingDay, row.id));
         handledSetupKeys.add(dayKey(tradingDay, setup));
@@ -364,12 +385,27 @@ export async function GET(request: NextRequest) {
         log.push(`${row.ticker}: Telegram alert ${delivered ? "sent" : "not sent"}, but the alert book was not saved${saveDetail(failure)}`);
       }
     }
-    await rememberScan("success", now, null);
+    try {
+      const openedLate = await openMissingShadows();
+      noteShadows(summary, openedLate.opened, 0, 0, openedLate.saved);
+      if (openedLate.opened > 0 && openedLate.saved) shadowAt = now.getTime();
+      const shadow = await markShadows(now, log);
+      noteShadows(summary, shadow.opened, shadow.quoted, shadow.closed, shadow.saved);
+      if (shadowTouched(shadow) || (openedLate.opened > 0 && openedLate.saved)) shadowAt = now.getTime();
+    } catch (err) {
+      if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+      log.push("Shadow alert update failed");
+    }
+    summary.outcome = "success";
+    await rememberScan("success", now, null, shadowAt);
   } catch (err) {
     if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) {
       console.warn(skipWarning(err.message));
       log.push(err.message);
-      await rememberScan("skipped", now, err.message);
+      summary.outcome = "skipped";
+      summary.reason = err.message;
+      await rememberScan("skipped", now, err.message, shadowAt);
+      console.info(formatScanRunLine(summary));
       return NextResponse.json({ alertsSent: 0, skipped: true, reason: err.message, log });
     }
     const message = err instanceof Error && err.message.startsWith("Schwab ")
@@ -377,25 +413,94 @@ export async function GET(request: NextRequest) {
       : "Estimated flow scan failed";
     console.warn(skipWarning(message));
     log.push(message);
-    await rememberScan("failed", now, message);
+    summary.outcome = "failed";
+    summary.reason = message;
+    try {
+      const shadow = await markShadows(now, log);
+      noteShadows(summary, shadow.opened, shadow.quoted, shadow.closed, shadow.saved);
+      if (shadowTouched(shadow)) shadowAt = now.getTime();
+    } catch {
+      log.push("Shadow alert update failed");
+    }
+    await rememberScan("failed", now, message, shadowAt);
+    console.info(formatScanRunLine(summary));
     return NextResponse.json({ error: message, log }, { status: 500 });
   }
 
-  return NextResponse.json({ alertsSent, log });
+  console.info(formatScanRunLine(summary));
+  return NextResponse.json({ alertsSent, alertsSaved: summary.alertsSaved, log });
+}
+
+function emptySummary(outcome: ScanRunSummary["outcome"], reason: string | null = null): ScanRunSummary {
+  return {
+    outcome,
+    tickers: 0,
+    alertsSaved: 0,
+    shadowsOpened: 0,
+    shadowsMarked: 0,
+    shadowsClosed: 0,
+    reason,
+  };
+}
+
+function noteShadows(
+  summary: ScanRunSummary,
+  opened: number,
+  marked: number,
+  closed: number,
+  saved: boolean,
+): void {
+  if (!saved) return;
+  summary.shadowsOpened += opened;
+  summary.shadowsMarked += marked;
+  summary.shadowsClosed += closed;
+}
+
+function shadowTouched(shadow: { opened: number; quoted: number; closed: number; saved: boolean }): boolean {
+  return shadow.saved && (shadow.opened > 0 || shadow.quoted > 0 || shadow.closed > 0);
+}
+
+async function markShadows(now: Date, log: string[]): Promise<{ opened: number; quoted: number; closed: number; saved: boolean }> {
+  const shadow = await runShadowPass(now);
+  const saved = shadow.saved ? "saved" : "not saved";
+  log.push(`Shadow alerts: ${shadow.opened} opened, ${shadow.quoted} quoted, ${shadow.closed} closed (${saved})`);
+  return shadow;
+}
+
+/**
+ * Hold the slot so Vercel cron and the GitHub Actions backup do not both call Schwab.
+ * A manual run still waits if another pass is in progress, and it does not wait on a recent success.
+ */
+async function claimScanSlot(now: number, manual: boolean): Promise<"ok" | "busy" | "recent"> {
+  const current = await readScanHealth().catch(() => emptyScanHealth());
+  const decision = scanSlotDecision(current, now);
+  if (decision === "busy") return "busy";
+  if (decision === "recent" && !manual) return "recent";
+  try {
+    await writeScanHealth({ ...current, runStartedAt: now });
+    const confirmed = await readScanHealth();
+    if (confirmed.runStartedAt !== now) return "busy";
+  } catch {
+    return "ok";
+  }
+  return "ok";
 }
 
 async function rememberScan(
   outcome: "success" | "skipped" | "failed",
   now: Date,
   reason: string | null,
+  shadowAt: number | null,
 ): Promise<void> {
   try {
     const current = await readScanHealth().catch(() => emptyScanHealth());
     let tasty: { ok: boolean; status: number | null; message: string } | null = null;
-    try {
-      tasty = await probeTastytrade();
-    } catch {
-      tasty = null;
+    if (tastytradeEnabled()) {
+      try {
+        tasty = await probeTastytrade();
+      } catch {
+        tasty = null;
+      }
     }
     const next: ScanHealth = {
       ...current,
@@ -403,10 +508,17 @@ async function rememberScan(
       lastOutcome: outcome,
       lastReason: reason,
       lastSuccessAt: outcome === "success" ? now.getTime() : current.lastSuccessAt,
-      tastytradeOk: tasty ? tasty.ok : current.tastytradeOk,
-      tastytradeStatus: tasty ? tasty.status : current.tastytradeStatus,
-      tastytradeCheckedAt: tasty ? now.getTime() : current.tastytradeCheckedAt,
-      tastytradeMessage: tasty && !tasty.ok ? tasty.message : tasty ? null : current.tastytradeMessage,
+      lastShadowAt: shadowAt ?? current.lastShadowAt,
+      tastytradeOk: tastytradeEnabled() ? (tasty ? tasty.ok : current.tastytradeOk) : null,
+      tastytradeStatus: tastytradeEnabled() ? (tasty ? tasty.status : current.tastytradeStatus) : null,
+      tastytradeCheckedAt: tastytradeEnabled() ? (tasty ? now.getTime() : current.tastytradeCheckedAt) : null,
+      tastytradeMessage: !tastytradeEnabled()
+        ? null
+        : tasty && !tasty.ok
+          ? tasty.message
+          : tasty
+            ? null
+            : current.tastytradeMessage,
     };
     if (outcome === "skipped" && skipNotifyDue(current.skipNotifiedAt, now.getTime())) {
       const sent = await sendTelegramAlert(skipTelegramText(reason ?? "Schwab is not connected."));

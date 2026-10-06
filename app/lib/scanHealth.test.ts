@@ -2,11 +2,17 @@ import { describe, expect, it } from "vitest";
 import {
   connectionNotice,
   emptyScanHealth,
+  formatChicagoStamp,
+  formatScanRunLine,
   refreshCountdown,
+  scanFreshness,
   scanIsStale,
+  scanSlotDecision,
   skipNotifyDue,
   skipTelegramText,
   skipWarning,
+  SCAN_IN_PROGRESS_MS,
+  SCAN_RECENT_SUCCESS_MS,
   SCAN_STALE_MS,
   SKIP_NOTIFY_COOLDOWN_MS,
   type ScanHealth,
@@ -110,6 +116,7 @@ describe("connection notice", () => {
       warnRefreshSoon: false,
       refreshDaysLeft: 5,
       now: CLOSED,
+      showTastytrade: true,
       health: health({
         lastSuccessAt: CLOSED - 60_000,
         tastytradeOk: false,
@@ -120,5 +127,68 @@ describe("connection notice", () => {
     expect(notice.severity).toBe("warn");
     expect(notice.lines.join(" ")).toMatch(/HTTP 400/);
     expect(notice.lines.join(" ")).toMatch(/Schwab quotes are separate/);
+  });
+
+  it("hides a stored Tastytrade failure while Tastytrade is turned off", () => {
+    const notice = connectionNotice({
+      configured: true,
+      connected: true,
+      refreshExpired: false,
+      warnRefreshSoon: false,
+      refreshDaysLeft: 5,
+      now: CLOSED,
+      showTastytrade: false,
+      health: health({
+        lastSuccessAt: CLOSED - 60_000,
+        tastytradeOk: false,
+        tastytradeStatus: 400,
+        tastytradeMessage: "Tastytrade login failed (HTTP 400).",
+      }),
+    });
+    expect(notice.severity).toBe("ok");
+    expect(notice.lines).toEqual([]);
+  });
+});
+
+describe("scan slot", () => {
+  it("lets one run through and holds the slot while it is unfinished or just succeeded", () => {
+    const now = SESSION;
+    expect(scanSlotDecision(health(), now)).toBe("ok");
+    expect(scanSlotDecision(health({ runStartedAt: now - 60_000 }), now)).toBe("busy");
+    expect(scanSlotDecision(health({
+      runStartedAt: now - 60_000,
+      lastRunAt: now - 10_000,
+    }), now)).toBe("ok");
+    expect(scanSlotDecision(health({
+      runStartedAt: now - SCAN_IN_PROGRESS_MS - 1,
+    }), now)).toBe("ok");
+    expect(scanSlotDecision(health({ lastSuccessAt: now - 60_000 }), now)).toBe("recent");
+    expect(scanSlotDecision(health({ lastSuccessAt: now - SCAN_RECENT_SUCCESS_MS }), now)).toBe("ok");
+  });
+});
+
+describe("scan log line", () => {
+  it("is one line with the counts and no secret", () => {
+    const line = formatScanRunLine({
+      outcome: "success",
+      tickers: 29,
+      alertsSaved: 1,
+      shadowsOpened: 1,
+      shadowsMarked: 4,
+      shadowsClosed: 0,
+      reason: "chain\nerror",
+    });
+    expect(line).toBe("Scan success: 29 tickers, 1 alert saved, 1 shadow opened, 4 marked, 0 closed. chain error");
+    expect(line.includes("\n")).toBe(false);
+    const fresh = scanFreshness(health({
+      lastRunAt: Date.parse("2026-10-06T18:05:00Z"),
+      lastOutcome: "success",
+      lastShadowAt: Date.parse("2026-10-06T18:05:00Z"),
+    }));
+    expect(fresh.lastScan).toContain("Last scan:");
+    expect(fresh.lastScan).toContain("success");
+    expect(fresh.lastShadow).toContain("Last shadow update:");
+    expect(formatChicagoStamp(Date.parse("2026-10-06T18:05:00Z"))).toMatch(/1:05/);
+    expect(formatChicagoStamp(Date.parse("2026-10-06T18:05:00Z"))).toMatch(/CT|CDT|CST/);
   });
 });

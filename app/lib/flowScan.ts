@@ -98,16 +98,16 @@ export async function scanEstimatedFlow(options?: {
           now,
         });
         const earnings = await earningsForTicker(ticker, now).catch(() => UNKNOWN_EARNINGS);
+        const sampledAt = Date.now();
         passes.push({
           ticker,
           levels,
           earnings,
-          samples: [{
-            at: Date.now(),
-            contracts: chain.contracts,
-            delayed: chain.delayed,
-            underlyingPrice: chain.underlyingPrice,
-          }],
+          contracts: chain.contracts,
+          delayed: chain.delayed,
+          underlyingPrice: chain.underlyingPrice,
+          activity: activityScore(chain.contracts, previous[ticker] ?? null, asOf),
+          livePoints: livePointsFromContracts(chain.contracts, sampledAt),
         });
       } catch (err) {
         if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
@@ -116,7 +116,7 @@ export async function scanEstimatedFlow(options?: {
     }));
   }
 
-  const follow = rankFollowUps(passes, previous, asOf);
+  const follow = rankFollowUps(passes);
   const followStarted = Date.now();
   for (let round = 0; round < PRINT_RULES.followUpReads; round++) {
     if (follow.length === 0) break;
@@ -131,12 +131,11 @@ export async function scanEstimatedFlow(options?: {
         await pace(Date.now());
         try {
           const chain = await getOptionChain(flowChainRequest(ticker, asOf));
-          pass.samples.push({
-            at: Date.now(),
-            contracts: chain.contracts,
-            delayed: chain.delayed,
-            underlyingPrice: chain.underlyingPrice,
-          });
+          const sampledAt = Date.now();
+          pass.contracts = chain.contracts;
+          pass.delayed = pass.delayed || chain.delayed;
+          pass.underlyingPrice = chain.underlyingPrice;
+          appendLivePoints(pass.livePoints, chain.contracts, sampledAt);
         } catch (err) {
           if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
         }
@@ -148,22 +147,20 @@ export async function scanEstimatedFlow(options?: {
   const updates: Record<string, FlowVolumeSnapshot> = {};
   for (let i = 0; i < passes.length; i++) {
     const pass = passes[i];
-    const last = pass.samples[pass.samples.length - 1];
-    const livePoints = livePointsFromSamples(pass.samples);
-    const delayed = pass.samples.some((sample) => sample.delayed);
     const prior = previous[pass.ticker] ?? null;
     const scored = scoreChain({
       ticker: pass.ticker,
-      contracts: last.contracts,
-      underlyingPrice: last.underlyingPrice,
-      delayed,
+      contracts: pass.contracts,
+      underlyingPrice: pass.underlyingPrice,
+      delayed: pass.delayed,
       previous: prior,
       now: asOf,
-      livePoints,
+      livePoints: pass.livePoints,
     }).map((row) => ({ ...row, levels: pass.levels, earnings: pass.earnings }));
+    pass.contracts = [];
     rows.push(...scored);
     const snap = carryPriorSession(prior, snapshotFromRows(scored, now), asOf);
-    snap.quotes = quotesForRows(scored, prior, livePoints, asOf);
+    snap.quotes = quotesForRows(scored, prior, pass.livePoints, asOf);
     updates[pass.ticker] = snap;
   }
 
@@ -196,18 +193,17 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-interface TickerSample {
-  at: number;
-  contracts: OptionContract[];
-  delayed: boolean;
-  underlyingPrice: number | null;
-}
-
 interface TickerPass {
   ticker: string;
   levels: KeyLevels;
   earnings: EarningsFact;
-  samples: TickerSample[];
+  /** Latest chain only. Follow-up reads replace this instead of keeping every copy. */
+  contracts: OptionContract[];
+  delayed: boolean;
+  underlyingPrice: number | null;
+  /** Scored from the first chain, before follow-up reads replace it. */
+  activity: number;
+  livePoints: Record<string, FlowQuotePoint[]>;
 }
 
 function findPass(passes: TickerPass[], ticker: string): TickerPass | null {
@@ -217,18 +213,11 @@ function findPass(passes: TickerPass[], ticker: string): TickerPass | null {
   return null;
 }
 
-function rankFollowUps(
-  passes: TickerPass[],
-  previous: Record<string, FlowVolumeSnapshot>,
-  now: Date,
-): string[] {
+function rankFollowUps(passes: TickerPass[]): string[] {
   const ranked: { ticker: string; score: number }[] = [];
   for (let i = 0; i < passes.length; i++) {
     const pass = passes[i];
-    const first = pass.samples[0];
-    if (!first) continue;
-    const score = activityScore(first.contracts, previous[pass.ticker] ?? null, now);
-    if (score > 0) ranked.push({ ticker: pass.ticker, score });
+    if (pass.activity > 0) ranked.push({ ticker: pass.ticker, score: pass.activity });
   }
   ranked.sort((a, b) => b.score - a.score);
   const tickers: string[] = [];
@@ -263,18 +252,19 @@ function activityScore(contracts: OptionContract[], previous: FlowVolumeSnapshot
   return best;
 }
 
-function livePointsFromSamples(samples: TickerSample[]): Record<string, FlowQuotePoint[]> {
+function livePointsFromContracts(contracts: OptionContract[], at: number): Record<string, FlowQuotePoint[]> {
   const out: Record<string, FlowQuotePoint[]> = {};
-  for (let s = 0; s < samples.length; s++) {
-    const sample = samples[s];
-    for (let i = 0; i < sample.contracts.length; i++) {
-      const contract = sample.contracts[i];
-      const key = flowContractKey(contract);
-      if (!out[key]) out[key] = [];
-      out[key].push(quotePointFromContract(contract, sample.at));
-    }
-  }
+  appendLivePoints(out, contracts, at);
   return out;
+}
+
+function appendLivePoints(out: Record<string, FlowQuotePoint[]>, contracts: OptionContract[], at: number): void {
+  for (let i = 0; i < contracts.length; i++) {
+    const contract = contracts[i];
+    const key = flowContractKey(contract);
+    if (!out[key]) out[key] = [];
+    out[key].push(quotePointFromContract(contract, at));
+  }
 }
 
 function quotesForRows(

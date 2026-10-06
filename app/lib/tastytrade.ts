@@ -11,6 +11,27 @@ const BASE_URLS = {
 let accessToken: string | null = null;
 let tokenExpiry: number = 0;
 
+export const TASTYTRADE_OFF_MESSAGE = "Tastytrade isn't connected.";
+
+/**
+ * Off unless the flag is exactly "true" and the read-only OAuth values are set.
+ * Turning it back on later does not require new code.
+ */
+export function tastytradeEnabled(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  if (env.TASTYTRADE_ENABLED !== "true") return false;
+  return Boolean(
+    present(env.TASTYTRADE_CLIENT_SECRET)
+    && present(env.TASTYTRADE_REFRESH_TOKEN)
+    && present(env.TASTYTRADE_ACCOUNT_NUMBER),
+  );
+}
+
+function present(value: string | undefined): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 function getBaseUrl(): string {
   const env = process.env.TASTYTRADE_ENV || "sandbox";
   return BASE_URLS[env as keyof typeof BASE_URLS] || BASE_URLS.sandbox;
@@ -26,6 +47,9 @@ const HEADERS: Record<string, string> = {
  * A 400 here is the refresh token being rejected, which is what showed up on Oct 1.
  */
 export async function probeTastytrade(): Promise<{ ok: boolean; status: number | null; message: string }> {
+  if (!tastytradeEnabled()) {
+    return { ok: false, status: null, message: TASTYTRADE_OFF_MESSAGE };
+  }
   const clientSecret = process.env.TASTYTRADE_CLIENT_SECRET;
   const refreshToken = process.env.TASTYTRADE_REFRESH_TOKEN;
   if (!clientSecret || !refreshToken) {
@@ -65,6 +89,9 @@ export async function probeTastytrade(): Promise<{ ok: boolean; status: number |
 }
 
 export async function authenticate(): Promise<string> {
+  if (!tastytradeEnabled()) {
+    throw new Error(TASTYTRADE_OFF_MESSAGE);
+  }
   if (accessToken && Date.now() < tokenExpiry - 60000) {
     return accessToken;
   }
