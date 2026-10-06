@@ -1,7 +1,7 @@
 import type { OptionContract, PutCall } from "@/app/lib/contract";
 import type { EarningsFact } from "@/app/lib/eventRisk";
 import type { KeyLevels } from "@/app/lib/levels";
-import { ALERT_POLICY, ALERT_RULES, OUTCOME_RULES, PRINT_RULES } from "@/app/lib/alertConfig";
+import { ALERT_POLICY, ALERT_RULES, EXPERIMENT_DTE, OUTCOME_RULES, PRINT_RULES } from "@/app/lib/alertConfig";
 import { chicagoClock } from "@/app/lib/marketHours";
 import { checkBidAskSpread, openInterestPasses, volumePasses } from "@/app/lib/gate";
 import {
@@ -47,11 +47,12 @@ export const DEFAULT_FLOW_WATCHLIST = [...CORE_FLOW_WATCHLIST, ...ADDED_FLOW_WAT
 export const FLOW_STRIKE_COUNT = 6;
 
 /**
- * Schwab has no "expiration count" parameter. The request uses this date window,
- * about six weeks, then scoring keeps expirations that can grade A or B
- * ahead of the very short-dated ones.
+ * Schwab has no "expiration count" parameter. The request uses this date window.
+ * 60 days is the same one chain call per ticker as before, extended so a 43–60 day
+ * contract is in that response. Scoring still prefers the 14–42 day A/B window.
+ * The extra days do not add a chain read and do not change the A/B rule.
  */
-export const FLOW_DATE_WINDOW_DAYS = 45;
+export const FLOW_DATE_WINDOW_DAYS = 60;
 
 /** Enough for a few expirations a week across the 2–6 week window, plus shorter dates for review. */
 export const FLOW_MAX_EXPIRATIONS = 24;
@@ -630,6 +631,14 @@ export function keepScanExpirations(
   });
   ranked.sort((a, b) => a.rank - b.rank || a.dte - b.dte || a.expiration.localeCompare(b.expiration));
   const allowed = new Set(ranked.slice(0, Math.max(0, count)).map((row) => row.expiration));
+  // The 43–60 day test reads expirations that were already in this chain.
+  // A few of those dates are kept even when nearer expirations filled the cap.
+  const extra = ranked
+    .filter((row) => row.dte >= EXPERIMENT_DTE.min && row.dte <= EXPERIMENT_DTE.max && !allowed.has(row.expiration))
+    .sort((a, b) => a.dte - b.dte || a.expiration.localeCompare(b.expiration));
+  for (let i = 0; i < extra.length && i < EXPERIMENT_DTE.keptExpirations; i++) {
+    allowed.add(extra[i].expiration);
+  }
   return contracts.filter((contract) => allowed.has(contract.expiration));
 }
 

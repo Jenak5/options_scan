@@ -3,10 +3,11 @@ const LINKS = [
   { id: "gate", href: "/gate", label: "Gate" },
   { id: "trades", href: "/trades", label: "Trade log" },
   { id: "scorecard", href: "/scorecard", label: "Alert scorecard" },
+  { id: "learn", href: "/learn", label: "Learning mode" },
   { id: "report", href: "/?tab=report", label: "Alert Report" },
 ] as const;
 
-export function PageLinks({ current }: { current: "flow" | "gate" | "trades" | "report" | "scorecard" }) {
+export function PageLinks({ current }: { current: "flow" | "gate" | "trades" | "report" | "scorecard" | "learn" }) {
   const links = LINKS.filter((link) => link.id !== current);
   return (
     <nav aria-label="Pages" style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
