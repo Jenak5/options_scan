@@ -4,6 +4,7 @@ const nextConfig = {
   // Same loss cap on the server and in the browser. Unset keeps 875 in risk.ts.
   env: {
     MAX_LOSS_DOLLARS: process.env.MAX_LOSS_DOLLARS ?? "",
+    ACCOUNT_SIZE_DOLLARS: process.env.ACCOUNT_SIZE_DOLLARS ?? "",
   },
 };
 

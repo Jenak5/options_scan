@@ -12,6 +12,17 @@ import {
 } from "@/app/lib/flow";
 import { checkBidAskSpread } from "@/app/lib/gate";
 import type { StoredPriceLevels } from "@/app/lib/levels";
+import {
+  aggressorFromSide,
+  minutesSinceOpen,
+  trendFromPrices,
+  type AggressorSide,
+  type IndexDirection,
+  type PairedFlow,
+  type PriceSide,
+  type RepeatFlow,
+  type TrendAlignment,
+} from "@/app/lib/marketContext";
 
 /**
  * Grading inputs saved with an alert.
@@ -50,6 +61,19 @@ export interface AlertFeatureSnapshot {
   riskDistance: number | null;
   earnings: EarningsProximity;
   side: EstimatedSideLabel | null;
+  /** Null on snapshots saved before these fields existed. Unknown is not a pass. */
+  minutesSinceOpen: number | null;
+  priceVsVwap: PriceSide | null;
+  priceVsSma20: PriceSide | null;
+  trendAlignment: TrendAlignment | null;
+  spyDirection: IndexDirection | null;
+  qqqDirection: IndexDirection | null;
+  marketAlignment: TrendAlignment | null;
+  /** Current IV versus the prior session, as a fraction. 0.10 means 10% higher. */
+  ivVsRecent: number | null;
+  aggressor: AggressorSide | null;
+  repeatFlow: RepeatFlow | null;
+  pairedFlow: PairedFlow | null;
 }
 
 const SIDES: EstimatedSideLabel[] = ["estimated at ask", "estimated at bid", "estimated mid", "estimated unknown"];
@@ -73,6 +97,17 @@ export function emptyFeatures(): AlertFeatureSnapshot {
     riskDistance: null,
     earnings: "unknown",
     side: null,
+    minutesSinceOpen: null,
+    priceVsVwap: null,
+    priceVsSma20: null,
+    trendAlignment: null,
+    spyDirection: null,
+    qqqDirection: null,
+    marketAlignment: null,
+    ivVsRecent: null,
+    aggressor: null,
+    repeatFlow: null,
+    pairedFlow: null,
   };
 }
 
@@ -96,6 +131,10 @@ export function snapshotFromFlow(row: FlowRow, now: Date): AlertFeatureSnapshot 
   const distances = levelDistances(row.putCall, row.levels);
   const earnings = earningsFromFact(row.earnings ?? null, row.expiration, row.dte, now);
   const jump = finiteOrNull(row.volumeJump);
+  const context = row.context;
+  const trend = context
+    ? null
+    : trendFromPrices(row.putCall, row.underlyingPrice, row.levels?.vwap ?? null, row.levels?.sma20 ?? null);
   return {
     version: 1,
     capturedAtAlert: true,
@@ -119,6 +158,17 @@ export function snapshotFromFlow(row: FlowRow, now: Date): AlertFeatureSnapshot 
     riskDistance: distances.risk,
     earnings,
     side: row.side,
+    minutesSinceOpen: context?.minutesSinceOpen ?? minutesSinceOpen(now),
+    priceVsVwap: context?.priceVsVwap ?? trend?.priceVsVwap ?? null,
+    priceVsSma20: context?.priceVsSma20 ?? trend?.priceVsSma20 ?? null,
+    trendAlignment: context?.trendAlignment ?? trend?.trendAlignment ?? null,
+    spyDirection: context?.spyDirection ?? null,
+    qqqDirection: context?.qqqDirection ?? null,
+    marketAlignment: context?.marketAlignment ?? null,
+    ivVsRecent: finiteOrNull(context?.ivVsRecent),
+    aggressor: context?.aggressor ?? aggressorFromSide(row.side),
+    repeatFlow: context?.repeatFlow ?? null,
+    pairedFlow: context?.pairedFlow ?? null,
   };
 }
 
@@ -151,6 +201,17 @@ export function backfillFeatures(alert: StoredAlert): AlertFeatureSnapshot {
     riskDistance: distances.risk,
     earnings: earningsFromLine(alert.eventLine),
     side: alert.side,
+    minutesSinceOpen: null,
+    priceVsVwap: null,
+    priceVsSma20: null,
+    trendAlignment: null,
+    spyDirection: null,
+    qqqDirection: null,
+    marketAlignment: null,
+    ivVsRecent: null,
+    aggressor: aggressorFromSide(alert.side),
+    repeatFlow: null,
+    pairedFlow: null,
   };
 }
 
@@ -196,7 +257,58 @@ export function parseFeatureSnapshot(value: unknown): AlertFeatureSnapshot | nul
     riskDistance: fractionOrNull(row.riskDistance),
     earnings,
     side,
+    minutesSinceOpen: minuteCount(row.minutesSinceOpen),
+    priceVsVwap: priceSide(row.priceVsVwap),
+    priceVsSma20: priceSide(row.priceVsSma20),
+    trendAlignment: alignment(row.trendAlignment),
+    spyDirection: indexDirectionValue(row.spyDirection),
+    qqqDirection: indexDirectionValue(row.qqqDirection),
+    marketAlignment: alignment(row.marketAlignment),
+    ivVsRecent: ratioOrNull(row.ivVsRecent),
+    aggressor: aggressorValue(row.aggressor) ?? aggressorFromSide(side),
+    repeatFlow: repeatValue(row.repeatFlow),
+    pairedFlow: pairedValue(row.pairedFlow),
   };
+}
+
+function minuteCount(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 400) return null;
+  return value;
+}
+
+function priceSide(value: unknown): PriceSide | null {
+  if (value === "above" || value === "below" || value === "flat" || value === "unknown") return value;
+  return null;
+}
+
+function alignment(value: unknown): TrendAlignment | null {
+  if (value === "with" || value === "against" || value === "mixed" || value === "unknown") return value;
+  return null;
+}
+
+function indexDirectionValue(value: unknown): IndexDirection | null {
+  if (value === "up" || value === "down" || value === "flat" || value === "unknown") return value;
+  return null;
+}
+
+function aggressorValue(value: unknown): AggressorSide | null {
+  if (value === "buy" || value === "sell" || value === "mid" || value === "unknown") return value;
+  return null;
+}
+
+function repeatValue(value: unknown): RepeatFlow | null {
+  if (value === "contract" || value === "ticker" || value === "none" || value === "unknown") return value;
+  return null;
+}
+
+function pairedValue(value: unknown): PairedFlow | null {
+  if (value === "spread" || value === "hedge" || value === "none" || value === "unknown") return value;
+  return null;
+}
+
+function ratioOrNull(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < -0.99 || value > 20) return null;
+  return value;
 }
 
 function earningsFromFact(

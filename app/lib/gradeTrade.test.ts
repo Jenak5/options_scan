@@ -10,6 +10,8 @@ import {
 } from "@/app/lib/gradeTrade";
 import type { KeyLevels } from "@/app/lib/levels";
 import { DEFAULT_MAX_LOSS_DOLLARS, MAX_LOSS_DOLLARS, MIN_OPEN_INTEREST, readMaxLossDollars } from "@/app/lib/risk";
+import { analyzeLearning, readGradeChecks } from "@/app/lib/learn";
+import { RULES_VERSION } from "@/app/lib/rulesVersion";
 import { buildTrade, parseTradeLog, summarizeTrades } from "@/app/lib/trades";
 
 const NOW = new Date("2026-05-14T15:00:00Z");
@@ -21,6 +23,7 @@ function levels(): KeyLevels {
     support: { price: 99, label: "prior day low", distance: 0.01 },
     resistance: { price: 102, label: "session high", distance: 0.02 },
     vwap: 100.4,
+    sma20: null,
     priorClose: 99.5,
     callWall: 105,
     putWall: 95,
@@ -294,5 +297,50 @@ describe("graded trade log", () => {
     const stats = summarizeTrades([closed], NOW);
     expect(stats.byGrade.find((row) => row.key === "A")?.closed).toBe(1);
     expect(stats.open).toBe(0);
+  });
+
+  it("shows a closed Grade my trade in Learning mode with its checks and rules version", () => {
+    const graded = grade();
+    expect(graded.features?.capturedAtAlert).toBe(true);
+    const built = buildTrade({
+      ticker: "NVDA",
+      putCall: "call",
+      strike: 104,
+      expiration: "2026-06-04",
+      contracts: 1,
+      entryPrice: graded.entryPrice ?? 0,
+      entryPriceSource: "ask",
+      alertGrade: "A",
+      alertVerdict: "TAKE",
+      gradeOverall: graded.overall,
+      thesis: graded.thesis,
+      quotedAt: graded.quotedAt,
+      flowPremium: graded.flowPremium,
+      features: graded.features,
+      gradeChecks: graded.checks.map((row) => ({
+        id: row.id,
+        label: row.label,
+        status: row.status,
+        detail: row.detail,
+      })),
+    }, "t_gradelearn0000001", NOW);
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    expect(built.trade.rulesVersion).toBe(RULES_VERSION);
+    const closed = { ...built.trade, closedAt: NOW.getTime() + 60_000, exitPrice: 3 };
+    const checks = readGradeChecks(JSON.stringify({ version: 1, trades: [closed] }));
+    const report = analyzeLearning({
+      shadows: [],
+      alerts: [],
+      trades: [closed],
+      checksByTradeId: checks,
+      now: NOW,
+    });
+    expect(report.resolved).toBe(1);
+    expect(report.trades[0].source).toBe("paper");
+    expect(report.trades[0].rulesVersion).toBe(2);
+    expect(report.trades[0].checks?.some((row) => row.id === "spread" && row.status === "pass")).toBe(true);
+    expect(report.factors.find((factor) => factor.id === "rulesVersion")?.buckets.map((bucket) => bucket.key)).toContain("Version 2");
+    expect(report.factors.find((factor) => factor.id === "check:spread")?.buckets.map((bucket) => bucket.key)).toEqual(["Pass"]);
   });
 });

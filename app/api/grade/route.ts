@@ -2,14 +2,19 @@ import { NextRequest, NextResponse } from "next/server";
 import { loadRiskStatus } from "@/app/lib/alertStore";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import { earningsForTicker } from "@/app/lib/earnings";
+import { flowContractKey } from "@/app/lib/flow";
 import { findContract } from "@/app/lib/gate";
+import { detectPairedFlow, ivVersusRecent, repeatFromSnapshot } from "@/app/lib/marketContext";
 import { gradeMyTrade, parseGradeRequest, type GradeTradeResult } from "@/app/lib/gradeTrade";
 import { keyLevelsForTicker } from "@/app/lib/levelScan";
 import type { KeyLevels } from "@/app/lib/levels";
 import { getOptionChain, SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
+import { readFlowSnapshots } from "@/app/lib/schwabStore";
 import { openGradedTrade } from "@/app/lib/tradeStore";
 import type { LetterGrade } from "@/app/lib/alertConfig";
 import type { EarningsFact } from "@/app/lib/eventRisk";
+import type { OptionContract } from "@/app/lib/contract";
+import type { PairedFlow, RepeatFlow } from "@/app/lib/marketContext";
 
 export const dynamic = "force-dynamic";
 
@@ -44,6 +49,7 @@ export async function POST(request: NextRequest) {
     });
     const levels = await levelsFor(parsed.value.ticker, chain.underlyingPrice, chain.contracts);
     const earnings = await earningsFor(parsed.value.ticker, now.getTime());
+    const context = await gradeContext(parsed.value.ticker, contract, chain.contracts);
     const graded = gradeMyTrade({
       expiration: parsed.value.expiration,
       strike: parsed.value.strike,
@@ -58,6 +64,9 @@ export async function POST(request: NextRequest) {
       providerError: null,
       plannedEntry: parsed.value.plannedEntry,
       thesis: parsed.value.thesis,
+      pairedFlow: context.pairedFlow,
+      repeatFlow: context.repeatFlow,
+      ivVsRecent: context.ivVsRecent,
     });
     return respond(graded, save, parsed.value, now);
   } catch (err) {
@@ -113,6 +122,7 @@ async function respond(
     alertVerdict: graded.verdict,
     gradeOverall: graded.overall,
     thesis: graded.thesis,
+    features: graded.features,
     gradeChecks: graded.checks.map((check) => ({
       id: check.id,
       label: check.label,
@@ -160,6 +170,36 @@ async function levelsFor(
   }
 }
 
+async function gradeContext(
+  ticker: string,
+  contract: OptionContract | null,
+  contracts: OptionContract[],
+): Promise<{ pairedFlow: PairedFlow | null; repeatFlow: RepeatFlow | null; ivVsRecent: number | null }> {
+  if (!contract) return { pairedFlow: null, repeatFlow: null, ivVsRecent: null };
+  const expiration = contract.expiration.slice(0, 10);
+  const pairedFlow = detectPairedFlow(
+    { strike: contract.strike, expiration, putCall: contract.putCall, volume: contract.volume },
+    contracts.map((item) => ({
+      strike: item.strike,
+      expiration: item.expiration.slice(0, 10),
+      putCall: item.putCall,
+      volume: item.volume,
+    })),
+  );
+  try {
+    const snaps = await readFlowSnapshots();
+    const snap = snaps[ticker.trim().toUpperCase()] ?? null;
+    const key = flowContractKey({ expiration, strike: contract.strike, putCall: contract.putCall });
+    return {
+      pairedFlow,
+      repeatFlow: repeatFromSnapshot(key, snap),
+      ivVsRecent: ivVersusRecent(contract.iv, snap?.priorSession?.ivs?.[key] ?? null),
+    };
+  } catch {
+    return { pairedFlow, repeatFlow: null, ivVsRecent: null };
+  }
+}
+
 async function earningsFor(ticker: string, now: number): Promise<EarningsFact | null> {
   try {
     return await earningsForTicker(ticker, now);
@@ -171,7 +211,7 @@ async function earningsFor(ticker: string, now: number): Promise<EarningsFact | 
 async function loadChain(input: { ticker: string; expiration: string; strike: number; putCall: "call" | "put" }) {
   const common = {
     symbol: input.ticker,
-    contractType: input.putCall === "call" ? "CALL" as const : "PUT" as const,
+    contractType: "ALL" as const,
     fromDate: input.expiration,
     toDate: input.expiration,
   };

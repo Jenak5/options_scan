@@ -4,7 +4,6 @@ import React, { useState, useEffect, useCallback } from "react";
 import { FlowTab } from "@/app/components/FlowTab";
 import { PaperTradeButton } from "@/app/components/PaperTradeButton";
 import { StoreStatusLine } from "@/app/components/StoreStatusLine";
-import { SchwabBanner } from "@/app/components/SchwabBanner";
 import { formatContractPriceLine, formatFlowPremium } from "@/app/lib/alertConfig";
 import type { AlertSummary, StoredAlert } from "@/app/lib/alertBook";
 import { notionalPremium } from "@/app/lib/flow";
@@ -515,7 +514,7 @@ function KellyTab() {
   return (
     <div style={{ maxWidth: 680 }}>
       <div style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 8, padding: "12px 14px", marginBottom: 16, color: "#fbbf24", fontSize: 14, lineHeight: 1.5 }}>
-        Retired as the sizing model. This lab used to assume a $5,000 account and a 55% win rate. Those assumptions are not used. The account is ${ACCOUNT_SIZE_DOLLARS.toLocaleString()}, and the Gate caps a trade at ${MAX_LOSS_DOLLARS}. The sliders below are only an illustration.
+        Retired as the sizing model. This lab used to assume a 55% win rate. That assumption is not used. The account is ${ACCOUNT_SIZE_DOLLARS.toLocaleString()}, and the Gate caps a trade at ${MAX_LOSS_DOLLARS}. The sliders below are only an illustration.
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 24 }}>
         {([
@@ -1178,7 +1177,6 @@ export default function OptionsEdgeScanner() {
 
       {/* Content */}
       <div style={{ padding: 24 }}>
-        <SchwabBanner />
         {tab === "flow"     && <FlowTab     />}
         {tab === "volArb"   && <VolArbTab   />}
         {tab === "account"  && <AccountTab  />}

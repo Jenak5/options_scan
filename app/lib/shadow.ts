@@ -1,4 +1,6 @@
 import { EXPERIMENT_DTE, OUTCOME_RULES, TRADE_RULES } from "@/app/lib/alertConfig";
+import { parseRulesVersion } from "@/app/lib/rulesVersion";
+import type { ShadowMark } from "@/app/lib/exitWhatIf";
 import { backfillFeatures, parseFeatureSnapshot, type AlertFeatureSnapshot } from "@/app/lib/alertFeatures";
 import type { StoredAlert } from "@/app/lib/alertBook";
 import { EXPERIMENT_SECTION_NOTE, experimentTrustNote } from "@/app/lib/experiment";
@@ -17,6 +19,9 @@ export const SHADOW_MIN_TRUST = 30;
 
 /** Once this many calendar days remain, the shadow is closed. That is the last week. */
 export const LAST_WEEK_CALENDAR_DAYS = 7;
+
+/** About five sessions of 15-minute marks. Older marks are dropped from the front. */
+export const SHADOW_MARK_CAP = 140;
 
 export const SHADOW_ESTIMATE_NOTE =
   "These results are estimates from quotes (the midpoint, or the bid when the midpoint is missing), not fills. Open shadows are marked every 15 minutes, and the option chain is only a snapshot, so an exit can show up late.";
@@ -43,6 +48,10 @@ export interface ShadowTrade {
   probeGrade: "A" | "B" | null;
   /** Grading inputs. Null when the alert had nothing that could be recovered. */
   features: AlertFeatureSnapshot | null;
+  /** Checklist version copied from the alert. Null when the alert was not stamped. */
+  rulesVersion?: number | null;
+  /** Quote path, oldest first. Missing on shadows saved before the path was stored. */
+  marks?: ShadowMark[];
   /** Highest option price seen in stored marks. Null until a mark arrives. */
   maxFavorablePrice: number | null;
   /** Lowest option price seen in stored marks. */
@@ -203,6 +212,8 @@ export function shadowFromAlert(alert: StoredAlert): ShadowTrade | null {
     experimentLabel: null,
     probeGrade: null,
     features: alert.features ?? backfillFeatures(alert),
+    rulesVersion: alert.rulesVersion ?? null,
+    marks: [],
     maxFavorablePrice: null,
     maxAdversePrice: null,
     marksSeen: 0,
@@ -286,12 +297,26 @@ export function applyShadowQuote(row: ShadowTrade, quote: ShadowQuote | null, no
   if (row.status === "closed") return row;
   const marked = markFromQuote(quote);
   let next: ShadowTrade = marked
-    ? { ...row, lastMark: marked.price, lastMarkSource: marked.source, lastMarkedAt: now.getTime() }
+    ? {
+      ...row,
+      lastMark: marked.price,
+      lastMarkSource: marked.source,
+      lastMarkedAt: now.getTime(),
+      marks: appendMark(row.marks, { at: now.getTime(), price: marked.price }),
+    }
     : row;
   if (marked) next = trackMark(next, marked.price);
   const decision = decideExit(next, marked, now);
   if (!decision) return next;
   return closeShadow(next, decision, now);
+}
+
+function appendMark(marks: ShadowMark[] | undefined, mark: ShadowMark): ShadowMark[] {
+  const list = (marks ?? []).filter((item) => Number.isFinite(item.at) && item.price > 0);
+  const last = list[list.length - 1];
+  if (last && last.at === mark.at && last.price === mark.price) return list;
+  list.push(mark);
+  return list.slice(-SHADOW_MARK_CAP);
 }
 
 function trackMark(row: ShadowTrade, price: number): ShadowTrade {
@@ -712,6 +737,20 @@ function trimShadows(records: ShadowTrade[]): ShadowTrade[] {
   return records.filter((row) => !drop.has(row.id));
 }
 
+function parseMarks(value: unknown): ShadowMark[] {
+  if (!Array.isArray(value)) return [];
+  const marks: ShadowMark[] = [];
+  for (let i = 0; i < value.length && marks.length < SHADOW_MARK_CAP; i++) {
+    const row = value[i];
+    if (!row || typeof row !== "object") continue;
+    const item = row as { at?: unknown; price?: unknown };
+    if (typeof item.at !== "number" || !Number.isFinite(item.at)) continue;
+    if (typeof item.price !== "number" || !Number.isFinite(item.price) || item.price <= 0) continue;
+    marks.push({ at: item.at, price: item.price });
+  }
+  return marks.slice(-SHADOW_MARK_CAP);
+}
+
 function parseShadow(value: unknown): ShadowTrade | null {
   if (!value || typeof value !== "object") return null;
   const row = value as Record<string, unknown>;
@@ -766,6 +805,8 @@ function parseShadow(value: unknown): ShadowTrade | null {
     experimentLabel: experimentLabelOf(row.experimentLabel, cohort),
     probeGrade: cohort === "experiment" ? probeGrade : null,
     features: parseFeatureSnapshot(row.features),
+    rulesVersion: parseRulesVersion(row.rulesVersion),
+    marks: parseMarks(row.marks),
     maxFavorablePrice: row.maxFavorablePrice == null ? null : asPositive(row.maxFavorablePrice),
     maxAdversePrice: row.maxAdversePrice == null ? null : asPositive(row.maxAdversePrice),
     marksSeen: row.marksSeen == null ? 0 : asWhole(row.marksSeen) ?? 0,

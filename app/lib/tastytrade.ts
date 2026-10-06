@@ -21,6 +21,49 @@ const HEADERS: Record<string, string> = {
   "User-Agent": "OptionsEdgeScanner/1.0",
 };
 
+/**
+ * One token refresh, for the status banner. The response body is not returned.
+ * A 400 here is the refresh token being rejected, which is what showed up on Oct 1.
+ */
+export async function probeTastytrade(): Promise<{ ok: boolean; status: number | null; message: string }> {
+  const clientSecret = process.env.TASTYTRADE_CLIENT_SECRET;
+  const refreshToken = process.env.TASTYTRADE_REFRESH_TOKEN;
+  if (!clientSecret || !refreshToken) {
+    return {
+      ok: false,
+      status: null,
+      message: "Tastytrade is not configured. Positions and balances stay blank until TASTYTRADE_CLIENT_SECRET and TASTYTRADE_REFRESH_TOKEN are set. Schwab quotes are separate.",
+    };
+  }
+  try {
+    await authenticate();
+    return { ok: true, status: 200, message: "Tastytrade login succeeded." };
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : "Tastytrade login failed.";
+    const match = /failed \((\d+)\)/.exec(raw);
+    const status = match ? Number(match[1]) : null;
+    if (status === 400) {
+      return {
+        ok: false,
+        status,
+        message: "Tastytrade login failed (HTTP 400). The refresh token was rejected, so positions and balances are unavailable until that token is replaced in Vercel. Schwab quotes are separate.",
+      };
+    }
+    if (status != null) {
+      return {
+        ok: false,
+        status,
+        message: `Tastytrade login failed (HTTP ${status}). Positions and balances are unavailable. Schwab quotes are separate.`,
+      };
+    }
+    return {
+      ok: false,
+      status: null,
+      message: "Tastytrade login failed. Positions and balances are unavailable. Schwab quotes are separate.",
+    };
+  }
+}
+
 export async function authenticate(): Promise<string> {
   if (accessToken && Date.now() < tokenExpiry - 60000) {
     return accessToken;

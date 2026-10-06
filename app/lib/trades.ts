@@ -1,4 +1,6 @@
 import { formatContractCost, longContractCost, TRADE_RULES, type LetterGrade } from "@/app/lib/alertConfig";
+import { parseFeatureSnapshot, type AlertFeatureSnapshot } from "@/app/lib/alertFeatures";
+import { parseRulesVersion, RULES_VERSION } from "@/app/lib/rulesVersion";
 import { chicagoClock, chicagoDate, chicagoTradingDaysElapsed } from "@/app/lib/marketHours";
 import { ACCOUNT_SIZE_DOLLARS, DAILY_STOP_CONSECUTIVE_LOSSES, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import type { VerdictName } from "@/app/lib/verdict";
@@ -57,6 +59,10 @@ export interface StoredTrade {
   gradeOverall: GradeOverall | null;
   thesis: string | null;
   gradeChecks: StoredGradeCheck[] | null;
+  /** Checklist version when the paper trade was saved. Null on older rows. */
+  rulesVersion: number | null;
+  /** Snapshot from Grade my trade when one was saved. Alerts still keep their own. */
+  features?: AlertFeatureSnapshot | null;
   /** Quote time used for the grade, when Schwab sent one. */
   quotedAt: number | null;
   closedAt: number | null;
@@ -147,6 +153,8 @@ export interface OpenTradeInput {
   thesis?: string | null;
   gradeChecks?: StoredGradeCheck[] | null;
   quotedAt?: number | null;
+  rulesVersion?: number | null;
+  features?: AlertFeatureSnapshot | null;
 }
 
 export function emptyTradeLog(): TradeLog {
@@ -350,6 +358,8 @@ export function buildTrade(input: OpenTradeInput, id: string, now: Date): { ok: 
       gradeOverall: parseOverall(input.gradeOverall),
       thesis: cleanNote(input.thesis),
       gradeChecks: cleanChecks(input.gradeChecks),
+      rulesVersion: input.rulesVersion === undefined ? RULES_VERSION : parseRulesVersion(input.rulesVersion),
+      features: input.features ? parseFeatureSnapshot(input.features) : null,
       quotedAt: input.quotedAt == null ? null : asTime(input.quotedAt),
       closedAt: null,
       exitPrice: null,
@@ -674,6 +684,8 @@ function parseTrade(value: unknown): StoredTrade | null {
     gradeOverall: parseOverall(row.gradeOverall),
     thesis: cleanNote(typeof row.thesis === "string" ? row.thesis : null),
     gradeChecks: cleanChecks(row.gradeChecks),
+    rulesVersion: parseRulesVersion(row.rulesVersion),
+    features: parseFeatureSnapshot(row.features),
     quotedAt: row.quotedAt == null ? null : asTime(row.quotedAt),
     closedAt,
     exitPrice,

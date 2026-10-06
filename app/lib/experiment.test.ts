@@ -286,6 +286,7 @@ function levels(): KeyLevels {
     support: { price: 99, label: "prior day low", distance: 0.01 },
     resistance: { price: 102, label: "session high", distance: 0.02 },
     vwap: 100.4,
+    sma20: null,
     priorClose: 99.5,
     callWall: 105,
     putWall: 95,

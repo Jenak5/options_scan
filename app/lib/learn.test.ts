@@ -175,6 +175,23 @@ describe("learning mode", () => {
     expect(report.trades[0].exitDetail).toMatch(/No target, stop, time stop, or expiration reason was stored/);
   });
 
+  it("keeps an unstamped shadow in Not stamped and a new one in Version 2", () => {
+    const old = closedCall(1, true);
+    const next = closedCall(2, false);
+    next.rulesVersion = 2;
+    const report = analyzeLearning({
+      shadows: [old, next],
+      alerts: [],
+      trades: [],
+      checksByTradeId: new Map(),
+      now: OPEN,
+    });
+    const version = report.factors.find((factor) => factor.id === "rulesVersion");
+    expect(version?.buckets.map((bucket) => bucket.key)).toEqual(["Not stamped", "Version 2"]);
+    expect(report.trades.find((row) => row.id === old.id)?.rulesVersion).toBeNull();
+    expect(report.trades.find((row) => row.id === next.id)?.rulesVersion).toBe(2);
+  });
+
   it("backfills only stored fields and leaves blanks in the CSV", () => {
     const alert = storedAlert();
     const filled = backfillFeatures(alert);
@@ -185,10 +202,16 @@ describe("learning mode", () => {
     expect(filled.flowSignalCount).toBeNull();
     expect(filled.flowPremium).toBe(800 * 1.95 * 100);
     expect(filled.earnings).toBe("unknown");
+    expect(filled.trendAlignment).toBeNull();
+    expect(filled.pairedFlow).toBeNull();
+    expect(filled.repeatFlow).toBeNull();
 
     const captured = snapshotFromFlow(flowRow(), OPEN);
     expect(captured.capturedAtAlert).toBe(true);
     expect(captured.flowSignalCount).toBe(4);
+    expect(captured.minutesSinceOpen).toBe(90);
+    expect(captured.aggressor).toBe("buy");
+    expect(captured.trendAlignment).toBe("unknown");
     expect(snapshotFromFlow(flowRow({ volumeJump: null, iv: 0 }), OPEN).flowSignalCount).toBeNull();
     expect(snapshotFromFlow(flowRow({ iv: 0 }), OPEN).iv).toBeNull();
     expect(snapshotFromFlow(flowRow({ iv: 9 }), OPEN).iv).toBeNull();

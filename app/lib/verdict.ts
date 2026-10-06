@@ -36,6 +36,7 @@ import {
   longOptionMaxLoss,
   type QuoteChecks,
 } from "@/app/lib/gate";
+import { openingNoise, trendFromPrices, type PairedFlow, type TrendAlignment } from "@/app/lib/marketContext";
 import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 
 /**
@@ -106,6 +107,12 @@ export interface SetupInput {
   /** True only for a defined-risk spread. A single long option is not one. */
   definedRiskSpread: boolean;
   now: Date;
+  /** From the chain already in hand. Unknown does not change the grade. */
+  pairedFlow?: PairedFlow | null;
+  /** Against only when price is on the wrong side of both VWAP and the 20-day average. */
+  trendAlignment?: TrendAlignment | null;
+  /** Against only when both SPY and QQQ oppose the trade. Unknown does not change the grade. */
+  marketAlignment?: TrendAlignment | null;
 }
 
 const GRADE_RANK: LetterGrade[] = ["A", "B", "C", "D"];
@@ -135,6 +142,9 @@ export function gradeFlowRow(row: FlowRow, consecutiveLosses: number | null, now
     earnings: row.earnings ?? null,
     definedRiskSpread: false,
     now,
+    pairedFlow: row.context?.pairedFlow ?? null,
+    trendAlignment: row.context?.trendAlignment ?? null,
+    marketAlignment: row.context?.marketAlignment ?? null,
   });
 }
 
@@ -148,6 +158,9 @@ export function gradeContract(input: {
   levels?: KeyLevels | null;
   earnings?: EarningsFact | null;
   definedRiskSpread?: boolean;
+  pairedFlow?: PairedFlow | null;
+  trendAlignment?: TrendAlignment | null;
+  marketAlignment?: TrendAlignment | null;
 }): AlertVerdict {
   const contract = input.contract;
   const spread = checkBidAskSpread(contract.bid, contract.ask);
@@ -177,6 +190,9 @@ export function gradeContract(input: {
     earnings: input.earnings ?? null,
     definedRiskSpread: input.definedRiskSpread === true,
     now: input.now,
+    pairedFlow: input.pairedFlow ?? null,
+    trendAlignment: input.trendAlignment ?? null,
+    marketAlignment: input.marketAlignment ?? null,
   });
 }
 
@@ -276,6 +292,11 @@ export function gradeSetup(input: SetupInput): AlertVerdict {
   if (premiumLimit != null || flowFit === "below-b") grade = noHigherThan(grade, "C");
   if (flowFit === "below-a") grade = noHigherThan(grade, "B");
   if (hardSkip) grade = noHigherThan(grade, "D");
+
+  const quality = qualityFilter(input);
+  if (quality.cap) grade = noHigherThan(grade, quality.cap);
+  if (quality.blockTake && checklist === "TAKE") checklist = "WATCH";
+
   const verdict: VerdictName = dailyStop && checklist === "TAKE" ? "STOP" : checklist;
   const levelsNote = levelsRead.checked
     ? null
@@ -296,6 +317,7 @@ export function gradeSetup(input: SetupInput): AlertVerdict {
       event.reason,
       input.printSummary ?? null,
       premiumSentence(input),
+      quality.sentence,
     ),
     note: ALERT_RULES.note,
     levels: toStoredLevels(input.levels),
@@ -439,6 +461,36 @@ function levelSentence(
   return `Support ${formatPrice(support.price)} (${support.label}) is ${formatLevelDistance(support.distance)} below, and resistance ${formatPrice(resistance.price)} (${resistance.label}) is ${formatLevelDistance(resistance.distance)} above. There is room for a ${side}.`;
 }
 
+/**
+ * Quality filters that change an A or a B.
+ * Unknown trend, market, or pairing does not change the grade.
+ * The first 15 minutes after the open cannot be an A or a B.
+ */
+function qualityFilter(input: SetupInput): { cap: LetterGrade | null; blockTake: boolean; sentence: string | null } {
+  const notes: string[] = [];
+  let cap: LetterGrade | null = null;
+  let blockTake = false;
+  if (openingNoise(input.now)) {
+    blockTake = true;
+    cap = "C";
+    notes.push("The first 15 minutes after the open are skipped. Quotes are wide and the last trade is a poor read of aggressor side, so this is not an A or a B.");
+  }
+  const paired = input.pairedFlow;
+  if (paired === "spread" || paired === "hedge") {
+    cap = cap === "C" ? "C" : "B";
+    const kind = paired === "hedge" ? "the opposite side" : "a neighboring strike";
+    notes.push(`Similar size on ${kind}, same expiration, looks like a spread or hedge. That is weaker one-sided flow, so this cannot be an A.`);
+  }
+  const trend = input.trendAlignment && input.trendAlignment !== "unknown"
+    ? input.trendAlignment
+    : trendFromPrices(input.putCall, input.underlyingPrice, input.levels?.vwap ?? null, input.levels?.sma20 ?? null).trendAlignment;
+  if (trend === "against" && input.marketAlignment === "against") {
+    cap = cap === "C" ? "C" : "B";
+    notes.push("Price is on the wrong side of both VWAP and the 20-day average, and SPY and QQQ point the other way. The grade stops at B.");
+  }
+  return { cap, blockTake, sentence: notes.length > 0 ? notes.join(" ") : null };
+}
+
 function buildReasons(
   input: SetupInput,
   market: QuoteChecks,
@@ -449,6 +501,7 @@ function buildReasons(
   eventReason: string | null,
   printSummary: string | null,
   premiumText: string | null,
+  qualityText: string | null,
 ): string[] {
   const head: string[] = [];
   if (expired) head.push("This expiration has already passed.");
@@ -480,8 +533,10 @@ function buildReasons(
   const eventText = eventReason?.trim() ?? "";
   const printText = printSummary?.trim() ?? "";
   const priceText = premiumText?.trim() ?? "";
-  const rest = unique.filter((line) => line !== levelSentenceText && line !== eventText && line !== printText && line !== priceText);
+  const qualityLine = qualityText?.trim() ?? "";
+  const rest = unique.filter((line) => line !== levelSentenceText && line !== eventText && line !== printText && line !== priceText && line !== qualityLine);
   const picked: string[] = [];
+  if (qualityLine) picked.push(qualityLine);
   if (priceText) picked.push(priceText);
   if (rest.length > 0) picked.push(rest[0]);
   if (levelSentenceText.trim()) picked.push(levelSentenceText.trim());

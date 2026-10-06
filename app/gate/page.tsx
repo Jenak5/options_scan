@@ -2,7 +2,6 @@
 
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { PageLinks } from "@/app/components/PageLinks";
-import { SchwabBanner } from "@/app/components/SchwabBanner";
 import type { OptionContract } from "@/app/lib/contract";
 import type { GateCheck } from "@/app/lib/gate";
 import { formatLevelsSummary } from "@/app/lib/levels";
@@ -146,8 +145,6 @@ export default function GatePage() {
       </div>
 
       <div style={{ padding: 24, maxWidth: 760 }}>
-        <SchwabBanner />
-
         {statusNote && (
           <div style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.28)", borderRadius: 8, padding: "10px 14px", marginBottom: 12, color: "#fbbf24", fontSize: 14 }}>
             {statusNote}

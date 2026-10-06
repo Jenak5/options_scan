@@ -10,6 +10,7 @@ import { calendarDaysBetween, newYorkDate } from "@/app/lib/flow";
 import { MAX_BID_ASK_SPREAD_OF_MID, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import { chicagoClock } from "@/app/lib/marketHours";
 import { SHADOW_MIN_TRUST, isExperimentShadow, shadowExitLabel, type ShadowTrade } from "@/app/lib/shadow";
+import { whatIfFromShadows, type WhatIfReport } from "@/app/lib/exitWhatIf";
 import { tradeMetrics, type StoredTrade } from "@/app/lib/trades";
 
 /**
@@ -81,6 +82,7 @@ export interface LearnTrade {
   marksSeen: number;
   markNote: string;
   checks: LearnCheck[] | null;
+  rulesVersion: number | null;
 }
 
 export interface LearnReport {
@@ -98,6 +100,7 @@ export interface LearnReport {
   suggestions: string[];
   suggestionNote: string;
   checksNote: string;
+  whatIf: WhatIfReport;
   factors: LearnFactor[];
   unavailable: Array<{ id: string; label: string; excludedUnknown: number }>;
   trades: LearnTrade[];
@@ -156,6 +159,7 @@ export function analyzeLearning(input: LearnInput): LearnReport {
     suggestions: [],
     suggestionNote: SUGGESTION_NOTE,
     checksNote: CHECKS_NOTE,
+    whatIf: whatIfFromShadows(input.shadows),
     factors: ranked,
     unavailable,
     trades: built.trades,
@@ -214,7 +218,7 @@ export function learningCsv(report: LearnReport): string {
   return lines.join("\n") + "\n";
 }
 
-/** Grade-my-trade checks live on the trade log JSON. The current parser may not keep them. */
+/** Grade-my-trade checks live on the trade log JSON. The trade-log parser keeps them. */
 export function readGradeChecks(text: string | null | undefined): Map<string, LearnCheck[]> {
   const out = new Map<string, LearnCheck[]>();
   if (!text) return out;
@@ -318,6 +322,7 @@ function fromShadow(shadow: ShadowTrade, alert: StoredAlert | null): LearnTrade 
     marksSeen: marks.count,
     markNote: marks.note,
     checks: null,
+    rulesVersion: shadow.rulesVersion ?? alert?.rulesVersion ?? null,
   };
 }
 
@@ -356,6 +361,7 @@ function fromPaper(
     marksSeen: 0,
     markNote: "The trade log does not store the quote path, so the best and worst marks are unknown.",
     checks: checks && checks.length > 0 ? checks.slice() : null,
+    rulesVersion: trade.rulesVersion ?? alert?.rulesVersion ?? null,
   };
 }
 
@@ -366,6 +372,7 @@ function resolveFeatures(
 ): AlertFeatureSnapshot {
   if (shadow?.features?.capturedAtAlert) return shadow.features;
   if (alert?.features?.capturedAtAlert) return alert.features;
+  if (trade?.features?.capturedAtAlert) return trade.features;
   if (alert) return featuresForAlert(alert);
   if (shadow?.features) return shadow.features;
   if (shadow) return featuresFromWhen(shadow.openedAt, shadow.expiration, null);
@@ -428,6 +435,62 @@ function factorSpecs(): FactorSpec[] {
   const dteMin = ALERT_RULES.alertDteMin;
   const dteMax = ALERT_RULES.alertDteMax;
   return [
+    {
+      id: "rulesVersion",
+      label: "Rules version",
+      cuts: "The checklist version stored when the alert or paper trade was saved. Rows from before versions were stamped stay in Not stamped.",
+      includeTest: false,
+      order: null,
+      bucketOf: (row) => row.rulesVersion == null ? "Not stamped" : `Version ${row.rulesVersion}`,
+    },
+    {
+      id: "trend",
+      label: "Trend alignment",
+      cuts: "Price versus VWAP and the 20-day average, in the trade's direction. Both have to agree. Missing either one is left out.",
+      includeTest: false,
+      order: ["With the trend", "Mixed trend", "Against the trend"],
+      bucketOf: (row) => alignmentBucket(row.features.trendAlignment),
+    },
+    {
+      id: "market",
+      label: "SPY and QQQ",
+      cuts: "Both indexes versus their own VWAP at alert time. One missing index is left out. This does not by itself change a grade unless the ticker trend also fights the trade.",
+      includeTest: false,
+      order: ["With SPY and QQQ", "Mixed SPY and QQQ", "Against SPY and QQQ"],
+      bucketOf: (row) => marketBucket(row.features.marketAlignment),
+    },
+    {
+      id: "paired",
+      label: "Spread or hedge",
+      cuts: "Similar size on a neighboring strike or the opposite side, same expiration. Unknown is left out.",
+      includeTest: false,
+      order: ["No paired flow", "Likely spread", "Likely hedge"],
+      bucketOf: (row) => pairedBucket(row.features.pairedFlow),
+    },
+    {
+      id: "repeat",
+      label: "Flow repeated from the prior session",
+      cuts: "The prior session's stored volume. Same-day jumps stay in the volume-jump factor. No prior session is left out.",
+      includeTest: false,
+      order: ["Same contract last session", "Same ticker last session", "No repeat last session"],
+      bucketOf: (row) => repeatBucket(row.features.repeatFlow),
+    },
+    {
+      id: "minutes",
+      label: "Minutes since the open",
+      cuts: "America/Chicago, from 8:30. The first 15 minutes are not alerted under the current rules. Alerts that did not store the clock are left out.",
+      includeTest: false,
+      order: ["First 15 minutes", "15 minutes to 2 hours", "After 2 hours"],
+      bucketOf: (row) => minuteBucket(row.features.minutesSinceOpen),
+    },
+    {
+      id: "ivRecent",
+      label: "IV versus the prior session",
+      cuts: "The contract's implied vol versus the IV stored on the prior session. Missing IV is left out. This does not change a grade.",
+      includeTest: false,
+      order: ["IV at least 15% under recent", "IV within 15% of recent", "IV at least 15% over recent"],
+      bucketOf: (row) => ivRecentBucket(row.features.ivVsRecent),
+    },
     {
       id: "grade",
       label: "Grade",
@@ -801,6 +864,52 @@ function jumpBucket(value: number | null): string | null {
   if (value == null || !Number.isFinite(value)) return null;
   if (value >= ALERT_RULES.strongVolumeJump) return "Volume jump of 100 or more";
   return "Volume jump under 100";
+}
+
+function alignmentBucket(value: AlertFeatureSnapshot["trendAlignment"]): string | null {
+  if (value == null || value === "unknown") return null;
+  if (value === "with") return "With the trend";
+  if (value === "against") return "Against the trend";
+  if (value === "mixed") return "Mixed trend";
+  return null;
+}
+
+function marketBucket(value: AlertFeatureSnapshot["marketAlignment"]): string | null {
+  if (value == null || value === "unknown") return null;
+  if (value === "with") return "With SPY and QQQ";
+  if (value === "against") return "Against SPY and QQQ";
+  if (value === "mixed") return "Mixed SPY and QQQ";
+  return null;
+}
+
+function pairedBucket(value: AlertFeatureSnapshot["pairedFlow"]): string | null {
+  if (value == null || value === "unknown") return null;
+  if (value === "none") return "No paired flow";
+  if (value === "spread") return "Likely spread";
+  if (value === "hedge") return "Likely hedge";
+  return null;
+}
+
+function repeatBucket(value: AlertFeatureSnapshot["repeatFlow"]): string | null {
+  if (value == null || value === "unknown") return null;
+  if (value === "contract") return "Same contract last session";
+  if (value === "ticker") return "Same ticker last session";
+  if (value === "none") return "No repeat last session";
+  return null;
+}
+
+function minuteBucket(minutes: number | null): string | null {
+  if (minutes == null || !Number.isFinite(minutes)) return null;
+  if (minutes < 15) return "First 15 minutes";
+  if (minutes < 120) return "15 minutes to 2 hours";
+  return "After 2 hours";
+}
+
+function ivRecentBucket(value: number | null): string | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  if (value <= -0.15) return "IV at least 15% under recent";
+  if (value >= 0.15) return "IV at least 15% over recent";
+  return "IV within 15% of recent";
 }
 
 function earningsBucket(value: AlertFeatureSnapshot["earnings"]): string | null {

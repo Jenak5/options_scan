@@ -1,5 +1,6 @@
 import { loadAlertBook } from "@/app/lib/alertStore";
 import type { StoredAlert } from "@/app/lib/alertBook";
+import type { AlertFeatureSnapshot } from "@/app/lib/alertFeatures";
 import { notionalPremium } from "@/app/lib/flow";
 import { readTradeLogText, resolveStoreKind, updateTradeLog } from "@/app/lib/schwabStore";
 import {
@@ -188,6 +189,7 @@ export async function openPaperLoggedTrade(
       alertGrade: drafted.grade,
       flowPremium: drafted.flowPremium,
       entryPriceSource: "ask",
+      rulesVersion: alert?.rulesVersion ?? null,
     }, newTradeId(), now);
     if (!built.ok) {
       held.error = built.error;
@@ -221,6 +223,7 @@ export async function openGradedTrade(
     thesis: string | null;
     gradeChecks: StoredGradeCheck[] | null;
     quotedAt: number | null;
+    features?: AlertFeatureSnapshot | null;
   },
   now: Date,
 ): Promise<{ ok: true; page: TradePage; alreadyOpen: boolean } | { ok: false; error: string }> {
@@ -272,6 +275,7 @@ export async function openGradedTrade(
       thesis: input.thesis,
       gradeChecks: input.gradeChecks,
       quotedAt: input.quotedAt,
+      features: input.features ?? null,
     }, newTradeId(), now);
     if (!built.ok) {
       held.error = built.error;

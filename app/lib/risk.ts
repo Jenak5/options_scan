@@ -1,12 +1,26 @@
 /**
  * Account risk for this scanner.
  *
- * The old Kelly Lab assumed a $5,000 account and a 55% win rate.
- * Those assumptions are retired. Sizing is this cap, enforced by the gate.
+ * The old Kelly Lab assumed a 55% win rate. That assumption is retired.
+ * Sizing is the loss cap, enforced by the gate.
  */
 
-/** Personal account size. */
-export const ACCOUNT_SIZE_DOLLARS = 3_000;
+/** Personal account size when ACCOUNT_SIZE_DOLLARS is unset or invalid. */
+export const DEFAULT_ACCOUNT_SIZE_DOLLARS = 5_000;
+
+/**
+ * Account size. The weekly drawdown flag is 25% of this number.
+ * Set ACCOUNT_SIZE_DOLLARS in the environment to override it.
+ * An empty or invalid value keeps $5,000.
+ */
+export function readAccountSizeDollars(raw: string | undefined): number {
+  if (raw == null || raw.trim() === "") return DEFAULT_ACCOUNT_SIZE_DOLLARS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 10_000_000) return DEFAULT_ACCOUNT_SIZE_DOLLARS;
+  return parsed;
+}
+
+export const ACCOUNT_SIZE_DOLLARS = readAccountSizeDollars(process.env.ACCOUNT_SIZE_DOLLARS);
 
 /**
  * Hard loss cap for one trade. The code uses $875.

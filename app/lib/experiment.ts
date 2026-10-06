@@ -1,5 +1,6 @@
 import { ALERT_RULES, EXPERIMENT_DTE } from "@/app/lib/alertConfig";
 import { snapshotFromFlow } from "@/app/lib/alertFeatures";
+import { RULES_VERSION } from "@/app/lib/rulesVersion";
 import type { FlowRow } from "@/app/lib/flow";
 import { chicagoDate } from "@/app/lib/marketHours";
 import type { ShadowTrade } from "@/app/lib/shadow";
@@ -115,6 +116,8 @@ export function experimentalShadow(row: FlowRow, probe: "A" | "B", now: Date): S
     lastMarkSource: null,
     lastMarkedAt: null,
     features: snapshotFromFlow(row, now),
+    rulesVersion: RULES_VERSION,
+    marks: [],
     maxFavorablePrice: null,
     maxAdversePrice: null,
     marksSeen: 0,

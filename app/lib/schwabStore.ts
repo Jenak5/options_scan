@@ -11,6 +11,7 @@ import {
   put,
 } from "@vercel/blob";
 import type { StoredTokens } from "@/app/lib/schwabParse";
+import { emptyScanHealth, parseScanHealth, type ScanHealth } from "@/app/lib/scanHealth";
 import {
   SCHWAB_BLOB_CACHE_CONTROL_MAX_AGE,
   SCHWAB_BLOB_ALERT_BOOK_PATH,
@@ -72,11 +73,21 @@ const STORE_STATUS_KEY = "oes:store:status";
 const FLOW_SNAPSHOT_MAX_TICKERS = 48;
 const FLOW_SNAPSHOT_MAX_CONTRACTS = 500;
 
+export interface FlowSessionMemory {
+  scannedAt: number;
+  volumes: Record<string, number>;
+  ivs?: Record<string, number>;
+}
+
 export interface FlowVolumeSnapshot {
   scannedAt: number;
   volumes: Record<string, number>;
   /** Recent chain quotes per contract. Absent on snapshots saved before print detection. */
   quotes?: Record<string, StoredQuotePoint[]>;
+  /** Implied vol by contract key. Absent on older snapshots. */
+  ivs?: Record<string, number>;
+  /** Previous session, kept so a new day does not erase the repeat-flow comparison. */
+  priorSession?: FlowSessionMemory;
 }
 
 interface StoredQuotePoint {
@@ -880,6 +891,7 @@ interface StoreFailureRecord {
 interface PersistedStoreStatus {
   failures: Partial<Record<JsonStoreTarget, StoreFailureRecord>>;
   alertsSentUnsavedAt: number | null;
+  scan: ScanHealth;
 }
 
 const JSON_STORE_TARGETS: JsonStoreTarget[] = ["alert-book", "flow-snapshots", "trade-log", "shadow-book"];
@@ -977,14 +989,26 @@ function isJsonObject(text: string): boolean {
 }
 
 function emptyStoreStatus(): PersistedStoreStatus {
-  return { failures: {}, alertsSentUnsavedAt: null };
+  return { failures: {}, alertsSentUnsavedAt: null, scan: emptyScanHealth() };
 }
 
 function cloneStoreStatus(status: PersistedStoreStatus): PersistedStoreStatus {
   return {
     failures: { ...status.failures },
     alertsSentUnsavedAt: status.alertsSentUnsavedAt,
+    scan: { ...status.scan },
   };
+}
+
+export async function readScanHealth(): Promise<ScanHealth> {
+  const status = await loadPersistedStatus();
+  return { ...status.scan };
+}
+
+export async function writeScanHealth(scan: ScanHealth): Promise<void> {
+  const status = await loadPersistedStatus();
+  status.scan = parseScanHealth(scan);
+  await persistStoreStatus(status);
 }
 
 export async function noteAlertSentUnsaved(now: Date): Promise<void> {
@@ -1097,6 +1121,7 @@ function parseStoreStatus(text: string): PersistedStoreStatus {
     return {
       failures,
       alertsSentUnsavedAt: typeof parsed.alertsSentUnsavedAt === "number" ? parsed.alertsSentUnsavedAt : null,
+      scan: parseScanHealth(parsed.scan),
     };
   } catch {
     return emptyStoreStatus();
@@ -1206,9 +1231,52 @@ function sanitizeFlowBook(patch: FlowSnapshotBook): FlowSnapshotBook {
         volumes[key] = volume;
       }
     }
-    out[ticker] = { scannedAt, volumes, quotes: sanitizeQuotes(row.quotes) };
+    const ivs = sanitizeIvs(row.ivs);
+    const priorSession = sanitizePriorSession(row.priorSession);
+    out[ticker] = {
+      scannedAt,
+      volumes,
+      quotes: sanitizeQuotes(row.quotes),
+      ...(ivs ? { ivs } : {}),
+      ...(priorSession ? { priorSession } : {}),
+    };
   }
   return trimFlowBook(out);
+}
+
+function sanitizeIvs(value: unknown): Record<string, number> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  const keys = Object.keys(source);
+  const out: Record<string, number> = {};
+  for (let i = 0; i < keys.length && Object.keys(out).length < FLOW_SNAPSHOT_MAX_CONTRACTS; i++) {
+    const key = keys[i];
+    if (key.length === 0 || key.length > 80) continue;
+    const iv = source[key];
+    if (typeof iv !== "number" || !Number.isFinite(iv) || iv <= 0 || iv >= 5) continue;
+    out[key] = iv;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function sanitizePriorSession(value: unknown): FlowSessionMemory | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const row = value as Partial<FlowSessionMemory>;
+  if (typeof row.scannedAt !== "number" || !Number.isFinite(row.scannedAt)) return undefined;
+  const volumes: Record<string, number> = {};
+  const source = row.volumes;
+  if (source && typeof source === "object" && !Array.isArray(source)) {
+    const keys = Object.keys(source);
+    for (let i = 0; i < keys.length && Object.keys(volumes).length < FLOW_SNAPSHOT_MAX_CONTRACTS; i++) {
+      const key = keys[i];
+      if (key.length === 0 || key.length > 80) continue;
+      const volume = source[key];
+      if (typeof volume !== "number" || !Number.isFinite(volume) || volume < 0) continue;
+      volumes[key] = volume;
+    }
+  }
+  const ivs = sanitizeIvs(row.ivs);
+  return { scannedAt: row.scannedAt, volumes, ...(ivs ? { ivs } : {}) };
 }
 
 function sanitizeQuotes(value: unknown): Record<string, StoredQuotePoint[]> | undefined {

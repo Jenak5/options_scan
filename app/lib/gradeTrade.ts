@@ -1,3 +1,4 @@
+import { emptyFeatures, type AlertFeatureSnapshot } from "@/app/lib/alertFeatures";
 import {
   ALERT_RULES,
   formatAskPrice,
@@ -24,6 +25,15 @@ import {
   volumePasses,
 } from "@/app/lib/gate";
 import type { KeyLevels } from "@/app/lib/levels";
+import {
+  aggressorFromSide,
+  minutesSinceOpen,
+  trendFromPrices,
+  type IndexDirection,
+  type PairedFlow,
+  type RepeatFlow,
+  type TrendAlignment,
+} from "@/app/lib/marketContext";
 import { chicagoClock, isChicagoMarketHours } from "@/app/lib/marketHours";
 import { DAILY_STOP_CONSECUTIVE_LOSSES, MAX_LOSS_DOLLARS, MIN_CONTRACT_VOLUME, MIN_OPEN_INTEREST } from "@/app/lib/risk";
 import { gradeContract, knownLosses, readSetupFacts, type SetupInput, type VerdictName } from "@/app/lib/verdict";
@@ -71,6 +81,8 @@ export interface GradeTradeResult {
   thesis: string | null;
   canSave: boolean;
   saveBlock: string | null;
+  /** Stored on the paper trade so Learning mode can read the same snapshot. */
+  features: AlertFeatureSnapshot | null;
 }
 
 export interface GradeMyTradeInput {
@@ -87,6 +99,13 @@ export interface GradeMyTradeInput {
   providerError: string | null;
   plannedEntry: number | null;
   thesis: string | null;
+  pairedFlow?: PairedFlow | null;
+  trendAlignment?: TrendAlignment | null;
+  marketAlignment?: TrendAlignment | null;
+  spyDirection?: IndexDirection | null;
+  qqqDirection?: IndexDirection | null;
+  repeatFlow?: RepeatFlow | null;
+  ivVsRecent?: number | null;
 }
 
 export interface GradeRequest {
@@ -169,6 +188,9 @@ export function gradeMyTrade(input: GradeMyTradeInput): GradeTradeResult {
     levels: input.levels,
     earnings: input.earnings,
     definedRiskSpread: false,
+    pairedFlow: input.pairedFlow ?? null,
+    trendAlignment: input.trendAlignment ?? null,
+    marketAlignment: input.marketAlignment ?? null,
   }) : null;
   const facts = setup ? readSetupFacts(setup) : null;
 
@@ -230,7 +252,46 @@ export function gradeMyTrade(input: GradeMyTradeInput): GradeTradeResult {
     thesis: input.thesis,
     canSave: saveBlock == null,
     saveBlock,
+    features: setup ? featuresForGrade(input, setup) : null,
   };
+}
+
+function featuresForGrade(input: GradeMyTradeInput, setup: SetupInput): AlertFeatureSnapshot {
+  const trend = trendFromPrices(
+    setup.putCall,
+    setup.underlyingPrice,
+    input.levels?.vwap ?? null,
+    input.levels?.sma20 ?? null,
+  );
+  return {
+    ...emptyFeatures(),
+    capturedAtAlert: true,
+    flowPremium: finiteFeature(setup.notionalPremium),
+    volOiRatio: finiteFeature(setup.volOiRatio),
+    spreadFraction: finiteFeature(checkBidAskSpread(setup.bid, setup.ask).fraction),
+    iv: input.contract && Number.isFinite(input.contract.iv) && (input.contract.iv as number) > 0 ? input.contract.iv : null,
+    delta: input.contract && Number.isFinite(input.contract.delta) ? input.contract.delta : null,
+    otmFraction: finiteFeature(setup.otmFraction),
+    otm: setup.otm,
+    dte: setup.dte != null && setup.dte >= 0 ? setup.dte : null,
+    side: setup.side,
+    minutesSinceOpen: minutesSinceOpen(input.now),
+    priceVsVwap: trend.priceVsVwap,
+    priceVsSma20: trend.priceVsSma20,
+    trendAlignment: input.trendAlignment ?? trend.trendAlignment,
+    spyDirection: input.spyDirection ?? null,
+    qqqDirection: input.qqqDirection ?? null,
+    marketAlignment: input.marketAlignment ?? null,
+    ivVsRecent: finiteFeature(input.ivVsRecent),
+    aggressor: aggressorFromSide(setup.side),
+    repeatFlow: input.repeatFlow ?? null,
+    pairedFlow: input.pairedFlow ?? null,
+  };
+}
+
+function finiteFeature(value: number | null | undefined): number | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  return value;
 }
 
 interface Freshness {

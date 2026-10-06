@@ -72,6 +72,26 @@ interface Page {
   suggestions: string[];
   suggestionNote: string;
   checksNote: string;
+  whatIf: {
+    note: string;
+    pathNote: string;
+    included: number;
+    skipped: number;
+    scenarios: Array<{
+      id: string;
+      label: string;
+      resolved: number;
+      unresolved: number;
+      wins: number;
+      losses: number;
+      flats: number;
+      winRate: number | null;
+      averageWin: number | null;
+      averageLoss: number | null;
+      totalPnl: number;
+      tooFew: boolean;
+    }>;
+  };
   factors: Factor[];
   unavailable: Array<{ id: string; label: string; excludedUnknown: number }>;
   trades: Trade[];
@@ -126,6 +146,31 @@ export default function LearnPage() {
                 </p>
               )}
             </section>
+
+            {page.whatIf && (
+              <section style={cardStyle}>
+                <h2 style={heading}>Exit what-ifs</h2>
+                <Note color="#94a3b8">{page.whatIf.note}</Note>
+                <p style={prose}>{page.whatIf.pathNote}</p>
+                <p style={prose}>
+                  {page.whatIf.included} shadow{page.whatIf.included === 1 ? "" : "s"} with a stored quote path.
+                  {page.whatIf.skipped > 0 ? ` ${page.whatIf.skipped} left out because the path was not stored.` : ""}
+                  {" "}A row under 30 resolved results is too few to trust. The live exit rules are unchanged.
+                </p>
+                {page.whatIf.scenarios.map((row) => (
+                  <div key={row.id} style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+                    <p style={{ ...prose, fontWeight: 700 }}>{row.label}</p>
+                    <p style={prose}>
+                      {row.resolved} resolved ({row.wins} wins, {row.losses} losses{row.flats ? `, ${row.flats} flat` : ""}).
+                      {row.unresolved > 0 ? ` ${row.unresolved} still open under this rule, so they are not in the totals.` : ""}
+                      {" "}Win rate {row.winRate == null ? "n/a" : rate(row.winRate)}.
+                      {" "}Total P/L {signed(row.totalPnl)}.
+                      {row.tooFew ? " Too few to trust." : ""}
+                    </p>
+                  </div>
+                ))}
+              </section>
+            )}
 
             <section style={{ ...cardStyle, borderColor: "rgba(251,191,36,0.35)" }}>
               <h2 style={{ ...heading, color: "#fbbf24" }}>Rules to consider</h2>

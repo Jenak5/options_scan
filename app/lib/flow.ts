@@ -1,6 +1,7 @@
 import type { OptionContract, PutCall } from "@/app/lib/contract";
 import type { EarningsFact } from "@/app/lib/eventRisk";
 import type { KeyLevels } from "@/app/lib/levels";
+import type { FlowContext } from "@/app/lib/marketContext";
 import { ALERT_POLICY, ALERT_RULES, EXPERIMENT_DTE, OUTCOME_RULES, PRINT_RULES } from "@/app/lib/alertConfig";
 import { chicagoClock } from "@/app/lib/marketHours";
 import { checkBidAskSpread, openInterestPasses, volumePasses } from "@/app/lib/gate";
@@ -119,11 +120,22 @@ export interface EstimatedSide {
   note: string;
 }
 
+export interface FlowSessionMemory {
+  scannedAt: number;
+  volumes: Record<string, number>;
+  /** Implied vol by contract key, decimal. Missing when the chain did not send IV. */
+  ivs?: Record<string, number>;
+}
+
 export interface FlowVolumeSnapshot {
   scannedAt: number;
   volumes: Record<string, number>;
   /** Recent quote points per contract, oldest first. Missing on older snapshots. */
   quotes?: Record<string, FlowQuotePoint[]>;
+  /** Implied vol from this scan, decimal. Used the next session as "recent IV". */
+  ivs?: Record<string, number>;
+  /** The previous session's volumes and IV. Kept when a new session overwrites this ticker. */
+  priorSession?: FlowSessionMemory;
 }
 
 export interface FlowRow {
@@ -168,6 +180,8 @@ export interface FlowRow {
   prints: PrintRead;
   /** Next earnings read. Missing means the grade treats the date as unknown. */
   earnings?: EarningsFact | null;
+  /** Trend, market, repeat flow, and pairing. Filled after the chain is scored. Missing on older callers. */
+  context?: FlowContext | null;
   score: number;
 }
 
@@ -591,7 +605,10 @@ export interface LiquidityResult {
   mid: number | null;
 }
 
-/** Same bars as the trade gate: OI >= 500, volume >= 100, spread <= 5% of mid. */
+/**
+ * Same bars as the trade gate: OI >= 500, volume >= 100, spread <= 5% of mid.
+ * A midpoint at or under $3 also has to have a spread of $0.10 or less.
+ */
 export function liquidityOf(contract: OptionContract): LiquidityResult {
   const spread = checkBidAskSpread(contract.bid, contract.ask);
   const openInterest = openInterestPasses(contract.openInterest, MIN_OPEN_INTEREST);
@@ -703,12 +720,15 @@ export function scoreChain(input: {
 
 export function snapshotFromRows(rows: FlowRow[], scannedAt: number): FlowVolumeSnapshot {
   const volumes: Record<string, number> = {};
+  const ivs: Record<string, number> = {};
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     if (!Number.isFinite(row.volume) || row.volume < 0) continue;
-    volumes[flowContractKey(row)] = row.volume;
+    const key = flowContractKey(row);
+    volumes[key] = row.volume;
+    if (row.iv != null && Number.isFinite(row.iv) && row.iv > 0 && row.iv < 5) ivs[key] = row.iv;
   }
-  return { scannedAt, volumes };
+  return { scannedAt, volumes, ivs: Object.keys(ivs).length > 0 ? ivs : undefined };
 }
 
 export function sameDayQuotePoints(points: FlowQuotePoint[] | undefined, now: Date): FlowQuotePoint[] {
