@@ -159,14 +159,13 @@ export function detectPairedFlow(row: PairContract, siblings: readonly PairContr
   const others = siblings.filter((item) => item.expiration === row.expiration && !(item.strike === row.strike && item.putCall === row.putCall));
   if (others.length === 0) return "unknown";
   const step = strikeStep(others.concat(row));
-  if (step == null) return "unknown";
   let spread = false;
   let hedge = false;
   for (let i = 0; i < others.length; i++) {
     const other = others[i];
     if (!similarSize(row.volume, other.volume)) continue;
     const distance = Math.abs(other.strike - row.strike);
-    const adjacent = distance > 0 && distance <= step * 1.01;
+    const adjacent = step != null && distance > 0 && distance <= step * 1.01;
     if (other.putCall === row.putCall && adjacent) spread = true;
     if (other.putCall !== row.putCall && (distance === 0 || adjacent)) hedge = true;
   }

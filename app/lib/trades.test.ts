@@ -89,7 +89,7 @@ describe("daily stop from closed trades", () => {
 
 describe("weekly flag and stats", () => {
   it("flags a week down about 25% and leaves a smaller week unmarked", () => {
-    const heavy = closeAt(opened({ id: "t_loss000000000001", contracts: 2, entryPrice: 4 }), NOW.getTime(), 0.05);
+    const heavy = closeAt(opened({ id: "t_loss000000000001", contracts: 4, entryPrice: 4 }), NOW.getTime(), 0.05);
     const light = closeAt(opened({ id: "t_loss000000000002", contracts: 1, entryPrice: 2 }), NOW.getTime(), 1);
     expect(weeklySummary([heavy], NOW).flagged).toBe(true);
     expect(weeklySummary([heavy], NOW).threshold).toBe(1250);
