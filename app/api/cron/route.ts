@@ -477,7 +477,8 @@ async function claimScanSlot(now: number, manual: boolean): Promise<"ok" | "busy
   if (decision === "busy") return "busy";
   if (decision === "recent" && !manual) return "recent";
   try {
-    await writeScanHealth({ ...current, runStartedAt: now });
+    const wrote = await writeScanHealth({ ...current, runStartedAt: now });
+    if (!wrote) return "ok";
     const confirmed = await readScanHealth();
     if (confirmed.runStartedAt !== now) return "busy";
   } catch {
