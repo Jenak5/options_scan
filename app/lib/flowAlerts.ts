@@ -12,6 +12,7 @@ import {
   type FlowRow,
 } from "@/app/lib/flow";
 import { EMPTY_PRINTS } from "@/app/lib/prints";
+import { openingLabel } from "@/app/lib/quoteSide";
 import type { AlertVerdict } from "@/app/lib/verdict";
 
 /**
@@ -25,6 +26,8 @@ export interface ScoredFlowRow extends FlowRow {
   verdict: AlertVerdict;
   /** Set when this contract was saved in today's alert book. */
   alertId: string | null;
+  /** Next-day open-interest label when this card is a saved alert. */
+  openingLabel?: string | null;
 }
 
 export function pinTodayAlerts(
@@ -41,7 +44,7 @@ export function pinTodayAlerts(
     const row = rows[i];
     const alert = wanted.get(row.id);
     if (!alert) {
-      out.push(row.alertId ? row : { ...row, alertId: null });
+      out.push(row.alertId ? row : { ...row, alertId: null, openingLabel: null });
       continue;
     }
     seen.add(row.id);
@@ -49,6 +52,7 @@ export function pinTodayAlerts(
       ...row,
       verdict: verdictFromStoredAlert(alert),
       alertId: alert.id,
+      openingLabel: openingLabelFor(alert),
     });
   }
   const missing: StoredAlert[] = [];
@@ -113,7 +117,7 @@ export function flowCardFromAlert(alert: StoredAlert, now: Date): ScoredFlowRow 
     expiration: alert.expiration,
     bid: alert.bid,
     ask: alert.ask,
-    last: mid ?? alert.ask,
+    last: Number.isFinite(alert.last) ? alert.last as number : Number.NaN,
     volume: alert.volume,
     openInterest: alert.openInterest,
     iv: null,
@@ -142,5 +146,11 @@ export function flowCardFromAlert(alert: StoredAlert, now: Date): ScoredFlowRow 
     score: alert.flowScore,
     verdict: verdictFromStoredAlert(alert),
     alertId: alert.id,
+    openingLabel: openingLabelFor(alert),
   };
+}
+
+function openingLabelFor(alert: StoredAlert): string | null {
+  if (!alert.openingCheck) return null;
+  return openingLabel(alert.openingCheck.status);
 }

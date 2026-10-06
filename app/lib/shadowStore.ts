@@ -1,4 +1,5 @@
 import { loadAlertBook } from "@/app/lib/alertStore";
+import { openingLabelsById } from "@/app/lib/openingCheck";
 import { quoteContractMarks } from "@/app/lib/tradeQuotes";
 import { parseTradeLog } from "@/app/lib/trades";
 import { chooseExperimental, experimentalShadow } from "@/app/lib/experiment";
@@ -76,9 +77,13 @@ export async function openScanTickers(): Promise<string[]> {
 }
 
 export async function shadowCsv(): Promise<string> {
-  const [text, tradeText] = await Promise.all([readShadowBookText(), readTradeLogText()]);
+  const [text, tradeText, alerts] = await Promise.all([
+    readShadowBookText(),
+    readTradeLogText(),
+    loadAlertBook(),
+  ]);
   const book = parseShadowBook(text);
-  return shadowsToCsv(book.records, paperAlertIds(tradeText));
+  return shadowsToCsv(book.records, paperAlertIds(tradeText), openingLabelsById(alerts.records));
 }
 
 /**

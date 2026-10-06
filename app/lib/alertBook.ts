@@ -3,6 +3,7 @@ import { parseFeatureSnapshot, snapshotFromFlow, type AlertFeatureSnapshot } fro
 import { parseRulesVersion, RULES_VERSION } from "@/app/lib/rulesVersion";
 import { chicagoClock, chicagoDate } from "@/app/lib/marketHours";
 import type { EstimatedSideLabel, FlowRow } from "@/app/lib/flow";
+import { parseOpeningCheck, pendingOpeningCheck, type OpeningCheck } from "@/app/lib/quoteSide";
 import type { StoredPriceLevels } from "@/app/lib/levels";
 import type { AlertVerdict, VerdictName } from "@/app/lib/verdict";
 
@@ -39,6 +40,8 @@ export interface StoredAlert {
   underlyingPrice: number | null;
   volume: number;
   openInterest: number;
+  /** Last trade on the chain at alert time. Null on older alerts, and when Schwab did not send one. */
+  last?: number | null;
   flowScore: number;
   liquidityPasses: boolean;
   side: EstimatedSideLabel;
@@ -59,6 +62,11 @@ export interface StoredAlert {
   features?: AlertFeatureSnapshot | null;
   /** Checklist version at send time. Missing on alerts saved before versions were stamped. */
   rulesVersion?: number | null;
+  /**
+   * Open interest at alert time, then the next trading day's read.
+   * Missing on alerts saved before this check. Pending does not change the grade.
+   */
+  openingCheck?: OpeningCheck | null;
   maxContracts: number | null;
   checkpoints: Record<CheckpointName, CheckpointQuote>;
   outcome: OutcomeGrade;
@@ -146,6 +154,7 @@ export function buildStoredAlert(row: FlowRow, verdict: AlertVerdict, now: Date)
     underlyingPrice: row.underlyingPrice,
     volume: row.volume,
     openInterest: row.openInterest,
+    last: finiteLast(row.last),
     flowScore: row.score,
     liquidityPasses: row.liquidityPasses,
     side: row.side,
@@ -157,8 +166,9 @@ export function buildStoredAlert(row: FlowRow, verdict: AlertVerdict, now: Date)
     levels: verdict.levels,
     levelsNote: verdict.levelsNote,
     eventLine: verdict.eventLine,
-    features: snapshotFromFlow(row, now),
+    features: { ...snapshotFromFlow(row, now), openingCheck: "pending" },
     rulesVersion: RULES_VERSION,
+    openingCheck: pendingOpeningCheck(row),
     maxContracts: verdict.maxContracts,
     checkpoints: {
       m15: emptyCheckpoint(),
@@ -491,6 +501,8 @@ function parseAlert(value: unknown): StoredAlert | null {
     underlyingPrice: optionalNumber(row.underlyingPrice),
     volume: isFiniteNumber(row.volume) ? row.volume as number : 0,
     openInterest: isFiniteNumber(row.openInterest) ? row.openInterest as number : 0,
+    last: optionalNumber(row.last),
+    openingCheck: parseOpeningCheck(row.openingCheck),
     flowScore: isFiniteNumber(row.flowScore) ? row.flowScore as number : 0,
     liquidityPasses: row.liquidityPasses === true,
     side: row.side,
@@ -582,6 +594,11 @@ function levelLabel(value: unknown): string | null {
   const text = value.trim();
   if (text.length < 2 || text.length > 40) return null;
   return text;
+}
+
+function finiteLast(value: number): number | null {
+  if (!Number.isFinite(value) || value < 0 || value > 1_000_000) return null;
+  return value;
 }
 
 function optionalNumber(value: unknown): number | null {

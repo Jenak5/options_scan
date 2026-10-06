@@ -628,6 +628,26 @@ describe("alert checklist", () => {
     expect(missing.grade).not.toBe("B");
   });
 
+  it("requires buyers paying up for an A and does not use the next-day open-interest check", () => {
+    const buyers = gradeSetup(excellent());
+    expect(buyers.grade).toBe("A");
+    expect(buyers.verdict).toBe("TAKE");
+
+    const sellers = gradeSetup(excellent({ side: "estimated at bid" }));
+    expect(sellers.verdict).toBe("TAKE");
+    expect(sellers.grade).toBe("B");
+    expect(sellers.reasons.join(" ")).toMatch(/sellers/i);
+    expect(sellers.reasons.join(" ")).toMatch(/not a trade print/i);
+
+    const unclear = gradeSetup(excellent({ side: "estimated mid" }));
+    expect(unclear.grade).toBe("B");
+    expect(unclear.reasons.join(" ")).toMatch(/unclear/i);
+
+    const unknown = gradeSetup(excellent({ side: "estimated unknown" }));
+    expect(unknown.grade).toBe("B");
+    expect(unknown.reasons.join(" ")).toMatch(/unknown/i);
+  });
+
   it("keeps the earnings reason and the quote print when both apply", () => {
     const summary = "Detected from Schwab quotes: block print, 100 contracts at the ask (about $20K). Not an exchange-reported sweep.";
     const result = gradeSetup(setup({

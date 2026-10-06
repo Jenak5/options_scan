@@ -69,11 +69,16 @@ function row(): FlowRow {
 
 describe("rules version", () => {
   it("stamps a new alert, the shadow opened from it, and a new paper trade", () => {
-    expect(RULES_VERSION).toBe(2);
+    expect(RULES_VERSION).toBe(3);
     const alert = buildStoredAlert(row(), verdict(), NOW);
-    expect(alert.rulesVersion).toBe(2);
+    expect(alert.rulesVersion).toBe(3);
+    expect(alert.last).toBe(2.05);
+    expect(alert.openingCheck?.status).toBe("pending");
+    expect(alert.openingCheck?.priorOpenInterest).toBe(500);
+    expect(alert.features?.openingCheck).toBe("pending");
+    expect(alert.features?.likelySide).toBe("buyers");
     const shadow = shadowFromAlert(alert);
-    expect(shadow?.rulesVersion).toBe(2);
+    expect(shadow?.rulesVersion).toBe(3);
     expect(shadow?.marks).toEqual([]);
 
     const fresh = buildTrade({
@@ -86,7 +91,7 @@ describe("rules version", () => {
     }, "t_rulesversion00001", NOW);
     expect(fresh.ok).toBe(true);
     if (!fresh.ok) return;
-    expect(fresh.trade.rulesVersion).toBe(2);
+    expect(fresh.trade.rulesVersion).toBe(3);
 
     const copied = buildTrade({
       ticker: "SPY",

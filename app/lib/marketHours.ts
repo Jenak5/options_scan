@@ -79,6 +79,22 @@ export function chicagoTradingDaysElapsed(from: Date, to: Date): number {
   return count;
 }
 
+/**
+ * The next Chicago weekday after `ymd`.
+ * Saturday and Sunday are skipped. Exchange holidays are not on this calendar.
+ */
+export function nextChicagoTradingDay(ymd: string): string | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
+  let cursor = nextYmd(ymd);
+  for (let i = 0; i < 8; i++) {
+    if (isWeekdayYmd(cursor)) return cursor;
+    const next = nextYmd(cursor);
+    if (next <= cursor) return null;
+    cursor = next;
+  }
+  return null;
+}
+
 function nextYmd(ymd: string): string {
   const parts = ymd.split("-");
   if (parts.length !== 3) return ymd;

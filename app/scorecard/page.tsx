@@ -33,6 +33,7 @@ interface Row {
   unrealizedPnl: number | null;
   counted: boolean;
   countNote: string | null;
+  openingLabel?: string | null;
 }
 
 interface ExperimentRow extends Omit<Row, "grade"> {
@@ -234,7 +235,7 @@ export default function ScorecardPage() {
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
                 <thead>
                   <tr>
-                    {["Ticker", "Right", "Grade", "Status", "Exit", "Price", "P/L", "P/L %", "Days", "Counted"].map((label) => (
+                    {["Ticker", "Right", "Grade", "Opening", "Status", "Exit", "Price", "P/L", "P/L %", "Days", "Counted"].map((label) => (
                       <th key={label} style={thStyle}>{label}</th>
                     ))}
                   </tr>
@@ -242,7 +243,7 @@ export default function ScorecardPage() {
                 <tbody>
                   {page.rows.length === 0 && (
                     <tr>
-                      <td colSpan={10} style={{ ...tdStyle, color: "#94a3b8" }}>No shadow alerts yet. An A or a B is saved when the Flow page loads and when the scheduled scan runs.</td>
+                      <td colSpan={11} style={{ ...tdStyle, color: "#94a3b8" }}>No shadow alerts yet. An A or a B is saved when the Flow page loads and when the scheduled scan runs.</td>
                     </tr>
                   )}
                   {page.rows.map((row) => {
@@ -253,6 +254,7 @@ export default function ScorecardPage() {
                         <td style={tdStyle}>{row.ticker}</td>
                         <td style={tdStyle}>{row.putCall === "put" ? "Put" : "Call"}</td>
                         <td style={tdStyle}>{row.grade}</td>
+                        <td style={tdStyle}>{row.openingLabel ?? "Not recorded"}</td>
                         <td style={tdStyle}>{row.status === "open" ? "Open" : "Closed"}</td>
                         <td style={tdStyle}>
                           {row.exitLabel || "n/a"}

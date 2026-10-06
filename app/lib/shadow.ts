@@ -142,6 +142,8 @@ export interface ShadowListItem {
   unrealizedPnl: number | null;
   counted: boolean;
   countNote: string | null;
+  /** Next-day open-interest label, when the alert recorded one. */
+  openingLabel?: string | null;
 }
 
 export interface ShadowScorecard {
@@ -466,11 +468,15 @@ export function summarizeShadows(
   };
 }
 
-export function shadowsToCsv(records: readonly ShadowTrade[], paperAlertIds: ReadonlySet<string>): string {
+export function shadowsToCsv(
+  records: readonly ShadowTrade[],
+  paperAlertIds: ReadonlySet<string>,
+  openingLabels?: ReadonlyMap<string, string>,
+): string {
   const header = [
     "id", "ticker", "putCall", "grade", "cohort", "experiment", "probeGrade", "strike", "expiration", "openedAt", "entryPrice",
     "status", "closedAt", "exitReason", "exitPrice", "exitQuote", "exitStale",
-    "pnlDollars", "pnlPercent", "tradingDaysHeld", "marksSeen", "counted",
+    "pnlDollars", "pnlPercent", "tradingDaysHeld", "marksSeen", "opening", "counted",
   ];
   const lines = [header.join(",")];
   for (let i = 0; i < records.length; i++) {
@@ -498,6 +504,7 @@ export function shadowsToCsv(records: readonly ShadowTrade[], paperAlertIds: Rea
       row.pnlFraction == null ? "" : (row.pnlFraction * 100).toFixed(2),
       row.tradingDaysHeld == null ? "" : String(row.tradingDaysHeld),
       String(row.marksSeen),
+      openingLabels?.get(row.id) ?? "",
       counted ? "yes" : "no",
     ].map(csvCell).join(","));
   }

@@ -38,6 +38,7 @@ import { chicagoClock, isChicagoMarketHours } from "@/app/lib/marketHours";
 import { DAILY_STOP_CONSECUTIVE_LOSSES, MAX_LOSS_DOLLARS, MIN_CONTRACT_VOLUME, MIN_OPEN_INTEREST } from "@/app/lib/risk";
 import { gradeContract, knownLosses, readSetupFacts, type SetupInput, type VerdictName } from "@/app/lib/verdict";
 import { DAILY_STOP_PAPER_MESSAGE, paperCostError } from "@/app/lib/trades";
+import { likelySideFromEstimate, quoteFacts, type QuoteFacts } from "@/app/lib/quoteSide";
 
 /**
  * Grade one contract with the alert checklist.
@@ -83,6 +84,8 @@ export interface GradeTradeResult {
   saveBlock: string | null;
   /** Stored on the paper trade so Learning mode can read the same snapshot. */
   features: AlertFeatureSnapshot | null;
+  /** Bid, ask, last, mid, spread, and the likely-side estimate. Null when the chain had no contract. */
+  quote: QuoteFacts | null;
 }
 
 export interface GradeMyTradeInput {
@@ -253,6 +256,9 @@ export function gradeMyTrade(input: GradeMyTradeInput): GradeTradeResult {
     canSave: saveBlock == null,
     saveBlock,
     features: setup ? featuresForGrade(input, setup) : null,
+    quote: input.contract
+      ? quoteFacts({ bid: input.contract.bid, ask: input.contract.ask, last: input.contract.last })
+      : null,
   };
 }
 
@@ -275,6 +281,7 @@ function featuresForGrade(input: GradeMyTradeInput, setup: SetupInput): AlertFea
     otm: setup.otm,
     dte: setup.dte != null && setup.dte >= 0 ? setup.dte : null,
     side: setup.side,
+    likelySide: likelySideFromEstimate(setup.side),
     minutesSinceOpen: minutesSinceOpen(input.now),
     priceVsVwap: trend.priceVsVwap,
     priceVsSma20: trend.priceVsSma20,

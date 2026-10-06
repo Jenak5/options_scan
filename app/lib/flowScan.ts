@@ -19,6 +19,7 @@ import { UNKNOWN_EARNINGS, type EarningsFact } from "@/app/lib/eventRisk";
 import type { KeyLevels } from "@/app/lib/levels";
 import { keyLevelsForTicker } from "@/app/lib/levelScan";
 import { annotateFlowRows, carryPriorSession } from "@/app/lib/marketContext";
+import { chainInterestFromContracts, type ChainInterest } from "@/app/lib/openingCheck";
 import { quotePointFromContract, type FlowQuotePoint } from "@/app/lib/prints";
 import { getOptionChain, getSchwabStatus, SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { readFlowSnapshots, writeFlowSnapshots } from "@/app/lib/schwabStore";
@@ -43,6 +44,8 @@ export interface FlowScanResult {
   cached: boolean;
   watchlist: string[];
   errors: FlowScanError[];
+  /** Open interest from the chains this scan already read. No extra request. */
+  chainInterest: ChainInterest;
 }
 
 interface CacheEntry {
@@ -145,6 +148,7 @@ export async function scanEstimatedFlow(options?: {
 
   const rows: FlowRow[] = [];
   const updates: Record<string, FlowVolumeSnapshot> = {};
+  const chainInterest = chainInterestFromContracts(passes);
   for (let i = 0; i < passes.length; i++) {
     const pass = passes[i];
     const prior = previous[pass.ticker] ?? null;
@@ -175,6 +179,7 @@ export async function scanEstimatedFlow(options?: {
     cached: false,
     watchlist: tickers,
     errors,
+    chainInterest,
   };
   cache.set(cacheKey, { at: now, result });
   return result;

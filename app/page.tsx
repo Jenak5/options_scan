@@ -7,6 +7,16 @@ import { StoreStatusLine } from "@/app/components/StoreStatusLine";
 import { formatContractPriceLine, formatFlowPremium } from "@/app/lib/alertConfig";
 import type { AlertSummary, StoredAlert } from "@/app/lib/alertBook";
 import { notionalPremium } from "@/app/lib/flow";
+import {
+  LIKELY_SIDE_NOTE,
+  OPENING_NOTE,
+  formatOptionPrice,
+  formatSpread,
+  likelySideFromEstimate,
+  likelySideText,
+  openingLabel,
+  quoteFacts,
+} from "@/app/lib/quoteSide";
 import { formatLevelsSummary } from "@/app/lib/levels";
 import { planExitsForAsk } from "@/app/lib/exits";
 import { ACCOUNT_SIZE_DOLLARS, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
@@ -635,8 +645,8 @@ function AlertsTab() {
         {[
           "Every 15 min on weekdays, from 8:30am to 3:00pm Central, the scanner reads Schwab chains for the watchlist. Outside that window it exits.",
           "Considers contracts that pass the gate liquidity filters: open interest at least 500, volume at least 100, and spread at most 5% of mid. Estimated flow premium (volume × mid × 100) still has to clear ALERT_MIN_PREMIUM, which defaults to $50,000. Illiquid contracts never grade A or B.",
-          "Side is estimated from the last price versus the bid and ask. This is not a sweep. Flow premium is that volume estimate, not an exchange-reported sweep.",
-          "Grades every candidate. Only a TAKE graded A or B can alert. An A needs at least $100,000 of flow premium and a B needs at least $50,000. The ask has to be at least $0.50, and one contract can cost up to $875. Expiration is about 2 to 6 weeks out (14 to 42 days). C and D stay on the Flow tab.",
+          "Bid, ask, last, mid, and the spread come from the Schwab chain already on the card. Likely side compares the last price with the bid and ask: at or near the ask is buyers paying up, at or near the bid is sellers, and in between is unclear. That is an estimate from the last price, not a trade print. Flow premium is volume times the midpoint, not an exchange-reported sweep.",
+          "Grades every candidate. Only a TAKE graded A or B can alert. An A needs buyers paying up, plus at least $100,000 of flow premium. A B needs at least $50,000. The ask has to be at least $0.50, and one contract can cost up to $875. Expiration is about 2 to 6 weeks out (14 to 42 days). C and D stay on the Flow tab. The next-day open-interest check is recorded later and does not block the alert.",
           "Sends at most 5 Telegram alerts per Chicago day unless ALERT_MAX_PER_DAY says otherwise. An A goes out before a B. The same ticker, call or put, and expiration is not sent again that day.",
           "Cross-checks the ticker's vol arb signal and asks Grok to screen for red flags (earnings, FDA, news) before that send.",
           "The message includes the checklist grade and the exit defaults. Two losing closes in a row turn TAKE into STOP for today, and that STOP is not sent.",
@@ -884,6 +894,12 @@ interface AlertReportPayload {
   notes: { sample: string; outcome: string; checklist: string };
 }
 
+function quoteLine(alert: StoredAlert): string {
+  const facts = quoteFacts({ bid: alert.bid, ask: alert.ask, last: alert.last });
+  const mid = alert.mid != null && Number.isFinite(alert.mid) ? alert.mid : facts.mid;
+  return `Bid ${formatOptionPrice(facts.bid)} · Ask ${formatOptionPrice(facts.ask)} · Last ${formatOptionPrice(facts.last)} · Mid ${formatOptionPrice(mid)} · Spread ${formatSpread(facts.spread, facts.spreadFraction)}`;
+}
+
 function checkpointLabel(point: StoredAlert["checkpoints"]["m15"]): string {
   if (point.status === "quoted") return pctText(point.midChangePct);
   if (point.status === "no_quote") return "no quote";
@@ -1033,8 +1049,21 @@ function AlertReportTab() {
                       <div style={{ color: "#64748b", fontSize: 12 }}>
                         flow premium {formatFlowPremium(notionalPremium(alert.volume, alert.mid))}
                       </div>
+                      <div style={{ color: "#64748b", fontSize: 12, lineHeight: 1.45 }}>
+                        {quoteLine(alert)}
+                      </div>
+                      <div style={{ color: "#cbd5e1", fontSize: 12, marginTop: 4 }}>
+                        Likely side: {likelySideText(likelySideFromEstimate(alert.side))}
+                      </div>
+                      <div style={{ color: "#64748b", fontSize: 12, lineHeight: 1.4 }}>{LIKELY_SIDE_NOTE}</div>
+                      <div style={{ color: "#e2e8f0", fontSize: 12, marginTop: 4, fontWeight: 700 }}>
+                        {alert.openingCheck ? openingLabel(alert.openingCheck.status) : "Opening check was not recorded on this alert."}
+                      </div>
+                      {alert.openingCheck && (
+                        <div style={{ color: "#64748b", fontSize: 12, lineHeight: 1.4 }}>{OPENING_NOTE}</div>
+                      )}
                       <div style={{ color: "#64748b", fontSize: 12 }}>
-                        mid {alert.mid == null ? "—" : alert.mid.toFixed(2)} · underlying {alert.underlyingPrice == null ? "—" : alert.underlyingPrice.toFixed(2)}
+                        underlying {alert.underlyingPrice == null ? "—" : alert.underlyingPrice.toFixed(2)}
                       </div>
                       {(alert.grade === "A" || alert.grade === "B") && (
                         <PaperTradeButton alertId={alert.id} />

@@ -3,6 +3,7 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import { PageLinks } from "@/app/components/PageLinks";
 import { formatChicago, type GradeCheckStatus, type OverallGrade } from "@/app/lib/gradeTrade";
+import { formatOptionPrice, formatSpread, type LikelySide } from "@/app/lib/quoteSide";
 
 interface GradeCheck {
   id: string;
@@ -29,6 +30,17 @@ interface GradeResponse {
   alreadyOpen?: boolean;
   reconnect?: string | null;
   error?: string | null;
+  quote?: {
+    bid: number | null;
+    ask: number | null;
+    last: number | null;
+    mid: number | null;
+    spread: number | null;
+    spreadFraction: number | null;
+    likelySide: LikelySide;
+    likelySideLabel: string;
+    note: string;
+  } | null;
 }
 
 const INPUT: React.CSSProperties = {
@@ -164,6 +176,25 @@ export default function GradePage() {
               <p style={{ margin: "8px 0 0", color: "#64748b", fontSize: 13 }}>{result.note}</p>
             </div>
 
+            <div style={cardStyle}>
+              <h2 style={{ margin: "0 0 8px", fontSize: 16 }}>Quote</h2>
+              {result.quote ? (
+                <>
+                  <QuoteLine label="Bid" value={formatOptionPrice(result.quote.bid)} />
+                  <QuoteLine label="Ask" value={formatOptionPrice(result.quote.ask)} />
+                  <QuoteLine label="Last" value={formatOptionPrice(result.quote.last)} />
+                  <QuoteLine label="Mid" value={formatOptionPrice(result.quote.mid)} />
+                  <QuoteLine label="Spread" value={formatSpread(result.quote.spread, result.quote.spreadFraction)} />
+                  <QuoteLine label="Likely side" value={result.quote.likelySideLabel} />
+                  <p style={{ margin: "8px 0 0", color: "#94a3b8", fontSize: 14, lineHeight: 1.45 }}>{result.quote.note}</p>
+                </>
+              ) : (
+                <p style={{ margin: 0, color: "#94a3b8", fontSize: 15, lineHeight: 1.45 }}>
+                  Schwab did not return this contract, so bid, ask, last, mid, and spread are not shown.
+                </p>
+              )}
+            </div>
+
             <div style={{ display: "grid", gap: 8 }}>
               {result.checks.map((check) => (
                 <article key={check.id} style={cardStyle}>
@@ -207,6 +238,15 @@ export default function GradePage() {
         )}
       </div>
     </main>
+  );
+}
+
+function QuoteLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 15, marginTop: 4 }}>
+      <span style={{ color: "#94a3b8" }}>{label}</span>
+      <span>{value}</span>
+    </div>
   );
 }
 
