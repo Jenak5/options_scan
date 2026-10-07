@@ -95,10 +95,34 @@ export function nextChicagoTradingDay(ymd: string): string | null {
   return null;
 }
 
+/**
+ * The Chicago weekday before `ymd`.
+ * Saturday and Sunday are skipped. Exchange holidays are not on this calendar.
+ */
+export function previousChicagoTradingDay(ymd: string): string | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
+  let cursor = prevYmd(ymd);
+  for (let i = 0; i < 8; i++) {
+    if (isWeekdayYmd(cursor)) return cursor;
+    const prev = prevYmd(cursor);
+    if (prev >= cursor) return null;
+    cursor = prev;
+  }
+  return null;
+}
+
 function nextYmd(ymd: string): string {
+  return shiftYmd(ymd, 1);
+}
+
+function prevYmd(ymd: string): string {
+  return shiftYmd(ymd, -1);
+}
+
+function shiftYmd(ymd: string, days: number): string {
   const parts = ymd.split("-");
   if (parts.length !== 3) return ymd;
-  const date = new Date(Date.UTC(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]) + 1));
+  const date = new Date(Date.UTC(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]) + days));
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
   const day = String(date.getUTCDate()).padStart(2, "0");
   return `${date.getUTCFullYear()}-${month}-${day}`;
