@@ -40,7 +40,18 @@ Jena: add `HEALTH_TOKEN` in Vercel if the monitor should not reuse the cron secr
 - Value: a long random string, different from `CRON_SECRET`. The monitor sends it as `Authorization: Bearer <HEALTH_TOKEN>` to `https://options-scan.vercel.app/api/health`.
 - Until that variable exists, the monitor can send the existing `CRON_SECRET` the same way.
 
-The handler then checks **America/Chicago** and exits immediately outside **8:30–15:00 Central**, weekdays, except for a short close check. A run can pass `?manual=true` to skip that hours check. That flag is not a secret. The request still needs the bearer token.
+`GET /api/brief` is a read-only packet for Jena's market updates: pre-market, midday, and the close. It uses the same bearer check as `GET /api/health`. Send `Authorization: Bearer <HEALTH_TOKEN>`. If `HEALTH_TOKEN` is not set, the same header may carry `CRON_SECRET` instead. A signed-in browser session is not enough. The monitor can call `https://options-scan.vercel.app/api/brief` with the header it already uses for `/api/health`. No new secret.
+
+The JSON times are ISO. It includes:
+
+- Today's saved A and B alerts, and the previous trading day's (weekends skipped; exchange holidays are not on this calendar). Each row has the ticker, grade, contract (call or put, strike, expiry, and calendar days to expiration from the New York date), estimated flow premium (volume × mid × 100), bid, ask, last, likely side, opening or closing check, rules version, and the time it was saved. A missing last, premium, or rules version is null. An alert saved before the opening check says so, instead of a pending result.
+- Open scorecard shadows (A and B only; the 43–60 day test is left out). Each row has the ticker and contract, entry price and time, the latest stored mark and its time, the percent change from that entry, the distance still left to the +40% target and the -25% stop, days held, and the flat-day count. The flat-day count is how many Chicago trading days the shadow has been held while the latest mark is still inside the $1 flat band. It is 0 when the latest mark is outside that band, and null when no mark is stored. A missing mark is not called flat.
+- Shadows resolved today, and shadows resolved this week (Monday through today, Central). Today's closes are in both lists. Each row has the exit reason and the percent result from entry to exit. A result that was not stored is null.
+- Paper trades. Open positions, this week's realized P&L in dollars (Monday through today, Central), that P&L compared with the weekly drawdown warning ($1,250 at the $5,000 account), and today's loss streak for the two-losses-in-a-row stop. An open position uses the latest stored shadow mark for that contract when one exists. This route does not ask Schwab for a new quote. If the trade log is empty, open positions are an empty list and the P&L, the close count, and the loss streak are zeros, with a note that those zeros are not estimates.
+
+`paperTrade` on a shadow is true when a logged trade shares that alert, or an open paper trade is the same contract, so a brief does not count the same idea twice. `scan` is the last scan summary and has the same fields as `GET /api/health`. The body has no tokens, secrets, or account numbers, and it does not call Tastytrade.
+
+The cron handler then checks **America/Chicago** and exits immediately outside **8:30–15:00 Central**, weekdays, except for a short close check. A run can pass `?manual=true` to skip that hours check. That flag is not a secret. The request still needs the bearer token.
 
 From **15:00 through 15:20 Central** the same route only re-quotes alerts already sent that day. It does not send new Telegram alerts in that window. That quote is the same-day close. 15-minute and 1-hour checks run on the regular in-session crons.
 
@@ -58,6 +69,7 @@ Middleware requires that cookie, or `Authorization: Bearer <CRON_SECRET>`, on ev
 - `POST /api/auth/logout`
 - `GET /api/cron` (bearer check inside the route)
 - `GET /api/health` (bearer `HEALTH_TOKEN`, or `CRON_SECRET` when `HEALTH_TOKEN` is unset)
+- `GET /api/brief` (same bearer as `/api/health`; a signed-in session is not enough)
 
 `GET /api/schwab/callback` requires the app session. It is not a public route.
 
@@ -73,8 +85,8 @@ Set every secret in Vercel as a **Sensitive** variable. Do not leave them readab
 
 | Variable | Sensitive | Purpose |
 |----------|-----------|---------|
-| `CRON_SECRET` | Yes | Bearer token Vercel cron sends. Also accepted by `/api/health` when `HEALTH_TOKEN` is unset |
-| `HEALTH_TOKEN` | Yes | Optional bearer for `GET /api/health`. When set, the health check accepts this token and does not accept `CRON_SECRET` |
+| `CRON_SECRET` | Yes | Bearer token Vercel cron sends. Also accepted by `/api/health` and `/api/brief` when `HEALTH_TOKEN` is unset |
+| `HEALTH_TOKEN` | Yes | Optional bearer for `GET /api/health` and `GET /api/brief`. When set, those routes accept this token and do not accept `CRON_SECRET` |
 | `APP_PASSWORD` | Yes | Password for `/login` |
 | `SESSION_SECRET` | Yes | Signs the session cookie and the Schwab OAuth state cookie |
 | `TASTYTRADE_ENABLED` | No | Must be exactly `true`, and the three Tastytrade values below must be set, or Tastytrade stays off |

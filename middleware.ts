@@ -17,9 +17,10 @@ export async function middleware(request: NextRequest) {
   // Vercel cron authenticates itself with Authorization: Bearer.
   // The Schwab callback is not public: SameSite=Lax sends the session cookie
   // on Schwab's cross-site GET, and the route also checks that session.
-  // Cron and the health check authenticate with Authorization: Bearer.
-  // The health route accepts HEALTH_TOKEN, or CRON_SECRET when that token is unset.
-  if (pathname === "/api/cron" || pathname === "/api/health" || PUBLIC_PATHS.has(pathname)) {
+  // Cron, the health check, and the market brief authenticate with Authorization: Bearer.
+  // Health and the brief accept HEALTH_TOKEN, or CRON_SECRET when that token is unset.
+  // A session cookie is not enough for those two routes.
+  if (pathname === "/api/cron" || pathname === "/api/health" || pathname === "/api/brief" || PUBLIC_PATHS.has(pathname)) {
     return NextResponse.next();
   }
 
