@@ -9,6 +9,10 @@ import {
   parsePriceHistory,
   parseQuoteEntries,
   parseQuotes,
+  QUOTE_EMPTY,
+  QUOTE_REJECTED,
+  QUOTE_UNREADABLE,
+  quoteReadProblem,
   parseTokenResponse,
   publicTokenStatus,
   refreshWarnSoon,
@@ -37,6 +41,15 @@ describe("market-data URL guard", () => {
     expect(() => marketDataGetUrl("../trader/v1/orders", new URLSearchParams())).toThrow(/price history/);
     expect(() => marketDataGetUrl("chains/../orders", new URLSearchParams())).toThrow(/price history/);
     expect(() => marketDataGetUrl("pricehistory/../orders", new URLSearchParams())).toThrow(/price history/);
+  });
+
+  it("encodes a padded option symbol with %20", () => {
+    const quotes = marketDataGetUrl("quotes", new URLSearchParams({
+      symbols: "NVDA  261106P00235000",
+      indicative: "false",
+    }));
+    expect(quotes).toContain("symbols=NVDA%20%20261106P00235000");
+    expect(quotes.includes("+")).toBe(false);
   });
 });
 
@@ -254,6 +267,68 @@ describe("quote and chain normalization", () => {
       lastSize: null,
       tradeTime: null,
     });
+  });
+
+  it("reads Schwab's quotes payload: expiration year, month, day, and quote.bidPrice", () => {
+    const quoteTime = Date.parse("2026-10-08T17:50:00.000Z");
+    const tradeTime = quoteTime - 1000;
+    const payload = {
+      "NVDA  261106P00235000": {
+        assetMainType: "OPTION",
+        symbol: "NVDA  261106P00235000",
+        realtime: true,
+        reference: {
+          contractType: "P",
+          daysToExpiration: 29,
+          expirationDay: 6,
+          expirationMonth: 11,
+          expirationYear: 2026,
+          strikePrice: 235,
+          underlying: "NVDA",
+          multiplier: 100,
+        },
+        quote: {
+          bidPrice: 9.75,
+          askPrice: 9.95,
+          lastPrice: 9.85,
+          mark: 9.85,
+          quoteTime,
+          tradeTime,
+          openInterest: 120,
+          totalVolume: 40,
+          volatility: 32.5,
+          delta: -0.42,
+        },
+      },
+    };
+    const entries = parseQuoteEntries(payload);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].symbol).toBe("NVDA  261106P00235000");
+    expect(entries[0].contract).toMatchObject({
+      bid: 9.75,
+      ask: 9.95,
+      last: 9.85,
+      strike: 235,
+      expiration: "2026-11-06",
+      putCall: "put",
+      volume: 40,
+      openInterest: 120,
+      delta: -0.42,
+      iv: 0.325,
+      quoteTime,
+      tradeTime,
+    });
+    expect(quoteReadProblem(payload)).toBeNull();
+    expect(parseQuoteEntries({
+      errors: { invalidSymbols: ["NVDA  261106P00235000"], invalidCusips: [], invalidSSIDs: [] },
+    })).toEqual([]);
+    expect(quoteReadProblem({
+      errors: { invalidSymbols: ["NVDA  261106P00235000"], invalidCusips: [], invalidSSIDs: [] },
+    })).toBe(QUOTE_REJECTED);
+    expect(quoteReadProblem({})).toBe(QUOTE_EMPTY);
+    expect(quoteReadProblem({
+      "NVDA  261106P00235000": { assetMainType: "OPTION", quote: { bidPrice: 9.75, askPrice: 9.95 } },
+    })).toBe(QUOTE_UNREADABLE);
   });
 
   it("reads last size and trade time from a chain row", () => {

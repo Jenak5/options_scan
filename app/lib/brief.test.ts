@@ -681,6 +681,7 @@ describe("market brief", () => {
           quotedAt: Date.parse("2026-10-08T15:55:00.000Z"),
         },
       },
+      paperQuoteMisses: { [nvda.id]: "Schwab returned a quote that could not be read." },
     });
     const paper = brief.paper.open[0];
     expect(paper).toMatchObject({
@@ -776,6 +777,28 @@ describe("market brief", () => {
     expect(paper?.changePercent).toBeCloseTo(((4.75 - 6.95) / 6.95) * 100, 4);
     expect(paper?.note).toContain("44 hours old");
     expect(paper?.note).toContain("Not a current quote");
+    expect(brief.paper.note).toBeNull();
+  });
+
+  it("appends why the quote was missing and does not put that on the paper note", () => {
+    const markedAt = Date.parse("2026-10-06T19:45:00.000Z");
+    const now = new Date("2026-10-08T16:00:00.000Z");
+    const nvda = nvdaPut();
+    const reason = "Schwab returned a quote that could not be read.";
+    const brief = buildMarketBrief({
+      alerts: [],
+      shadows: [nvdaShadow(markedAt)],
+      trades: [nvda],
+      scan: emptyScan(),
+      now,
+      paperQuotes: {},
+      paperQuoteMisses: { [nvda.id]: reason },
+    });
+    expect(brief.paper.note).toBeNull();
+    expect(brief.paper.open[0]?.note).toContain("Stored scorecard mark");
+    expect(brief.paper.open[0]?.note).toContain("44 hours old");
+    expect(brief.paper.open[0]?.note).toContain(reason);
+    expect(brief.paper.open[0]?.markSource).toBe("stored");
   });
 });
 
@@ -875,10 +898,13 @@ describe("GET /api/brief", () => {
 
     const chain = vi.spyOn(schwab, "getOptionChain").mockRejectedValue(new Error("brief must not read a chain"));
     const shadowQuotes = vi.spyOn(quotes, "quoteContractMarks").mockRejectedValue(new Error("brief must not mark shadows"));
-    const quoted = vi.spyOn(schwab, "getQuoteEntries").mockResolvedValue([{
-      symbol: "NVDA  261106P00235000",
-      contract: nvdaContract(),
-    }]);
+    const quoted = vi.spyOn(schwab, "getQuoteEntries").mockResolvedValue({
+      entries: [{
+        symbol: "NVDA  261106P00235000",
+        contract: nvdaContract(),
+      }],
+      problem: null,
+    });
     const writes = spyOnWrites();
     const tradeBefore = await readTradeLogText();
     const shadowBefore = await readShadowBookText();
@@ -935,7 +961,8 @@ describe("GET /api/brief", () => {
     const markedAt = Date.parse("2026-10-06T19:45:00.000Z");
     expect(await updateTradeLog(() => JSON.stringify({ version: 1, trades: [nvdaPut()] }))).toBe(true);
     expect(await updateShadowBook(() => JSON.stringify({ version: 1, records: [nvdaShadow(markedAt)] }))).toBe(true);
-    vi.spyOn(schwab, "getQuoteEntries").mockRejectedValue(new Error("schwab down"));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(schwab, "getQuoteEntries").mockRejectedValue(new Error("schwab down access_token=super-secret"));
     const writes = spyOnWrites();
     const tradeBefore = await readTradeLogText();
     const shadowBefore = await readShadowBookText();
@@ -946,7 +973,9 @@ describe("GET /api/brief", () => {
     expect(response.status).toBe(200);
     expect(await readTradeLogText()).toBe(tradeBefore);
     expect(await readShadowBookText()).toBe(shadowBefore);
-    const paper = (await response.json()).paper.open[0];
+    const body = await response.json();
+    const paper = body.paper.open[0];
+    expect(body.paper.note).toBeNull();
     expect(paper).toMatchObject({
       mark: 4.75,
       markSource: "stored",
@@ -956,6 +985,10 @@ describe("GET /api/brief", () => {
     });
     expect(paper.note).toContain("Stored scorecard mark");
     expect(paper.note).toContain("Not a current quote");
+    expect(paper.note).toContain("The Schwab quote failed.");
+    expect(paper.note.includes("schwab down")).toBe(false);
+    expect(paper.note.includes("super-secret")).toBe(false);
+    expect(logged.mock.calls.flat().join(" ").includes("super-secret")).toBe(false);
     expect(paper.distanceToStop).toBeLessThan(0);
     expectNoWrites(writes);
   });

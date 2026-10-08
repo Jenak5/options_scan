@@ -40,7 +40,7 @@ export async function GET(request: NextRequest) {
   ]);
   const shadows = parseShadowBook(shadowText).records;
   const trades = parseTradeLog(tradeText).trades;
-  const paperQuotes = await quoteOpenPaperTrades(trades).catch(() => ({}));
+  const paperQuoteBatch = await quoteOpenPaperTrades(trades).catch(() => ({ quotes: {}, misses: {} }));
   const totals = countShadowTotals(shadows);
   const scan = buildHealthReport({
     health,
@@ -57,6 +57,7 @@ export async function GET(request: NextRequest) {
     trades,
     scan,
     now,
-    paperQuotes,
+    paperQuotes: paperQuoteBatch.quotes,
+    paperQuoteMisses: paperQuoteBatch.misses,
   }));
 }

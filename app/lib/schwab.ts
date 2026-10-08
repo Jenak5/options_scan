@@ -6,6 +6,7 @@ import {
   parseOptionChain,
   parsePriceHistory,
   parseQuoteEntries,
+  quoteReadProblem,
   parseTokenResponse,
   publicTokenStatus,
   refreshWarnSoon,
@@ -169,25 +170,34 @@ export async function getPriceHistory(input: {
 }
 
 export async function getQuotes(symbols: string[], signal?: AbortSignal): Promise<OptionContract[]> {
-  const entries = await getQuoteEntries(symbols, signal);
+  const read = await getQuoteEntries(symbols, signal);
   const contracts: OptionContract[] = [];
-  for (let i = 0; i < entries.length; i++) contracts.push(entries[i].contract);
+  for (let i = 0; i < read.entries.length; i++) contracts.push(read.entries[i].contract);
   return contracts;
+}
+
+/** Quotes read plus a fixed reason when the payload had no usable option. */
+export interface QuoteEntriesResult {
+  entries: ParsedQuote[];
+  /** Null when at least one option parsed. Never includes a token, URL, or response body. */
+  problem: string | null;
 }
 
 /**
  * Same quotes read as getQuotes, keeping the symbol Schwab used as the key.
  * The brief matches an open paper trade by that symbol. signal aborts the GET.
+ * problem is set only when entries is empty, so a partial batch can still be used.
  */
-export async function getQuoteEntries(symbols: string[], signal?: AbortSignal): Promise<ParsedQuote[]> {
+export async function getQuoteEntries(symbols: string[], signal?: AbortSignal): Promise<QuoteEntriesResult> {
   if (signal?.aborted) throw new DOMException("The quote was aborted", "AbortError");
   const cleaned = symbols.map((symbol) => symbol.trim()).filter((symbol) => symbol.length > 0);
-  if (cleaned.length === 0) return [];
+  if (cleaned.length === 0) return { entries: [], problem: null };
   const query = new URLSearchParams();
   query.set("symbols", cleaned.join(","));
   query.set("indicative", "false");
   const payload = await marketDataGet("quotes", query, signal);
-  return parseQuoteEntries(payload);
+  const entries = parseQuoteEntries(payload);
+  return { entries, problem: quoteReadProblem(payload) };
 }
 
 /**
