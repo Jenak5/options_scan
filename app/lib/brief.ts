@@ -3,7 +3,7 @@ import { TRADE_RULES } from "@/app/lib/alertConfig";
 import { planExits } from "@/app/lib/exits";
 import { calendarDaysBetween, newYorkDate, notionalPremium } from "@/app/lib/flow";
 import type { HealthReport } from "@/app/lib/healthReport";
-import { chicagoClock, chicagoDate, chicagoTradingDaysElapsed, previousChicagoTradingDay } from "@/app/lib/marketHours";
+import { chicagoClock, chicagoDate, chicagoTradingDaysElapsed, isChicagoMarketHours, previousChicagoTradingDay } from "@/app/lib/marketHours";
 import { likelySideFromEstimate, likelySideText, openingLabel, type LikelySide } from "@/app/lib/quoteSide";
 import { DAILY_STOP_CONSECUTIVE_LOSSES } from "@/app/lib/risk";
 import { isExperimentShadow, type ShadowExitReason, type ShadowTrade } from "@/app/lib/shadow";
@@ -16,18 +16,31 @@ import {
 
 /**
  * Read-only packet for a pre-market, midday, or close brief.
- * Every number comes from alerts, shadows, and the paper log already stored.
- * A missing quote stays null. Nothing here calls Schwab or places an order.
+ * Alerts, shadows, and the paper log come from what is already stored.
+ * The route passes a Schwab quote for each open paper trade. This function
+ * does not fetch, and it does not write a trade, a shadow, or an alert.
+ * Open scorecard shadows stay on the mark the 15-minute scan stored.
  */
 
 export const MARKS_NOTE =
-  "Marks are the latest prices already stored on scorecard shadows. This brief does not call Schwab for a new quote.";
+  "Open paper trades are quoted from Schwab: bid, ask, mid, and the quote time. The headline mark is the bid. P&L and the distance to the stop and target are also given at the mid. During the Central regular session that quote is current. Outside that session it is the latest quote Schwab returned. Open scorecard shadows keep the mark stored by the 15-minute scan, and this brief does not refresh them. If a paper trade has no quote, it falls back to that stored mark and is labeled stored, with the time the mark was saved.";
 
 export const NO_TRADES_NOTE =
   "No paper trades are in the log. Open positions, this week's realized P&L, and today's loss streak are zeros, not estimates.";
 
 export const NO_STORED_MARK_NOTE =
-  "No stored mark. This brief does not request a new Schwab quote.";
+  "No current quote and no stored mark.";
+
+export const LATEST_QUOTE_NOTE =
+  "Market is closed. This is the latest Schwab quote, not a regular-session price.";
+
+/** Age label for a stored fallback. markAsOf is the ISO time the mark was saved. */
+export function storedMarkNote(markAsOf: string | null, now: Date): string {
+  if (!markAsOf) return "Stored scorecard mark. The time it was saved is missing. Not a current quote.";
+  const at = Date.parse(markAsOf);
+  if (!Number.isFinite(at)) return `Stored scorecard mark as of ${markAsOf}. Not a current quote.`;
+  return `Stored scorecard mark as of ${markAsOf} (${ageLabel(now.getTime() - at)}). Not a current quote.`;
+}
 
 export const OPENING_UNRECORDED = "Opening check was not recorded on this alert.";
 
@@ -68,6 +81,8 @@ export interface BriefOpenShadow {
   entryAt: string | null;
   mark: number | null;
   markAt: string | null;
+  /** stored: the 15-minute scan saved this mark. This brief does not re-quote shadows. */
+  markSource: "stored" | null;
   /** Percent from the entry to the latest stored mark. 10 means up 10%. Null without a mark. */
   changePercent: number | null;
   targetPrice: number | null;
@@ -103,6 +118,15 @@ export interface BriefResolvedShadow {
   paperTrade: boolean;
 }
 
+/** A Schwab quote for one open paper trade. The route fills this. The brief does not fetch it. */
+export interface BriefPaperQuote {
+  bid: number | null;
+  ask: number | null;
+  mid: number | null;
+  /** Milliseconds since epoch, from the Schwab quote time. */
+  quotedAt: number | null;
+}
+
 export interface BriefPaperPosition {
   ticker: string;
   contract: BriefContract;
@@ -110,12 +134,59 @@ export interface BriefPaperPosition {
   entryPrice: number;
   entryAt: string | null;
   grade: "A" | "B" | "C" | "D" | null;
+  /** Bid from the Schwab quote. Null when the brief fell back to a stored mark. */
+  bid: number | null;
+  /** Ask from the Schwab quote. Null when the brief fell back to a stored mark. */
+  ask: number | null;
+  /** (bid + ask) / 2 when the quote had both sides. Null on a stored fallback. */
+  mid: number | null;
+  /** Schwab quote time. Null on a stored fallback, or when Schwab sent no time. */
+  quotedAt: string | null;
+  /**
+   * regular during the Central cash session (weekdays, 8:30–15:00).
+   * latest when the market is closed and the quote is the last one Schwab returned.
+   * Null on a stored fallback.
+   */
+  quoteSession: "regular" | "latest" | null;
+  /**
+   * Price used for the headline P&L and the headline stop and target distances.
+   * The bid when a quote has one, otherwise the mid, otherwise the stored mark.
+   */
   mark: number | null;
   markAt: string | null;
-  /** stored-shadow when the mark was copied from a scorecard shadow. */
-  markSource: "stored-shadow" | null;
+  /** quote when Schwab returned a bid or a mid. stored when the brief fell back. */
+  markSource: "quote" | "stored" | null;
+  /** Time the stored mark was saved. Null when the mark is a quote. */
+  markAsOf: string | null;
+  /** Headline P&L in dollars, from the bid when the quote has a bid. */
   unrealizedPnlDollars: number | null;
+  unrealizedPnlAtBid: number | null;
+  unrealizedPnlAtMid: number | null;
+  /** Percent from the entry to the headline price. Negative means down. */
   changePercent: number | null;
+  changePercentAtBid: number | null;
+  changePercentAtMid: number | null;
+  /** +40% target from the same exit plan as the trade log. Null when the plan cannot be priced. */
+  targetPrice: number | null;
+  /**
+   * -25% stop from the same exit plan as the trade log.
+   * The dollar cap can tighten it. Null when the plan cannot be priced.
+   */
+  stopPrice: number | null;
+  /** Option price still left to the target, from the headline price. Positive means not there yet. */
+  distanceToTarget: number | null;
+  /** Option price still above the stop, from the headline price. Negative means the price is through the stop. */
+  distanceToStop: number | null;
+  distanceToTargetPercent: number | null;
+  distanceToStopPercent: number | null;
+  distanceToTargetAtBid: number | null;
+  distanceToStopAtBid: number | null;
+  distanceToTargetPercentAtBid: number | null;
+  distanceToStopPercentAtBid: number | null;
+  distanceToTargetAtMid: number | null;
+  distanceToStopAtMid: number | null;
+  distanceToTargetPercentAtMid: number | null;
+  distanceToStopPercentAtMid: number | null;
   note: string | null;
 }
 
@@ -175,6 +246,8 @@ export function buildMarketBrief(input: {
   trades: readonly StoredTrade[];
   scan: HealthReport;
   now: Date;
+  /** Live quotes keyed by trade id. Missing and empty means the stored mark. */
+  paperQuotes?: Readonly<Record<string, BriefPaperQuote>>;
 }): MarketBrief {
   const tradingDay = chicagoDate(input.now);
   const previous = tradingDay ? previousChicagoTradingDay(tradingDay) : null;
@@ -213,7 +286,12 @@ export function buildMarketBrief(input: {
       open: openTrades
         .slice()
         .sort((a, b) => b.openedAt - a.openedAt)
-        .map((trade) => paperPosition(trade, marks.get(contractKey(trade)), input.now)),
+        .map((trade) => paperPosition(
+          trade,
+          marks.get(contractKey(trade)),
+          input.paperQuotes?.[trade.id],
+          input.now,
+        )),
       week: {
         from: week?.from ?? "",
         through: week?.through ?? "",
@@ -301,6 +379,7 @@ function briefOpenShadow(row: ShadowTrade, paperTrade: boolean, now: Date): Brie
     entryAt: iso(row.openedAt),
     mark,
     markAt: mark == null ? null : iso(row.lastMarkedAt),
+    markSource: mark == null ? null : "stored",
     changePercent: changePercent(row.entryPrice, mark),
     targetPrice: target,
     stopPrice: stop,
@@ -346,10 +425,32 @@ function resolvedShadows(
 
 function paperPosition(
   trade: StoredTrade,
-  mark: StoredMark | undefined,
+  stored: StoredMark | undefined,
+  quote: BriefPaperQuote | undefined,
   now: Date,
 ): BriefPaperPosition {
-  const price = mark?.price ?? null;
+  const storedPrice = stored?.price ?? null;
+  const bid = positivePrice(quote?.bid);
+  const ask = positivePrice(quote?.ask);
+  const mid = positivePrice(quote?.mid);
+  const quoted = bid != null || mid != null;
+  const headline = bid ?? (quoted ? mid : null) ?? storedPrice;
+  const markSource: BriefPaperPosition["markSource"] = quoted ? "quote" : storedPrice != null ? "stored" : null;
+  const quoteSession: BriefPaperPosition["quoteSession"] = quoted
+    ? (isChicagoMarketHours(now) ? "regular" : "latest")
+    : null;
+  const quotedAt = quoted ? iso(quote?.quotedAt) : null;
+  const markAsOf = markSource === "stored" ? stored?.at ?? null : null;
+  const plan = planExits({
+    premium: trade.entryPrice,
+    contracts: trade.contracts,
+    structure: trade.structure === "debit-spread" ? "debit-spread" : "single",
+  });
+  const target = plan?.profitPrice ?? null;
+  const stop = plan?.stopPrice ?? null;
+  const atBid = priceGap(trade.entryPrice, trade.contracts, bid, target, stop);
+  const atMid = priceGap(trade.entryPrice, trade.contracts, quoted ? mid : null, target, stop);
+  const atHeadline = priceGap(trade.entryPrice, trade.contracts, headline, target, stop);
   const grade = trade.alertGrade === "A" || trade.alertGrade === "B" || trade.alertGrade === "C" || trade.alertGrade === "D"
     ? trade.alertGrade
     : null;
@@ -360,12 +461,71 @@ function paperPosition(
     entryPrice: trade.entryPrice,
     entryAt: iso(trade.openedAt),
     grade,
-    mark: price,
-    markAt: price == null ? null : mark?.at ?? null,
-    markSource: price == null ? null : "stored-shadow",
-    unrealizedPnlDollars: price == null ? null : cents((price - trade.entryPrice) * trade.contracts * 100),
-    changePercent: changePercent(trade.entryPrice, price),
-    note: price == null ? NO_STORED_MARK_NOTE : null,
+    bid: quoted ? bid : null,
+    ask: quoted ? ask : null,
+    mid: quoted ? mid : null,
+    quotedAt,
+    quoteSession,
+    mark: headline,
+    markAt: markSource === "quote" ? quotedAt : markSource === "stored" ? stored?.at ?? null : null,
+    markSource,
+    markAsOf,
+    unrealizedPnlDollars: atHeadline.pnl,
+    unrealizedPnlAtBid: atBid.pnl,
+    unrealizedPnlAtMid: atMid.pnl,
+    changePercent: atHeadline.changePercent,
+    changePercentAtBid: atBid.changePercent,
+    changePercentAtMid: atMid.changePercent,
+    targetPrice: target,
+    stopPrice: stop,
+    distanceToTarget: atHeadline.distanceToTarget,
+    distanceToStop: atHeadline.distanceToStop,
+    distanceToTargetPercent: atHeadline.distanceToTargetPercent,
+    distanceToStopPercent: atHeadline.distanceToStopPercent,
+    distanceToTargetAtBid: atBid.distanceToTarget,
+    distanceToStopAtBid: atBid.distanceToStop,
+    distanceToTargetPercentAtBid: atBid.distanceToTargetPercent,
+    distanceToStopPercentAtBid: atBid.distanceToStopPercent,
+    distanceToTargetAtMid: atMid.distanceToTarget,
+    distanceToStopAtMid: atMid.distanceToStop,
+    distanceToTargetPercentAtMid: atMid.distanceToTargetPercent,
+    distanceToStopPercentAtMid: atMid.distanceToStopPercent,
+    note: quoteNote(markSource, quoteSession, markAsOf, now),
+  };
+}
+
+function quoteNote(
+  markSource: BriefPaperPosition["markSource"],
+  quoteSession: BriefPaperPosition["quoteSession"],
+  markAsOf: string | null,
+  now: Date,
+): string | null {
+  if (markSource === "quote") return quoteSession === "latest" ? LATEST_QUOTE_NOTE : null;
+  if (markSource === "stored") return storedMarkNote(markAsOf, now);
+  return NO_STORED_MARK_NOTE;
+}
+
+function priceGap(
+  entry: number,
+  contracts: number,
+  price: number | null,
+  target: number | null,
+  stop: number | null,
+): {
+  pnl: number | null;
+  changePercent: number | null;
+  distanceToTarget: number | null;
+  distanceToStop: number | null;
+  distanceToTargetPercent: number | null;
+  distanceToStopPercent: number | null;
+} {
+  return {
+    pnl: price == null ? null : cents((price - entry) * contracts * 100),
+    changePercent: changePercent(entry, price),
+    distanceToTarget: price != null && target != null ? target - price : null,
+    distanceToStop: price != null && stop != null ? price - stop : null,
+    distanceToTargetPercent: distancePercent(entry, price, target, "target"),
+    distanceToStopPercent: distancePercent(entry, price, stop, "stop"),
   };
 }
 
@@ -492,8 +652,23 @@ function cents(value: number): number {
 }
 
 function finitePrice(value: number | null | undefined): number | null {
+  return positivePrice(value);
+}
+
+function positivePrice(value: number | null | undefined): number | null {
   if (value == null || !Number.isFinite(value) || !(value > 0)) return null;
   return value;
+}
+
+function ageLabel(elapsedMs: number): string {
+  if (elapsedMs < 0) return "timestamp is ahead of this brief";
+  const minutes = Math.floor(elapsedMs / 60_000);
+  if (minutes < 1) return "less than a minute old";
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} old`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours} hour${hours === 1 ? "" : "s"} old`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} old`;
 }
 
 function finiteOrNull(value: number | null | undefined): number | null {

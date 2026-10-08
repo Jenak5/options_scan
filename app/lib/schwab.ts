@@ -5,12 +5,13 @@ import {
   alertDue,
   parseOptionChain,
   parsePriceHistory,
-  parseQuotes,
+  parseQuoteEntries,
   parseTokenResponse,
   publicTokenStatus,
   refreshWarnSoon,
   TOKEN_URL,
   type ChainParseResult,
+  type ParsedQuote,
   type PriceCandle,
   type SchwabPublicStatus,
   type StoredTokens,
@@ -167,14 +168,26 @@ export async function getPriceHistory(input: {
   return parsePriceHistory(payload);
 }
 
-export async function getQuotes(symbols: string[]): Promise<OptionContract[]> {
+export async function getQuotes(symbols: string[], signal?: AbortSignal): Promise<OptionContract[]> {
+  const entries = await getQuoteEntries(symbols, signal);
+  const contracts: OptionContract[] = [];
+  for (let i = 0; i < entries.length; i++) contracts.push(entries[i].contract);
+  return contracts;
+}
+
+/**
+ * Same quotes read as getQuotes, keeping the symbol Schwab used as the key.
+ * The brief matches an open paper trade by that symbol. signal aborts the GET.
+ */
+export async function getQuoteEntries(symbols: string[], signal?: AbortSignal): Promise<ParsedQuote[]> {
+  if (signal?.aborted) throw new DOMException("The quote was aborted", "AbortError");
   const cleaned = symbols.map((symbol) => symbol.trim()).filter((symbol) => symbol.length > 0);
   if (cleaned.length === 0) return [];
   const query = new URLSearchParams();
   query.set("symbols", cleaned.join(","));
   query.set("indicative", "false");
-  const payload = await marketDataGet("quotes", query);
-  return parseQuotes(payload);
+  const payload = await marketDataGet("quotes", query, signal);
+  return parseQuoteEntries(payload);
 }
 
 /**
@@ -252,7 +265,11 @@ async function refreshStored(stored: StoredTokens, now: number, depth = 0): Prom
   }
 }
 
-async function marketDataGet(path: "chains" | "quotes" | "pricehistory", query: URLSearchParams): Promise<unknown> {
+async function marketDataGet(
+  path: "chains" | "quotes" | "pricehistory",
+  query: URLSearchParams,
+  signal?: AbortSignal,
+): Promise<unknown> {
   const url = marketDataGetUrl(path, query);
   const token = await getAccessToken();
   const res = await fetch(url, {
@@ -262,13 +279,14 @@ async function marketDataGet(path: "chains" | "quotes" | "pricehistory", query: 
       Accept: "application/json",
     },
     cache: "no-store",
+    signal,
   });
-  if (res.status === 401) return retryMarketDataOnce(url);
+  if (res.status === 401) return retryMarketDataOnce(url, signal);
   if (!res.ok) throw new Error(`Schwab market data request failed (${res.status})`);
   return res.json();
 }
 
-async function retryMarketDataOnce(url: string): Promise<unknown> {
+async function retryMarketDataOnce(url: string, signal?: AbortSignal): Promise<unknown> {
   const stored = await readTokens();
   if (!stored) throw new SchwabNotConnectedError();
   const next = await resolveUsableTokens(stored, true);
@@ -279,6 +297,7 @@ async function retryMarketDataOnce(url: string): Promise<unknown> {
       Accept: "application/json",
     },
     cache: "no-store",
+    signal,
   });
   if (!retry.ok) throw new Error(`Schwab market data request failed (${retry.status})`);
   return retry.json();
