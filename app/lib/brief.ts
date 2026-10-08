@@ -23,7 +23,7 @@ import {
  */
 
 export const MARKS_NOTE =
-  "Open paper trades are quoted from Schwab: bid, ask, mid, and the quote time. The headline mark is the bid. P&L and the distance to the stop and target are also given at the mid. During the Central regular session that quote is current. Outside that session it is the latest quote Schwab returned. Open scorecard shadows keep the mark stored by the 15-minute scan, and this brief does not refresh them. If a paper trade has no quote, it falls back to that stored mark and is labeled stored, with the time the mark was saved.";
+  "Open paper trades are quoted from Schwab: bid, ask, mid, and the quote time. The headline mark is the bid. P&L and the distance to the stop and target are also given at the mid. During the Central regular session that quote is current. Outside that session it is the latest quote Schwab returned. Open scorecard shadows keep the mark stored by the 15-minute scan, and this brief does not refresh them. If a paper trade has no quote, it falls back to that stored mark and is labeled stored, with the time the mark was saved and why the quote was missing.";
 
 export const NO_TRADES_NOTE =
   "No paper trades are in the log. Open positions, this week's realized P&L, and today's loss streak are zeros, not estimates.";
@@ -248,6 +248,8 @@ export function buildMarketBrief(input: {
   now: Date;
   /** Live quotes keyed by trade id. Missing and empty means the stored mark. */
   paperQuotes?: Readonly<Record<string, BriefPaperQuote>>;
+  /** Why a live quote is missing, keyed by trade id. Appended to a stored-mark note. */
+  paperQuoteMisses?: Readonly<Record<string, string>>;
 }): MarketBrief {
   const tradingDay = chicagoDate(input.now);
   const previous = tradingDay ? previousChicagoTradingDay(tradingDay) : null;
@@ -291,6 +293,7 @@ export function buildMarketBrief(input: {
           marks.get(contractKey(trade)),
           input.paperQuotes?.[trade.id],
           input.now,
+          input.paperQuoteMisses?.[trade.id],
         )),
       week: {
         from: week?.from ?? "",
@@ -428,6 +431,7 @@ function paperPosition(
   stored: StoredMark | undefined,
   quote: BriefPaperQuote | undefined,
   now: Date,
+  miss: string | undefined,
 ): BriefPaperPosition {
   const storedPrice = stored?.price ?? null;
   const bid = positivePrice(quote?.bid);
@@ -490,7 +494,7 @@ function paperPosition(
     distanceToStopAtMid: atMid.distanceToStop,
     distanceToTargetPercentAtMid: atMid.distanceToTargetPercent,
     distanceToStopPercentAtMid: atMid.distanceToStopPercent,
-    note: quoteNote(markSource, quoteSession, markAsOf, now),
+    note: quoteNote(markSource, quoteSession, markAsOf, now, miss),
   };
 }
 
@@ -499,10 +503,13 @@ function quoteNote(
   quoteSession: BriefPaperPosition["quoteSession"],
   markAsOf: string | null,
   now: Date,
+  miss: string | undefined,
 ): string | null {
   if (markSource === "quote") return quoteSession === "latest" ? LATEST_QUOTE_NOTE : null;
-  if (markSource === "stored") return storedMarkNote(markAsOf, now);
-  return NO_STORED_MARK_NOTE;
+  const base = markSource === "stored" ? storedMarkNote(markAsOf, now) : NO_STORED_MARK_NOTE;
+  const reason = miss?.trim();
+  if (!reason) return base;
+  return `${base} ${reason}`;
 }
 
 function priceGap(

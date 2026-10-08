@@ -9,6 +9,7 @@ import {
   schwabConfigured,
   SchwabConfigError,
   SchwabNotConnectedError,
+  type QuoteEntriesResult,
 } from "@/app/lib/schwab";
 
 /**
@@ -138,49 +139,153 @@ export interface PaperQuote {
   quotedAt: number | null;
 }
 
+/** Quotes that arrived, and a fixed reason for each open trade that has none. */
+export interface PaperQuoteBatch {
+  quotes: Record<string, PaperQuote>;
+  /** Keyed by trade id. Sentences only. No tokens, URLs, or response bodies. */
+  misses: Record<string, string>;
+}
+
+const QUOTE_NOT_CONFIGURED = "Schwab is not configured.";
+const QUOTE_NOT_CONNECTED = "Schwab is not connected.";
+const QUOTE_TIMEOUT = "The Schwab quote timed out.";
+const QUOTE_FAILED = "The Schwab quote failed.";
+const QUOTE_UNBUILT = "The option symbol could not be built.";
+const QUOTE_NO_MARKET = "Schwab returned a quote with no bid and no mid.";
+const QUOTE_NOT_RETURNED = "Schwab did not return this option.";
+
 export async function quoteOpenPaperTrades(
   trades: readonly Quotable[],
   timeoutMs: number = BRIEF_QUOTE_TIMEOUT_MS,
-): Promise<Record<string, PaperQuote>> {
+): Promise<PaperQuoteBatch> {
   const open = trades.filter((trade) => trade.closedAt == null);
-  if (open.length === 0 || !schwabConfigured()) return {};
+  if (open.length === 0) return { quotes: {}, misses: {} };
+  if (!schwabConfigured()) return { quotes: {}, misses: missAll(open, QUOTE_NOT_CONFIGURED) };
   try {
     return await withDeadline((signal) => fetchPaperQuotes(open, signal), timeoutMs);
-  } catch {
-    return {};
+  } catch (err) {
+    const reason = quoteFailureReason(err);
+    logOpenMisses(open, reason);
+    return { quotes: {}, misses: missAll(open, reason) };
   }
 }
 
 async function fetchPaperQuotes(
   open: readonly Quotable[],
   signal: AbortSignal,
-): Promise<Record<string, PaperQuote>> {
+): Promise<PaperQuoteBatch> {
   const quotes: Record<string, PaperQuote> = {};
+  const misses: Record<string, string> = {};
   const groups = quoteGroups(open);
+  const grouped = new Set<string>();
+  for (let i = 0; i < groups.length; i++) {
+    for (let j = 0; j < groups[i].ids.length; j++) grouped.add(groups[i].ids[j]);
+  }
+  for (let i = 0; i < open.length; i++) {
+    if (grouped.has(open[i].id)) continue;
+    misses[open[i].id] = QUOTE_UNBUILT;
+    logQuoteMiss(open[i].ticker, QUOTE_UNBUILT);
+  }
   const bySymbol = new Map<string, string[]>();
   for (let i = 0; i < groups.length; i++) bySymbol.set(normalizeOptionSymbol(groups[i].symbol), groups[i].ids);
 
   for (let i = 0; i < groups.length; i += BRIEF_QUOTE_BATCH) {
-    if (signal.aborted) break;
+    if (signal.aborted) throw new DOMException("The quote was aborted", "AbortError");
     const batch = groups.slice(i, i + BRIEF_QUOTE_BATCH);
     const symbols: string[] = [];
     for (let j = 0; j < batch.length; j++) symbols.push(batch[j].symbol);
-    let entries: Awaited<ReturnType<typeof getQuoteEntries>> = [];
+    let read: QuoteEntriesResult;
     try {
-      entries = await getQuoteEntries(symbols, signal);
+      read = await getQuoteEntries(symbols, signal);
     } catch (err) {
-      if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) break;
+      if (isAbort(err)) throw err;
+      assignMiss(misses, groups, i, quoteFailureReason(err));
       break;
     }
-    for (let j = 0; j < entries.length; j++) {
-      const quote = paperQuoteFromContract(entries[j].contract);
-      if (!quote) continue;
-      const ids = bySymbol.get(normalizeOptionSymbol(entries[j].symbol));
+    const claimed = new Set<string>();
+    for (let j = 0; j < read.entries.length; j++) {
+      const key = normalizeOptionSymbol(read.entries[j].symbol);
+      const ids = bySymbol.get(key);
       if (!ids) continue;
+      claimed.add(key);
+      const quote = paperQuoteFromContract(read.entries[j].contract);
+      if (!quote) {
+        stamp(misses, ids, QUOTE_NO_MARKET);
+        logQuoteMiss(read.entries[j].symbol, QUOTE_NO_MARKET);
+        continue;
+      }
       for (let k = 0; k < ids.length; k++) quotes[ids[k]] = quote;
     }
+    const missingReason = read.entries.length === 0
+      ? (read.problem ?? QUOTE_NOT_RETURNED)
+      : QUOTE_NOT_RETURNED;
+    for (let j = 0; j < batch.length; j++) {
+      if (claimed.has(normalizeOptionSymbol(batch[j].symbol))) continue;
+      stamp(misses, batch[j].ids, missingReason);
+      logQuoteMiss(batch[j].symbol, missingReason);
+    }
   }
-  return quotes;
+  return { quotes, misses };
+}
+
+function missAll(open: readonly Quotable[], reason: string): Record<string, string> {
+  const misses: Record<string, string> = {};
+  for (let i = 0; i < open.length; i++) misses[open[i].id] = reason;
+  return misses;
+}
+
+function stamp(misses: Record<string, string>, ids: readonly string[], reason: string): void {
+  for (let i = 0; i < ids.length; i++) misses[ids[i]] = reason;
+}
+
+/** Marks this batch and every later batch. An HTTP failure is not retried. */
+function assignMiss(
+  misses: Record<string, string>,
+  groups: ReadonlyArray<{ symbol: string; ids: string[] }>,
+  from: number,
+  reason: string,
+): void {
+  for (let i = from; i < groups.length; i++) {
+    stamp(misses, groups[i].ids, reason);
+    logQuoteMiss(groups[i].symbol, reason);
+  }
+}
+
+function logOpenMisses(open: readonly Quotable[], reason: string): void {
+  const seen = new Set<string>();
+  for (let i = 0; i < open.length; i++) {
+    const symbol = schwabOptionSymbol({
+      ticker: open[i].ticker,
+      expiration: open[i].expiration,
+      strike: open[i].strike,
+      putCall: open[i].putCall,
+    }) ?? open[i].ticker;
+    if (seen.has(symbol)) continue;
+    seen.add(symbol);
+    logQuoteMiss(symbol, reason);
+  }
+}
+
+/** One line. The reason is a fixed sentence, so a token in the thrown error stays out of the log. */
+function logQuoteMiss(symbol: string, reason: string): void {
+  console.error(`Brief quote missing for ${symbol}: ${reason}`);
+}
+
+function quoteFailureReason(err: unknown): string {
+  if (isAbort(err)) return QUOTE_TIMEOUT;
+  if (err instanceof SchwabNotConnectedError) return QUOTE_NOT_CONNECTED;
+  if (err instanceof SchwabConfigError) return QUOTE_NOT_CONFIGURED;
+  if (err instanceof Error) {
+    const status = /Schwab market data request failed \((\d{3})\)/.exec(err.message);
+    if (status) return `Schwab market data request failed (${status[1]}).`;
+  }
+  return QUOTE_FAILED;
+}
+
+function isAbort(err: unknown): boolean {
+  if (err instanceof DOMException && err.name === "AbortError") return true;
+  if (err instanceof Error && (err.name === "AbortError" || /timeout|aborted/i.test(err.message))) return true;
+  return false;
 }
 
 function quoteGroups(open: readonly Quotable[]): Array<{ symbol: string; ids: string[] }> {

@@ -44,7 +44,9 @@ export function marketDataGetUrl(path: string, query: URLSearchParams): string {
   if (!MARKET_DATA_READS.has(path) || path.includes("/") || path.includes(".")) {
     throw new Error(MARKET_DATA_ONLY_ERROR);
   }
-  const url = `${MARKET_DATA_ORIGIN}/marketdata/v1/${path}?${query.toString()}`;
+  // URLSearchParams encodes a space as "+". Schwab matches the padded OCC
+  // symbol only when those spaces are "%20" (NVDA%20%20261106P00235000).
+  const url = `${MARKET_DATA_ORIGIN}/marketdata/v1/${path}?${query.toString().replace(/\+/g, "%20")}`;
   const parsed = new URL(url);
   if (parsed.origin !== MARKET_DATA_ORIGIN) {
     throw new Error(MARKET_DATA_ONLY_ERROR);
@@ -275,6 +277,27 @@ export interface ParsedQuote {
   contract: OptionContract;
 }
 
+/** Fixed, secret-free reasons a quotes payload had no usable option. */
+export const QUOTE_REJECTED = "Schwab rejected the option symbol.";
+export const QUOTE_EMPTY = "Schwab returned no quote.";
+export const QUOTE_UNREADABLE = "Schwab returned a quote that could not be read.";
+
+/**
+ * Why parseQuoteEntries returned nothing. Null when at least one option parsed.
+ * A 200 with errors.invalidSymbols is a rejected symbol, not an HTTP failure.
+ */
+export function quoteReadProblem(payload: unknown): string | null {
+  if (parseQuoteEntries(payload).length > 0) return null;
+  const root = asRecord(payload);
+  if (!root) return QUOTE_UNREADABLE;
+  const errors = asRecord(root.errors);
+  const invalid = errors?.invalidSymbols;
+  if (Array.isArray(invalid) && invalid.length > 0) return QUOTE_REJECTED;
+  const keys = Object.keys(root).filter((key) => key !== "errors");
+  if (keys.length === 0) return QUOTE_EMPTY;
+  return QUOTE_UNREADABLE;
+}
+
 /** Option quotes become contracts, still keyed by the symbol Schwab returned. Equity quotes are skipped. */
 export function parseQuoteEntries(payload: unknown): ParsedQuote[] {
   const root = asRecord(payload);
@@ -322,14 +345,35 @@ function optionFromQuote(value: unknown): OptionContract | null {
     lastSize: quote.lastSize ?? row.lastSize,
     bidSize: quote.bidSize ?? row.bidSize,
     askSize: quote.askSize ?? row.askSize,
-    tradeTimeInLong: quote.tradeTimeInLong ?? row.tradeTimeInLong,
-    quoteTimeInLong: quote.quoteTimeInLong ?? row.quoteTimeInLong,
+    tradeTimeInLong: quote.tradeTimeInLong ?? quote.tradeTime ?? row.tradeTimeInLong ?? row.tradeTime,
+    quoteTimeInLong: quote.quoteTimeInLong ?? quote.quoteTime ?? row.quoteTimeInLong ?? row.quoteTime,
     volatility: quote.volatility ?? row.volatility,
     delta: quote.delta ?? row.delta,
     strikePrice: quote.strikePrice ?? reference.strikePrice ?? row.strikePrice,
-    expirationDate: reference.expirationDate ?? quote.expirationDate ?? row.expirationDate,
+    expirationDate: reference.expirationDate
+      ?? quote.expirationDate
+      ?? row.expirationDate
+      ?? expirationFromParts(reference),
   };
   return normalizeOptionRecord(merged, null);
+}
+
+/**
+ * Quotes put the expiration on reference as year, month, and day.
+ * Chains use expirationDate or the map key. This does not change chain parsing.
+ */
+function expirationFromParts(reference: Record<string, unknown>): string | null {
+  const year = num(reference.expirationYear);
+  const month = num(reference.expirationMonth);
+  const day = num(reference.expirationDay);
+  if (year == null || month == null || day == null) return null;
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null;
+  if (year < 2000 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const text = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  const parsed = new Date(`${text}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() + 1 !== month || parsed.getUTCDate() !== day) return null;
+  return text;
 }
 
 function collectSide(map: unknown, putCall: PutCall, into: OptionContract[]): void {
