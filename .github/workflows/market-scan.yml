@@ -1,21 +1,18 @@
-# Calls the production scan every 15 minutes during US market hours.
-# Vercel cron stays in vercel.json. This is the backup caller.
+# Backup caller for the production scan. Manual only.
+# Vercel cron in vercel.json runs the scheduled scans every 15 minutes
+# during market hours. This workflow had no CRON_SECRET, so its schedule
+# failed on every run and sent "Run failed" emails. The schedule is off.
+#
+# To use it as a backup later:
+# 1. Add a GitHub Actions secret named CRON_SECRET with the same value
+#    already stored in Vercel (repo Settings, Secrets and variables, Actions).
+# 2. Put the schedule block back under "on:".
 # If a scan already finished in the last 10 minutes, the route exits
 # without reading Schwab, so the two callers do not double the request budget.
-#
-# Jena: add one GitHub Actions secret before this will run.
-# Name: CRON_SECRET
-# Where: GitHub repo → Settings → Secrets and variables → Actions → New repository secret
-# Value: the same CRON_SECRET already stored in Vercel. Do not paste it into the repo.
 
 name: Market scan
 
 on:
-  schedule:
-    # UTC. Covers 8:30am–3:20pm America/Chicago in both daylight and standard time.
-    - cron: "30,45 13 * * 1-5"
-    - cron: "*/15 14-20 * * 1-5"
-    - cron: "0 21 * * 1-5"
   workflow_dispatch:
 
 permissions:
