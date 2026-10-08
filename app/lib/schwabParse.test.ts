@@ -7,6 +7,7 @@ import {
   marketDataGetUrl,
   parseOptionChain,
   parsePriceHistory,
+  parseQuoteEntries,
   parseQuotes,
   parseTokenResponse,
   publicTokenStatus,
@@ -232,6 +233,13 @@ describe("quote and chain normalization", () => {
       },
     });
     expect(contracts).toHaveLength(1);
+    expect(parseQuoteEntries({
+      "SPY   261016C00570000": {
+        assetMainType: "OPTION",
+        quote: { bidPrice: 1.95, askPrice: 2.05, lastPrice: 2, strikePrice: 570 },
+        reference: { contractType: "C", expirationDate: expiration, strikePrice: 570 },
+      },
+    })[0].symbol).toBe("SPY   261016C00570000");
     expect(contracts[0]).toMatchObject({
       bid: 1.95,
       ask: 2.05,

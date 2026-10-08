@@ -269,16 +269,31 @@ export function parsePriceHistory(payload: unknown): PriceCandle[] {
   return out;
 }
 
-/** Option quotes become contracts. Equity and index quotes are skipped. */
-export function parseQuotes(payload: unknown): OptionContract[] {
+export interface ParsedQuote {
+  /** Response key. Schwab uses the OCC symbol, including the padded root. */
+  symbol: string;
+  contract: OptionContract;
+}
+
+/** Option quotes become contracts, still keyed by the symbol Schwab returned. Equity quotes are skipped. */
+export function parseQuoteEntries(payload: unknown): ParsedQuote[] {
   const root = asRecord(payload);
   if (!root) return [];
-  const contracts: OptionContract[] = [];
+  const quotes: ParsedQuote[] = [];
   const entries = Object.entries(root);
   for (let i = 0; i < entries.length; i++) {
     const contract = optionFromQuote(entries[i][1]);
-    if (contract) contracts.push(contract);
+    if (!contract) continue;
+    quotes.push({ symbol: entries[i][0], contract });
   }
+  return quotes;
+}
+
+/** Option quotes become contracts. Equity and index quotes are skipped. */
+export function parseQuotes(payload: unknown): OptionContract[] {
+  const entries = parseQuoteEntries(payload);
+  const contracts: OptionContract[] = [];
+  for (let i = 0; i < entries.length; i++) contracts.push(entries[i].contract);
   return contracts;
 }
 

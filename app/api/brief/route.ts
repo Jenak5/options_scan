@@ -8,6 +8,7 @@ import { getSchwabStatus } from "@/app/lib/schwab";
 import { readScanHealth, readShadowBookText, readTradeLogText } from "@/app/lib/schwabStore";
 import { parseShadowBook } from "@/app/lib/shadow";
 import { tastytradeEnabled } from "@/app/lib/tastytrade";
+import { quoteOpenPaperTrades } from "@/app/lib/tradeQuotes";
 import { parseTradeLog } from "@/app/lib/trades";
 
 export const dynamic = "force-dynamic";
@@ -16,8 +17,10 @@ export const dynamic = "force-dynamic";
  * Read-only brief for pre-market, midday, and the close.
  * Bearer HEALTH_TOKEN, or CRON_SECRET when HEALTH_TOKEN is unset.
  * No session cookie. No secrets in the body.
- * Marks come from shadows already stored. Nothing here calls Schwab for a quote,
- * calls Tastytrade, or places an order.
+ * Open paper trades get one batched Schwab quote, with a short timeout.
+ * Open scorecard shadows keep the mark stored by the 15-minute scan.
+ * This route does not write the trade log, the shadow book, alerts, or scan health.
+ * It does not call Tastytrade or place an order.
  */
 export async function GET(request: NextRequest) {
   if (!(await hasHealthBearer(request))) {
@@ -37,6 +40,7 @@ export async function GET(request: NextRequest) {
   ]);
   const shadows = parseShadowBook(shadowText).records;
   const trades = parseTradeLog(tradeText).trades;
+  const paperQuotes = await quoteOpenPaperTrades(trades).catch(() => ({}));
   const totals = countShadowTotals(shadows);
   const scan = buildHealthReport({
     health,
@@ -53,5 +57,6 @@ export async function GET(request: NextRequest) {
     trades,
     scan,
     now,
+    paperQuotes,
   }));
 }

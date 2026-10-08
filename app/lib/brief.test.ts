@@ -5,17 +5,21 @@ import { emptyCheckpoint, type StoredAlert } from "@/app/lib/alertBook";
 import { emptyFeatures } from "@/app/lib/alertFeatures";
 import { createSessionToken, SESSION_COOKIE_NAME } from "@/app/lib/auth";
 import {
+  LATEST_QUOTE_NOTE,
   MARKS_NOTE,
   NO_STORED_MARK_NOTE,
   NO_TRADES_NOTE,
   OPENING_UNRECORDED,
   buildMarketBrief,
+  storedMarkNote,
 } from "@/app/lib/brief";
 import { buildHealthReport } from "@/app/lib/healthReport";
-import { chicagoDate } from "@/app/lib/marketHours";
+import { chicagoDate, isChicagoMarketHours } from "@/app/lib/marketHours";
 import { emptyScanHealth } from "@/app/lib/scanHealth";
 import {
   clearMemoryStoreForTests,
+  readShadowBookText,
+  readTradeLogText,
   updateAlertBook,
   updateShadowBook,
   updateTradeLog,
@@ -23,6 +27,7 @@ import {
 } from "@/app/lib/schwabStore";
 import { shadowFromAlert, type ShadowTrade } from "@/app/lib/shadow";
 import * as schwab from "@/app/lib/schwab";
+import * as store from "@/app/lib/schwabStore";
 import * as quotes from "@/app/lib/tradeQuotes";
 import { addTrade, buildTrade, closeTrade, emptyTradeLog, type StoredTrade } from "@/app/lib/trades";
 import { middleware } from "@/middleware";
@@ -39,6 +44,9 @@ const ENV_KEYS = [
   "TASTYTRADE_CLIENT_SECRET",
   "TASTYTRADE_REFRESH_TOKEN",
   "TASTYTRADE_ACCOUNT_NUMBER",
+  "SCHWAB_CLIENT_ID",
+  "SCHWAB_CLIENT_SECRET",
+  "SCHWAB_REDIRECT_URI",
 ] as const;
 
 function alert(over: Partial<StoredAlert> = {}): StoredAlert {
@@ -145,10 +153,12 @@ function openPaper(input: {
   openedAt: number;
   alertId?: string | null;
   grade?: "A" | "B" | null;
+  putCall?: "call" | "put";
+  thesis?: string | null;
 }): StoredTrade {
   const built = buildTrade({
     ticker: input.ticker,
-    putCall: "call",
+    putCall: input.putCall ?? "call",
     strike: input.strike,
     expiration: input.expiration,
     contracts: 1,
@@ -156,7 +166,7 @@ function openPaper(input: {
     alertId: input.alertId ?? null,
     alertGrade: input.grade ?? "A",
     alertVerdict: "TAKE",
-    thesis: LEAK,
+    thesis: input.thesis === undefined ? LEAK : input.thesis,
   }, input.id, new Date(input.openedAt));
   if (!built.ok) throw new Error(built.error);
   return built.trade;
@@ -370,6 +380,7 @@ describe("market brief", () => {
       entryAt: "2026-10-01T15:00:00.000Z",
       mark: 2.2,
       markAt: "2026-10-07T17:45:00.000Z",
+      markSource: "stored",
       daysHeld: 4,
       flat: false,
       flatDayCount: 0,
@@ -392,6 +403,7 @@ describe("market brief", () => {
     expect(bare).toMatchObject({
       mark: null,
       markAt: null,
+      markSource: null,
       changePercent: null,
       distanceToTarget: null,
       distanceToStop: null,
@@ -424,9 +436,17 @@ describe("market brief", () => {
     expect(brief.paper.open[1]).toMatchObject({
       grade: "A",
       mark: 2.2,
-      markSource: "stored-shadow",
+      markSource: "stored",
+      markAsOf: "2026-10-07T17:45:00.000Z",
+      bid: null,
+      ask: null,
+      mid: null,
+      quotedAt: null,
+      quoteSession: null,
       unrealizedPnlDollars: 20,
-      note: null,
+      unrealizedPnlAtBid: null,
+      unrealizedPnlAtMid: null,
+      note: storedMarkNote("2026-10-07T17:45:00.000Z", NOW),
     });
     expect(brief.paper.open[1].changePercent).toBeCloseTo(10, 6);
     expect(brief.paper.open[0]).toMatchObject({
@@ -516,8 +536,16 @@ describe("market brief", () => {
       }),
       now: NOW,
     });
-    expect(brief.paper.open.find((row) => row.ticker === "SPY")?.mark).toBe(2.2);
-    expect(brief.paper.open.find((row) => row.ticker === "AMD")?.mark).toBeNull();
+    expect(brief.paper.open.find((row) => row.ticker === "SPY")).toMatchObject({
+      mark: 2.2,
+      markSource: "stored",
+      markAsOf: "2026-10-07T17:45:00.000Z",
+    });
+    expect(brief.paper.open.find((row) => row.ticker === "AMD")).toMatchObject({
+      mark: null,
+      markSource: null,
+      markAsOf: null,
+    });
     expect(brief.shadows.open.map((row) => row.ticker)).toEqual(["SPY", "SPY"]);
   });
 
@@ -633,6 +661,122 @@ describe("market brief", () => {
     expect(brief.shadows.resolvedToday).toEqual([]);
     expect(brief.shadows.resolvedThisWeek).toEqual([]);
   });
+
+  it("prices an open paper trade at the live bid and leaves the scorecard mark stored", () => {
+    const markedAt = Date.parse("2026-10-06T19:45:00.000Z");
+    const now = new Date("2026-10-08T16:00:00.000Z");
+    const nvda = nvdaPut();
+    const stale = nvdaShadow(markedAt);
+    const brief = buildMarketBrief({
+      alerts: [],
+      shadows: [stale],
+      trades: [nvda],
+      scan: emptyScan(),
+      now,
+      paperQuotes: {
+        [nvda.id]: {
+          bid: 6.5,
+          ask: 6.8,
+          mid: 6.65,
+          quotedAt: Date.parse("2026-10-08T15:55:00.000Z"),
+        },
+      },
+    });
+    const paper = brief.paper.open[0];
+    expect(paper).toMatchObject({
+      ticker: "NVDA",
+      contract: { type: "put", strike: 235, expiry: "2026-11-06" },
+      contracts: 1,
+      entryPrice: 6.95,
+      bid: 6.5,
+      ask: 6.8,
+      mid: 6.65,
+      quotedAt: "2026-10-08T15:55:00.000Z",
+      quoteSession: "regular",
+      mark: 6.5,
+      markAt: "2026-10-08T15:55:00.000Z",
+      markSource: "quote",
+      markAsOf: null,
+      unrealizedPnlDollars: -45,
+      unrealizedPnlAtBid: -45,
+      unrealizedPnlAtMid: -30,
+      note: null,
+    });
+    expect(paper?.targetPrice).toBeCloseTo(9.73, 6);
+    expect(paper?.stopPrice).toBeCloseTo(5.2125, 6);
+    expect(paper?.changePercentAtBid).toBeCloseTo(-6.47482014, 4);
+    expect(paper?.distanceToStopAtBid).toBeCloseTo(1.2875, 6);
+    expect(paper?.distanceToTargetAtBid).toBeCloseTo(3.23, 6);
+    expect(paper?.distanceToStop).toBeCloseTo(1.2875, 6);
+    expect(paper?.distanceToStopAtMid).toBeCloseTo(1.4375, 6);
+    expect(paper?.distanceToTargetAtMid).toBeCloseTo(3.08, 6);
+    expect(paper?.distanceToStopPercentAtBid).toBeGreaterThan(0);
+
+    const shadowRow = brief.shadows.open[0];
+    expect(shadowRow).toMatchObject({
+      ticker: "NVDA",
+      mark: 4.75,
+      markAt: "2026-10-06T19:45:00.000Z",
+      markSource: "stored",
+    });
+    expect(shadowRow?.distanceToStop).toBeLessThan(0);
+    expect(shadowRow?.changePercent).toBeCloseTo(((4.75 - 6.95) / 6.95) * 100, 4);
+  });
+
+  it("labels a quote outside the regular session as the latest one", () => {
+    const now = new Date("2026-10-08T21:30:00.000Z");
+    const nvda = nvdaPut();
+    const brief = buildMarketBrief({
+      alerts: [],
+      shadows: [],
+      trades: [nvda],
+      scan: emptyScan(),
+      now,
+      paperQuotes: {
+        [nvda.id]: { bid: 6.5, ask: 6.8, mid: 6.65, quotedAt: Date.parse("2026-10-08T20:00:00.000Z") },
+      },
+    });
+    expect(brief.paper.open[0]).toMatchObject({
+      markSource: "quote",
+      quoteSession: "latest",
+      markAsOf: null,
+      note: LATEST_QUOTE_NOTE,
+      unrealizedPnlAtBid: -45,
+    });
+  });
+
+  it("labels the stored mark, and its age, when the live quote is missing", () => {
+    const markedAt = Date.parse("2026-10-06T19:45:00.000Z");
+    const now = new Date("2026-10-08T16:00:00.000Z");
+    const nvda = nvdaPut();
+    const brief = buildMarketBrief({
+      alerts: [],
+      shadows: [nvdaShadow(markedAt)],
+      trades: [nvda],
+      scan: emptyScan(),
+      now,
+      paperQuotes: {},
+    });
+    const paper = brief.paper.open[0];
+    expect(paper).toMatchObject({
+      bid: null,
+      ask: null,
+      mid: null,
+      quotedAt: null,
+      quoteSession: null,
+      mark: 4.75,
+      markSource: "stored",
+      markAsOf: "2026-10-06T19:45:00.000Z",
+      unrealizedPnlDollars: -220,
+      unrealizedPnlAtBid: null,
+      unrealizedPnlAtMid: null,
+      note: storedMarkNote("2026-10-06T19:45:00.000Z", now),
+    });
+    expect(paper?.distanceToStop).toBeLessThan(0);
+    expect(paper?.changePercent).toBeCloseTo(((4.75 - 6.95) / 6.95) * 100, 4);
+    expect(paper?.note).toContain("44 hours old");
+    expect(paper?.note).toContain("Not a current quote");
+  });
 });
 
 describe("GET /api/brief", () => {
@@ -662,6 +806,7 @@ describe("GET /api/brief", () => {
 
     const chain = vi.spyOn(schwab, "getOptionChain").mockRejectedValue(new Error("brief must not call Schwab"));
     const marked = vi.spyOn(quotes, "quoteContractMarks").mockRejectedValue(new Error("brief must not quote"));
+    const quoted = vi.spyOn(schwab, "getQuoteEntries").mockRejectedValue(new Error("brief must not quote an empty log"));
 
     const day = chicagoDate(new Date());
     const row = alert({ tradingDay: day, sentAt: Date.now() });
@@ -711,6 +856,108 @@ describe("GET /api/brief", () => {
     expect(text).not.toContain("secret");
     expect(chain).not.toHaveBeenCalled();
     expect(marked).not.toHaveBeenCalled();
+    expect(quoted).not.toHaveBeenCalled();
+  });
+
+  it("returns a live bid, ask, and mid for an open paper trade and does not write", async () => {
+    rememberEnv(saved);
+    process.env.HEALTH_TOKEN = "health-token";
+    process.env.SCHWAB_CLIENT_ID = "schwab-client";
+    process.env.SCHWAB_CLIENT_SECRET = "schwab-secret";
+    process.env.SCHWAB_REDIRECT_URI = "https://options-scan.vercel.app/api/schwab/callback";
+    clearMemoryStoreForTests();
+
+    const markedAt = Date.parse("2026-10-06T19:45:00.000Z");
+    const trade = nvdaPut();
+    const shadowRow = nvdaShadow(markedAt);
+    expect(await updateTradeLog(() => JSON.stringify({ version: 1, trades: [trade] }))).toBe(true);
+    expect(await updateShadowBook(() => JSON.stringify({ version: 1, records: [shadowRow] }))).toBe(true);
+
+    const chain = vi.spyOn(schwab, "getOptionChain").mockRejectedValue(new Error("brief must not read a chain"));
+    const shadowQuotes = vi.spyOn(quotes, "quoteContractMarks").mockRejectedValue(new Error("brief must not mark shadows"));
+    const quoted = vi.spyOn(schwab, "getQuoteEntries").mockResolvedValue([{
+      symbol: "NVDA  261106P00235000",
+      contract: nvdaContract(),
+    }]);
+    const writes = spyOnWrites();
+    const tradeBefore = await readTradeLogText();
+    const shadowBefore = await readShadowBookText();
+
+    const response = await GET(new NextRequest("https://options-scan.vercel.app/api/brief", {
+      headers: { authorization: "Bearer health-token" },
+    }));
+    expect(response.status).toBe(200);
+    expect(await readTradeLogText()).toBe(tradeBefore);
+    expect(await readShadowBookText()).toBe(shadowBefore);
+    const body = await response.json();
+    expect(quoted).toHaveBeenCalledTimes(1);
+    expect(quoted.mock.calls[0][0]).toEqual(["NVDA  261106P00235000"]);
+    expect(chain).not.toHaveBeenCalled();
+    expect(shadowQuotes).not.toHaveBeenCalled();
+    expectNoWrites(writes);
+
+    const paper = body.paper.open[0];
+    expect(paper).toMatchObject({
+      ticker: "NVDA",
+      bid: 6.5,
+      ask: 6.8,
+      mid: 6.65,
+      quotedAt: "2026-10-08T15:55:00.000Z",
+      quoteSession: isChicagoMarketHours(new Date()) ? "regular" : "latest",
+      mark: 6.5,
+      markSource: "quote",
+      markAsOf: null,
+      unrealizedPnlAtBid: -45,
+      unrealizedPnlAtMid: -30,
+    });
+    expect(paper.distanceToStopAtBid).toBeGreaterThan(0);
+    expect(paper.targetPrice).toBeCloseTo(9.73, 6);
+    expect(paper.stopPrice).toBeCloseTo(5.2125, 6);
+    expect(body.shadows.open[0]).toMatchObject({
+      ticker: "NVDA",
+      mark: 4.75,
+      markSource: "stored",
+    });
+    expect(body.shadows.open[0].distanceToStop).toBeLessThan(0);
+    const text = JSON.stringify(body);
+    expect(text).not.toContain("schwab-secret");
+    expect(text).not.toContain("health-token");
+  });
+
+  it("labels the stored mark when Schwab does not return a quote, and still does not write", async () => {
+    rememberEnv(saved);
+    process.env.HEALTH_TOKEN = "health-token";
+    process.env.SCHWAB_CLIENT_ID = "schwab-client";
+    process.env.SCHWAB_CLIENT_SECRET = "schwab-secret";
+    process.env.SCHWAB_REDIRECT_URI = "https://options-scan.vercel.app/api/schwab/callback";
+    clearMemoryStoreForTests();
+
+    const markedAt = Date.parse("2026-10-06T19:45:00.000Z");
+    expect(await updateTradeLog(() => JSON.stringify({ version: 1, trades: [nvdaPut()] }))).toBe(true);
+    expect(await updateShadowBook(() => JSON.stringify({ version: 1, records: [nvdaShadow(markedAt)] }))).toBe(true);
+    vi.spyOn(schwab, "getQuoteEntries").mockRejectedValue(new Error("schwab down"));
+    const writes = spyOnWrites();
+    const tradeBefore = await readTradeLogText();
+    const shadowBefore = await readShadowBookText();
+
+    const response = await GET(new NextRequest("https://options-scan.vercel.app/api/brief", {
+      headers: { authorization: "Bearer health-token" },
+    }));
+    expect(response.status).toBe(200);
+    expect(await readTradeLogText()).toBe(tradeBefore);
+    expect(await readShadowBookText()).toBe(shadowBefore);
+    const paper = (await response.json()).paper.open[0];
+    expect(paper).toMatchObject({
+      mark: 4.75,
+      markSource: "stored",
+      markAsOf: "2026-10-06T19:45:00.000Z",
+      bid: null,
+      unrealizedPnlDollars: -220,
+    });
+    expect(paper.note).toContain("Stored scorecard mark");
+    expect(paper.note).toContain("Not a current quote");
+    expect(paper.distanceToStop).toBeLessThan(0);
+    expectNoWrites(writes);
   });
 
   it("accepts CRON_SECRET only when HEALTH_TOKEN is unset", async () => {
@@ -758,4 +1005,71 @@ function rememberEnv(saved: Record<string, string | undefined>): void {
   for (const key of ENV_KEYS) {
     if (!(key in saved)) saved[key] = process.env[key];
   }
+}
+
+function nvdaPut(): StoredTrade {
+  return openPaper({
+    id: "t_brief_nvda_put1",
+    ticker: "NVDA",
+    putCall: "put",
+    strike: 235,
+    expiration: "2026-11-06",
+    entry: 6.95,
+    openedAt: Date.parse("2026-10-06T15:00:00.000Z"),
+    thesis: null,
+  });
+}
+
+function nvdaShadow(markedAt: number): ShadowTrade {
+  return shadow({
+    id: "nvda-put-brief-0001",
+    alertId: "nvda-put-brief-0001",
+    ticker: "NVDA",
+    putCall: "put",
+    strike: 235,
+    expiration: "2026-11-06",
+    entryPrice: 6.95,
+    openedAt: Date.parse("2026-10-06T15:00:00.000Z"),
+    lastMark: 4.75,
+    lastMarkSource: "mid",
+    lastMarkedAt: markedAt,
+  });
+}
+
+function nvdaContract() {
+  return {
+    bid: 6.5,
+    ask: 6.8,
+    last: 6.6,
+    volume: 40,
+    openInterest: 200,
+    delta: null,
+    iv: null,
+    strike: 235,
+    expiration: "2026-11-06",
+    putCall: "put" as const,
+    quoteTime: Date.parse("2026-10-08T15:55:00.000Z"),
+  };
+}
+
+function spyOnWrites() {
+  return {
+    trades: vi.spyOn(store, "updateTradeLog"),
+    shadows: vi.spyOn(store, "updateShadowBook"),
+    alerts: vi.spyOn(store, "updateAlertBook"),
+    health: vi.spyOn(store, "writeScanHealth"),
+    tokens: vi.spyOn(store, "writeTokens"),
+    refresh: vi.spyOn(store, "commitRefreshedTokens"),
+    meta: vi.spyOn(store, "writeAlertMeta"),
+  };
+}
+
+function expectNoWrites(writes: ReturnType<typeof spyOnWrites>): void {
+  expect(writes.trades).not.toHaveBeenCalled();
+  expect(writes.shadows).not.toHaveBeenCalled();
+  expect(writes.alerts).not.toHaveBeenCalled();
+  expect(writes.health).not.toHaveBeenCalled();
+  expect(writes.tokens).not.toHaveBeenCalled();
+  expect(writes.refresh).not.toHaveBeenCalled();
+  expect(writes.meta).not.toHaveBeenCalled();
 }
