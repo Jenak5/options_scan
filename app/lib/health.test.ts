@@ -50,9 +50,25 @@ describe("health report", () => {
       learningSnapshotsToday: 1,
       resolvedShadows: 4,
       rulesVersion: 3,
+      marketDay: true,
+      reason: null,
     });
     expect(JSON.stringify(report)).not.toContain("token");
     expect(JSON.stringify(report)).not.toContain("secret");
+  });
+
+  it("reports a full-day holiday so a missing scan is expected", () => {
+    const report = buildHealthReport({
+      health: emptyScanHealth(),
+      schwabConnected: true,
+      tastytradeEnabled: false,
+      alerts: [],
+      openShadows: 0,
+      resolvedShadows: 0,
+      now: new Date("2026-11-26T15:00:00Z"),
+    });
+    expect(report.marketDay).toBe(false);
+    expect(report.reason).toBe("holiday");
   });
 
   it("counts open and resolved A/B shadows and skips the test book", () => {

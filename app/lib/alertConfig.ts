@@ -296,7 +296,8 @@ export const TRADE_RULES = {
   stopLossFraction: 0.25,
   /**
    * Get out when the trade is still flat after this many Chicago trading days.
-   * Weekends do not count. This is not the same-day cash-close checkpoint.
+   * Weekends and full-day NYSE holidays do not count. Early closes do.
+   * This is not the same-day cash-close checkpoint.
    */
   flatAfterTradingDays: 3,
   /**

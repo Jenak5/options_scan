@@ -13,7 +13,7 @@ import {
 } from "@/app/lib/flow";
 import { pinTodayAlerts } from "@/app/lib/flowAlerts";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
-import { chicagoDate, isChicagoMarketHours } from "@/app/lib/marketHours";
+import { chicagoDate, isChicagoMarketHours, isMarketDay, isNyseHoliday } from "@/app/lib/marketHours";
 import { noteBrowserScan, recordFlowPageSession } from "@/app/lib/pageScan";
 import { formatScanRunLine } from "@/app/lib/scanHealth";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
@@ -60,7 +60,7 @@ export async function GET(request: NextRequest) {
     const losses = risk.stop.consecutiveLosses;
     const graded = filterFlowRows(scan.rows, { minPremium, otmOnly, liquidOnly, limit })
       .map((row) => ({ ...row, verdict: gradeFlowRow(row, losses), alertId: null as string | null }));
-    const inSession = isChicagoMarketHours(now);
+    const inSession = isMarketDay(now) && isChicagoMarketHours(now);
     let recorded = { saved: 0, opened: 0, marked: 0, closed: 0 };
     if (inSession) {
       try {
@@ -95,7 +95,7 @@ export async function GET(request: NextRequest) {
         shadowsOpened: 0,
         shadowsMarked: 0,
         shadowsClosed: 0,
-        reason: "Flow page, outside Central market hours",
+        reason: isNyseHoliday(now) ? "Flow page, market holiday" : "Flow page, outside Central market hours",
       }));
     }
     let data = graded;

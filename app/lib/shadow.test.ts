@@ -187,6 +187,18 @@ describe("shadow exits", () => {
     expect(stale.exitPrice).toBe(1.2);
     expect(stale.exitQuote).toBe("bid");
   });
+
+  it("does not tick the 3-day flat stop on Thanksgiving, and does tick the half day", () => {
+    const opened = new Date("2026-11-24T15:00:00Z");
+    const friday = new Date("2026-11-27T15:00:00Z");
+    const monday = new Date("2026-11-30T15:00:00Z");
+    const shadow = openShadow({ openedAt: opened.getTime(), expiration: "2026-12-18" });
+    const halfDay = applyShadowQuote(shadow, { mid: 2, bid: 1.95 }, friday);
+    expect(halfDay.status).toBe("open");
+    const closed = applyShadowQuote(shadow, { mid: 2, bid: 1.95 }, monday);
+    expect(closed.exitReason).toBe("flat");
+    expect(closed.tradingDaysHeld).toBe(3);
+  });
 });
 
 describe("shadow scorecard", () => {

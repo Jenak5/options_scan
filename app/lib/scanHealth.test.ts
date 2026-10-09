@@ -94,6 +94,21 @@ describe("connection notice", () => {
     expect(notice.lines.join(" ")).toMatch(/30 minutes/);
   });
 
+  it("stays quiet on a full-day holiday during the usual session", () => {
+    const thanksgiving = Date.parse("2026-11-26T15:00:00Z");
+    const notice = connectionNotice({
+      configured: true,
+      connected: true,
+      refreshExpired: false,
+      warnRefreshSoon: false,
+      refreshDaysLeft: 5,
+      now: thanksgiving,
+      health: health({ lastSuccessAt: null }),
+    });
+    expect(notice.severity).toBe("ok");
+    expect(notice.lines).toEqual([]);
+  });
+
   it("stays quiet outside market hours when the last scan is old", () => {
     const notice = connectionNotice({
       configured: true,

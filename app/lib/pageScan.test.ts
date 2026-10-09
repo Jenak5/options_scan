@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isAlertGrade } from "@/app/lib/alertConfig";
 import { loadAlertBook } from "@/app/lib/alertStore";
+import * as alertStore from "@/app/lib/alertStore";
 import type { FlowRow } from "@/app/lib/flow";
-import { isChicagoMarketHours } from "@/app/lib/marketHours";
+import { isChicagoMarketHours, isMarketDay } from "@/app/lib/marketHours";
 import { chainInterestFromContracts } from "@/app/lib/openingCheck";
 import { recordDisplayedAlerts, recordFlowPageSession } from "@/app/lib/pageScan";
 import { EMPTY_PRINTS } from "@/app/lib/prints";
@@ -142,6 +143,32 @@ describe("Flow page alerts", () => {
     expect(page.rows[0].status).toBe("open");
     expect(page.rows[0].exitReason).toBeNull();
     expect(page.rows[0].mark).toBe(markAtOpen);
+  });
+
+  it("does not save or score on a full-day holiday during the usual session", async () => {
+    const thanksgiving = new Date("2026-11-26T15:00:00Z");
+    expect(isChicagoMarketHours(thanksgiving)).toBe(true);
+    expect(isMarketDay(thanksgiving)).toBe(false);
+    const load = vi.spyOn(alertStore, "loadAlertBook");
+    const recorded = await recordFlowPageSession([row()], null, null, thanksgiving);
+    expect(recorded).toEqual({ saved: 0, opened: 0, marked: 0, closed: 0 });
+    expect(load).not.toHaveBeenCalled();
+    expect((await loadAlertBook()).records).toHaveLength(0);
+  });
+
+  it("still scores on the day after Thanksgiving and on Columbus Day", async () => {
+    const halfDay = new Date("2026-11-27T15:00:00Z");
+    const columbus = new Date("2026-10-12T15:00:00Z");
+    expect(isMarketDay(halfDay)).toBe(true);
+    expect(isChicagoMarketHours(halfDay)).toBe(true);
+    expect(isMarketDay(columbus)).toBe(true);
+    expect(isChicagoMarketHours(columbus)).toBe(true);
+    const load = vi.spyOn(alertStore, "loadAlertBook");
+    await recordFlowPageSession([row({ expiration: "2026-12-18", dte: 21 })], null, null, halfDay);
+    expect(load).toHaveBeenCalled();
+    load.mockClear();
+    await recordFlowPageSession([row({ expiration: "2026-11-06", dte: 25 })], null, null, columbus);
+    expect(load).toHaveBeenCalled();
   });
 
   it("does not save a contract that is not an A or a B", async () => {

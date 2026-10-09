@@ -14,7 +14,7 @@ import { hasValidBearer } from "@/app/lib/auth";
 import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import { openMissingShadows, openScanTickers, recordExperimentalShadows, runShadowPass } from "@/app/lib/shadowStore";
-import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow } from "@/app/lib/marketHours";
+import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow, isMarketDay } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { readScanHealth, writeScanHealth } from "@/app/lib/schwabStore";
 import { emptyScanHealth, formatScanRunLine, scanSlotDecision, skipNotifyDue, skipTelegramText, skipWarning, type ScanHealth, type ScanRunSummary } from "@/app/lib/scanHealth";
@@ -34,7 +34,8 @@ export const maxDuration = 300;
 // Vercel cron hits this every 15 minutes from 13:30 through 21:00 UTC on
 // weekdays (see vercel.json). That window covers Central market hours in
 // both daylight and standard time. This handler then keeps only
-// 8:30am–3:00pm America/Chicago, Monday–Friday.
+// 8:30am–3:00pm America/Chicago, Monday–Friday, and returns before any
+// Schwab read on a full-day NYSE holiday. Early closes still run.
 // Each run scans the original 15 names, any open shadow or paper ticker,
 // and one group of the added names. maxDuration is 300 seconds.
 //
@@ -204,8 +205,14 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const isManual = request.nextUrl.searchParams.get("manual") === "true";
   const now = new Date();
+  // Weekends and full-day NYSE holidays are not market days. Stop before Schwab,
+  // the shadow book, alerts, or a learning snapshot. A manual flag does not override this.
+  if (!isMarketDay(now)) {
+    return NextResponse.json({ skipped: "market holiday" });
+  }
+
+  const isManual = request.nextUrl.searchParams.get("manual") === "true";
   const inSession = isChicagoMarketHours(now);
   const closeWindow = isChicagoMinuteWindow(
     now,

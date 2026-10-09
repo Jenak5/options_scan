@@ -96,6 +96,7 @@ export interface BriefOpenShadow {
   daysHeld: number;
   /**
    * Chicago trading days held while the latest mark is inside the flat dollar band.
+   * Weekends and full-day NYSE holidays do not count.
    * Zero when the latest mark is outside that band. Null when no mark is stored.
    */
   flatDayCount: number | null;
