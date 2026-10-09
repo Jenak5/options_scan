@@ -13,7 +13,7 @@ import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv } fr
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import { noteBrowserScan } from "@/app/lib/pageScan";
 import { markShadowsFromRows, openMissingShadows, openScanTickers } from "@/app/lib/shadowStore";
-import { chicagoDate } from "@/app/lib/marketHours";
+import { chicagoDate, isMarketDay } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { sendTelegramAlert, formatFlowAlert } from "@/app/lib/telegram";
 
@@ -36,10 +36,13 @@ export async function GET(request: NextRequest) {
       }
 
       case "scan": {
+        const now = new Date();
+        if (!isMarketDay(now)) {
+          return NextResponse.json({ skipped: "market holiday" });
+        }
         const minPremium = alertScanMinPremium(process.env.ALERT_MIN_PREMIUM);
         const otmOnly = process.env.ALERT_OTM_ONLY === "true";
         const watchlist = watchlistFromEnv(process.env.FLOW_WATCHLIST);
-        const now = new Date();
         const plan = planCronScan(watchlist, now, await openScanTickers());
         const scan = await scanEstimatedFlow({
           tickers: plan.tickers,

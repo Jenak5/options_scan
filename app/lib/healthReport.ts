@@ -1,5 +1,5 @@
 import type { StoredAlert } from "@/app/lib/alertBook";
-import { chicagoDate } from "@/app/lib/marketHours";
+import { chicagoDate, isMarketDay, isNyseHoliday } from "@/app/lib/marketHours";
 import { RULES_VERSION } from "@/app/lib/rulesVersion";
 import { latestScan, type ScanHealth, type ScanOutcome } from "@/app/lib/scanHealth";
 import { isExperimentShadow, type ShadowTrade } from "@/app/lib/shadow";
@@ -22,6 +22,10 @@ export interface HealthReport {
   learningSnapshotsToday: number;
   resolvedShadows: number;
   rulesVersion: number;
+  /** False on weekends and on full-day NYSE holidays. */
+  marketDay: boolean;
+  /** "holiday" on a full-day NYSE close, so a missing scan is expected. Otherwise null. */
+  reason: "holiday" | null;
 }
 
 export function buildHealthReport(input: {
@@ -57,6 +61,8 @@ export function buildHealthReport(input: {
     learningSnapshotsToday,
     resolvedShadows: input.resolvedShadows,
     rulesVersion: RULES_VERSION,
+    marketDay: isMarketDay(input.now),
+    reason: isNyseHoliday(input.now) ? "holiday" : null,
   };
 }
 

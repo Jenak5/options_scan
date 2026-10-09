@@ -1,4 +1,4 @@
-import { isChicagoMarketHours } from "@/app/lib/marketHours";
+import { isChicagoMarketHours, isMarketDay } from "@/app/lib/marketHours";
 
 /**
  * Plain-language Schwab and Tastytrade health.
@@ -211,7 +211,8 @@ export function connectionNotice(input: {
       lines.push(countdown);
     }
   }
-  const marketHours = isChicagoMarketHours(new Date(input.now));
+  const asOf = new Date(input.now);
+  const marketHours = isChicagoMarketHours(asOf) && isMarketDay(asOf);
   if (scanIsStale(input.now, input.health.lastSuccessAt, marketHours)) {
     if (severity === "ok") severity = "warn";
     const when = input.health.lastSuccessAt == null

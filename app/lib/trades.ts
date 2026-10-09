@@ -402,12 +402,9 @@ export function findOpenTradeForAlert(trades: readonly StoredTrade[], alertId: s
 }
 
 /**
- * Mark-to-market for an open trade. The mark is the option midpoint.
- * Closed trades keep their exit P/L and do not use the mark.
- */
-/**
  * Open paper trade that is still inside the flat dollar band after the
- * multi-day time stop. A missing mark is not called flat. A closed trade is not flagged.
+ * multi-day time stop. Weekends and full-day NYSE holidays do not count.
+ * A missing mark is not called flat. A closed trade is not flagged.
  */
 export function flatTimeStopDue(
   trade: Pick<StoredTrade, "openedAt" | "closedAt">,
@@ -420,6 +417,10 @@ export function flatTimeStopDue(
   return chicagoTradingDaysElapsed(new Date(trade.openedAt), now) >= TRADE_RULES.flatAfterTradingDays;
 }
 
+/**
+ * Mark-to-market for an open trade. The mark is the option midpoint.
+ * Closed trades keep their exit P/L and do not use the mark.
+ */
 export function withQuoteMark<T extends StoredTrade>(trade: T, mark: number | null): T & {
   mark: number | null;
   markSource: "mid" | null;

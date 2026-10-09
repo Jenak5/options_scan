@@ -6,7 +6,7 @@ import {
   indexSentAlerts,
 } from "@/app/lib/alertPolicy";
 import { selectAlertRows, type FlowRow } from "@/app/lib/flow";
-import { chicagoDate, isChicagoMarketHours } from "@/app/lib/marketHours";
+import { chicagoDate, isChicagoMarketHours, isMarketDay } from "@/app/lib/marketHours";
 import type { ChainInterest } from "@/app/lib/openingCheck";
 import { emptyScanHealth } from "@/app/lib/scanHealth";
 import { readScanHealth, writeScanHealth } from "@/app/lib/schwabStore";
@@ -19,7 +19,7 @@ import { formatFlowAlert, sendTelegramAlert } from "@/app/lib/telegram";
  * unless the scheduled scan also ran.
  * During weekdays 8:30–15:00 Central this writes the same A/B rows the scheduled
  * scan would save, opens their shadows, and marks them from the chain already in hand.
- * Outside that window it writes nothing. No extra Schwab read.
+ * Outside that window, and on a full-day NYSE holiday, it writes nothing. No extra Schwab read.
  */
 
 export interface PageScanRecord {
@@ -31,10 +31,10 @@ export interface PageScanRecord {
 
 /**
  * Persist what the Flow page just displayed.
- * Outside weekdays 8:30–15:00 Central this returns without writing.
- * The page can still show the chain. After-close quotes are not used to
- * save alerts, open or mark shadows, store a learning snapshot, or run the
- * next-day open-interest check.
+ * Outside weekdays 8:30–15:00 Central, and on a full-day NYSE holiday, this
+ * returns without writing. The page can still show the chain. After-close
+ * quotes and holiday sessions are not used to save alerts, open or mark
+ * shadows, store a learning snapshot, or run the next-day open-interest check.
  */
 export async function recordFlowPageSession(
   rows: readonly FlowRow[],
@@ -42,7 +42,7 @@ export async function recordFlowPageSession(
   consecutiveLosses: number | null,
   now: Date,
 ): Promise<PageScanRecord> {
-  if (!isChicagoMarketHours(now)) {
+  if (!isMarketDay(now) || !isChicagoMarketHours(now)) {
     return { saved: 0, opened: 0, marked: 0, closed: 0 };
   }
   const recorded = await recordDisplayedAlerts(rows, consecutiveLosses, now);
