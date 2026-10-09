@@ -112,6 +112,63 @@ describe("exit what-ifs", () => {
     expect(replayExit({ ...input, marks: [{ at: monday, price: 2.1 }] }, scenario("time5"))).toBeNull();
   });
 
+  it("lists +60% with a -35% stop immediately after the -35% stop row", () => {
+    expect(WHAT_IF_SCENARIOS.map((row) => row.id)).toEqual([
+      "tp25",
+      "tp40",
+      "tp60",
+      "stop20",
+      "stop25",
+      "stop35",
+      "tp60stop35",
+      "time2",
+      "time3",
+      "time5",
+      "trail25",
+    ]);
+    const rule = scenario("tp60stop35");
+    expect(rule.label).toBe("Take profit at +60%. Stop at -35%. Time stop stays 3 trading days.");
+    expect(rule.profitFraction).toBe(0.60);
+    expect(rule.stopFraction).toBe(-0.35);
+    expect(rule.flatDays).toBe(3);
+    expect(rule.trailArm).toBeNull();
+    expect(rule.trailGiveback).toBeNull();
+  });
+
+  it("takes +60% with a -35% stop, and keeps a -30% dip that a -25% stop exits", () => {
+    const hitsTarget = {
+      entryPrice: 2,
+      openedAt: OPEN,
+      expiration: EXPIRATION,
+      marks: [
+        { at: OPEN + 60 * 60_000, price: 2.8 },
+        { at: OPEN + 2 * 60 * 60_000, price: 3.2 },
+      ],
+    };
+    expect(replayExit(hitsTarget, scenario("tp60stop35"))?.pnlDollars).toBeCloseTo(120);
+    expect(replayExit(hitsTarget, scenario("stop35"))?.pnlDollars).toBeCloseTo(80);
+
+    const dipped = {
+      entryPrice: 2,
+      openedAt: OPEN,
+      expiration: EXPIRATION,
+      marks: [
+        { at: OPEN + 60_000, price: 1.4 },
+        { at: OPEN + 2 * 60_000, price: 2.2 },
+      ],
+    };
+    expect(replayExit(dipped, scenario("tp60stop35"))).toBeNull();
+    expect(replayExit(dipped, scenario("tp60"))?.pnlDollars).toBeCloseTo(-60);
+    expect(replayExit(dipped, scenario("stop25"))?.pnlDollars).toBeCloseTo(-60);
+
+    const recovered = {
+      ...dipped,
+      marks: [...dipped.marks, { at: OPEN + 3 * 60_000, price: 3.2 }],
+    };
+    expect(replayExit(recovered, scenario("tp60stop35"))?.pnlDollars).toBeCloseTo(120);
+    expect(replayExit(recovered, scenario("tp60"))?.pnlDollars).toBeCloseTo(-60);
+  });
+
   it("trails after a snapshot is up 25%", () => {
     const exit = replayExit({
       entryPrice: 2,
@@ -157,14 +214,19 @@ describe("exit what-ifs", () => {
     expect(report.included).toBe(1);
     expect(report.skipped).toBe(1);
     expect(report.pathNote).toMatch(/left out/i);
+    expect(report.scenarios.map((row) => row.id)).toEqual(WHAT_IF_SCENARIOS.map((row) => row.id));
     const tp25 = report.scenarios.find((row) => row.id === "tp25");
     const tp60 = report.scenarios.find((row) => row.id === "tp60");
+    const tp60stop35 = report.scenarios.find((row) => row.id === "tp60stop35");
     expect(tp25?.resolved).toBe(1);
     expect(tp25?.wins).toBe(1);
     expect(tp25?.tooFew).toBe(true);
     expect(tp60?.resolved).toBe(0);
     expect(tp60?.unresolved).toBe(1);
     expect(tp60?.winRate).toBeNull();
+    expect(tp60stop35?.resolved).toBe(0);
+    expect(tp60stop35?.unresolved).toBe(1);
+    expect(tp60stop35?.winRate).toBeNull();
 
     const many = [];
     for (let i = 0; i < 30; i++) {
@@ -176,5 +238,6 @@ describe("exit what-ifs", () => {
     const trusted = whatIfFromShadows(many);
     expect(trusted.scenarios.find((row) => row.id === "tp25")?.tooFew).toBe(false);
     expect(trusted.scenarios.find((row) => row.id === "tp60")?.tooFew).toBe(true);
+    expect(trusted.scenarios.find((row) => row.id === "tp60stop35")?.tooFew).toBe(true);
   });
 });
