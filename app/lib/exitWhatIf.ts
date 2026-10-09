@@ -68,6 +68,8 @@ export const WHAT_IF_SCENARIOS: readonly WhatIfScenario[] = [
   scenario("stop20", "Stop at -20%. Take profit stays +40%. Time stop stays 3 trading days.", 0.40, -0.20, 3, null, null),
   scenario("stop25", "Stop at -25%. Take profit stays +40%. Time stop stays 3 trading days.", 0.40, -0.25, 3, null, null),
   scenario("stop35", "Stop at -35%. Take profit stays +40%. Time stop stays 3 trading days.", 0.40, -0.35, 3, null, null),
+  scenario("tp45stop35", "Take profit at +45%. Stop at -35%. Time stop stays 3 trading days.", 0.45, -0.35, 3, null, null),
+  scenario("tp50stop35", "Take profit at +50%. Stop at -35%. Time stop stays 3 trading days.", 0.50, -0.35, 3, null, null),
   scenario("tp60stop35", "Take profit at +60%. Stop at -35%. Time stop stays 3 trading days.", 0.60, -0.35, 3, null, null),
   scenario("time2", "Time stop after 2 trading days. Take profit stays +40%. Stop stays -25%.", 0.40, -0.25, 2, null, null),
   scenario("time3", "Time stop after 3 trading days. Take profit stays +40%. Stop stays -25%.", 0.40, -0.25, 3, null, null),
