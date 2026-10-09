@@ -112,7 +112,7 @@ describe("exit what-ifs", () => {
     expect(replayExit({ ...input, marks: [{ at: monday, price: 2.1 }] }, scenario("time5"))).toBeNull();
   });
 
-  it("lists +60% with a -35% stop immediately after the -35% stop row", () => {
+  it("lists the -35% stop take-profit rows as +40%, +45%, +50%, then +60%", () => {
     expect(WHAT_IF_SCENARIOS.map((row) => row.id)).toEqual([
       "tp25",
       "tp40",
@@ -120,19 +120,35 @@ describe("exit what-ifs", () => {
       "stop20",
       "stop25",
       "stop35",
+      "tp45stop35",
+      "tp50stop35",
       "tp60stop35",
       "time2",
       "time3",
       "time5",
       "trail25",
     ]);
-    const rule = scenario("tp60stop35");
-    expect(rule.label).toBe("Take profit at +60%. Stop at -35%. Time stop stays 3 trading days.");
-    expect(rule.profitFraction).toBe(0.60);
-    expect(rule.stopFraction).toBe(-0.35);
-    expect(rule.flatDays).toBe(3);
-    expect(rule.trailArm).toBeNull();
-    expect(rule.trailGiveback).toBeNull();
+    const tp45 = scenario("tp45stop35");
+    expect(tp45.label).toBe("Take profit at +45%. Stop at -35%. Time stop stays 3 trading days.");
+    expect(tp45.profitFraction).toBe(0.45);
+    expect(tp45.stopFraction).toBe(-0.35);
+    expect(tp45.flatDays).toBe(3);
+    expect(tp45.trailArm).toBeNull();
+    expect(tp45.trailGiveback).toBeNull();
+    const tp50 = scenario("tp50stop35");
+    expect(tp50.label).toBe("Take profit at +50%. Stop at -35%. Time stop stays 3 trading days.");
+    expect(tp50.profitFraction).toBe(0.50);
+    expect(tp50.stopFraction).toBe(-0.35);
+    expect(tp50.flatDays).toBe(3);
+    expect(tp50.trailArm).toBeNull();
+    expect(tp50.trailGiveback).toBeNull();
+    const tp60 = scenario("tp60stop35");
+    expect(tp60.label).toBe("Take profit at +60%. Stop at -35%. Time stop stays 3 trading days.");
+    expect(tp60.profitFraction).toBe(0.60);
+    expect(tp60.stopFraction).toBe(-0.35);
+    expect(tp60.flatDays).toBe(3);
+    expect(tp60.trailArm).toBeNull();
+    expect(tp60.trailGiveback).toBeNull();
   });
 
   it("takes +60% with a -35% stop, and keeps a -30% dip that a -25% stop exits", () => {
@@ -167,6 +183,36 @@ describe("exit what-ifs", () => {
     };
     expect(replayExit(recovered, scenario("tp60stop35"))?.pnlDollars).toBeCloseTo(120);
     expect(replayExit(recovered, scenario("tp60"))?.pnlDollars).toBeCloseTo(-60);
+  });
+
+  it("takes +45% with a -35% stop on a path that never reaches +60%", () => {
+    const input = {
+      entryPrice: 2,
+      openedAt: OPEN,
+      expiration: EXPIRATION,
+      marks: [
+        { at: OPEN + 60_000, price: 2.7 },
+        { at: OPEN + 2 * 60_000, price: 2.9 },
+      ],
+    };
+    expect(replayExit(input, scenario("tp45stop35"))?.pnlDollars).toBeCloseTo(90);
+    expect(replayExit(input, scenario("tp50stop35"))).toBeNull();
+    expect(replayExit(input, scenario("tp60stop35"))).toBeNull();
+  });
+
+  it("takes +50% with a -35% stop on a path that never reaches +60%", () => {
+    const input = {
+      entryPrice: 2,
+      openedAt: OPEN,
+      expiration: EXPIRATION,
+      marks: [
+        { at: OPEN + 60_000, price: 2.9 },
+        { at: OPEN + 2 * 60_000, price: 3 },
+      ],
+    };
+    expect(replayExit(input, scenario("tp45stop35"))?.pnlDollars).toBeCloseTo(90);
+    expect(replayExit(input, scenario("tp50stop35"))?.pnlDollars).toBeCloseTo(100);
+    expect(replayExit(input, scenario("tp60stop35"))).toBeNull();
   });
 
   it("trails after a snapshot is up 25%", () => {
