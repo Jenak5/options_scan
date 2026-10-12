@@ -1,4 +1,5 @@
 import { loadAlertBook } from "@/app/lib/alertStore";
+import { selectPathMarkShadows, shadowPathStillNeeded } from "@/app/lib/exitWhatIf";
 import { openingLabelsById } from "@/app/lib/openingCheck";
 import { quoteContractMarks } from "@/app/lib/tradeQuotes";
 import { parseTradeLog } from "@/app/lib/trades";
@@ -7,6 +8,7 @@ import type { FlowRow } from "@/app/lib/flow";
 import {
   addMissingShadows,
   addShadowRecords,
+  appendShadowPathMark,
   applyShadowQuote,
   attachMissingFeatures,
   contractKey,
@@ -138,6 +140,15 @@ function applyRowMarks(
   let closed = 0;
   const nowMs = now.getTime();
   const records = book.records.map((shadow) => {
+    if (shadow.status === "closed") {
+      if (!shadowPathStillNeeded(shadow, now) || markedTooRecently(shadow, nowMs)) return shadow;
+      const quote = quotes.get(contractKey(shadow));
+      if (!quote) return shadow;
+      const updated = appendShadowPathMark(shadow, quote, now);
+      if (updated === shadow) return shadow;
+      marked += 1;
+      return updated;
+    }
     if (shadow.status !== "open") return shadow;
     if (shadow.lastMarkedAt != null && nowMs >= shadow.lastMarkedAt && nowMs - shadow.lastMarkedAt < MARK_REUSE_MS) {
       return shadow;
@@ -167,6 +178,10 @@ export async function openMissingShadows(): Promise<{ opened: number; saved: boo
 
 /**
  * Open a shadow for every new A or B, then mark the open ones and apply the exit rules.
+ * Resolved A/B shadows keep a quote path for what-if replays until those replays
+ * finish, or until the trading-day or expiry cap. That path uses the same quote
+ * batch as the open shadows, with its own small cap. A resolved shadow stays
+ * resolved on its original exit.
  * Quote work is outside the store write so a retried save does not fetch the chain again.
  */
 export async function runShadowPass(now: Date): Promise<ShadowPassResult> {
@@ -174,11 +189,19 @@ export async function runShadowPass(now: Date): Promise<ShadowPassResult> {
   const synced = addMissingShadows(parseShadowBook(currentText), alertBook.records);
   const withFeatures = attachMissingFeatures(synced.book.records, alertBook.records);
   const featured: ShadowBook = { version: 1, records: withFeatures };
-  const due = shadowsToQuote(featured.records);
+  const openDue = shadowsToQuote(featured.records);
+  const pathDue = selectPathMarkShadows(featured.records, openDue, now);
+  const due = openDue.concat(pathDue);
   const dueIds = new Set(due.map((row) => row.id));
   const quotes = await quoteContractMarks(due.map(asQuotable));
   const quotedIds = new Set<string>();
   const nextRecords = featured.records.map((row) => {
+    if (row.status === "closed") {
+      if (!dueIds.has(row.id)) return row;
+      const quote = quotes[row.id] ?? null;
+      if (quote) quotedIds.add(contractKey(row));
+      return appendShadowPathMark(row, quote, now);
+    }
     if (row.status !== "open") return row;
     if (!dueIds.has(row.id)) return applyShadowQuote(row, null, now);
     const quote = quotes[row.id] ?? null;
@@ -253,6 +276,15 @@ function asQuotable(row: ShadowTrade): {
     expiration: row.expiration,
     closedAt: null,
   };
+}
+
+function markedTooRecently(shadow: ShadowTrade, nowMs: number): boolean {
+  const marks = shadow.marks ?? [];
+  let at = shadow.lastMarkedAt;
+  for (let i = 0; i < marks.length; i++) {
+    if (at == null || marks[i].at > at) at = marks[i].at;
+  }
+  return at != null && nowMs >= at && nowMs - at < MARK_REUSE_MS;
 }
 
 function countClosed(before: readonly ShadowTrade[], after: readonly ShadowTrade[]): number {

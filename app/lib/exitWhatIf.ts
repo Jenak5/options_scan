@@ -1,8 +1,8 @@
 import { TRADE_RULES } from "@/app/lib/alertConfig";
-import { calendarDaysBetween, newYorkDate } from "@/app/lib/flow";
+import { calendarDaysBetween, newYorkDate, SHADOW_QUOTES_PER_RUN } from "@/app/lib/flow";
 import { chicagoTradingDaysElapsed } from "@/app/lib/marketHours";
 import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
-import { LAST_WEEK_CALENDAR_DAYS, SHADOW_MIN_TRUST, type ShadowTrade } from "@/app/lib/shadow";
+import { contractKey, isExperimentShadow, LAST_WEEK_CALENDAR_DAYS, SHADOW_MIN_TRUST, type ShadowTrade } from "@/app/lib/shadow";
 
 /**
  * Replay stored shadow marks under other exit rules.
@@ -60,6 +60,19 @@ interface ReplayExit {
 }
 
 const PRICE_EPS = 1e-6;
+
+/**
+ * Stop extending a resolved shadow's path after this many Chicago trading days
+ * from entry. Weekends and full-day NYSE holidays do not count. The longest
+ * replay waits 5 trading days; this cap is the backstop.
+ */
+export const PATH_MARK_TRADING_DAY_CAP = 7;
+
+/**
+ * Resolved shadows quoted for a what-if path on one run, in the same batch as
+ * open shadows. Open shadows keep their own cap. This does not add a second pass.
+ */
+export const PATH_MARK_QUOTES_PER_RUN = 4;
 
 export const WHAT_IF_SCENARIOS: readonly WhatIfScenario[] = [
   scenario("tp25", "Take profit at +25%. Stop stays -25%. Time stop stays 3 trading days.", 0.25, -0.25, 3, null, null),
@@ -190,6 +203,84 @@ function summarize(rule: WhatIfScenario, rows: readonly ShadowTrade[]): WhatIfRe
     totalPnl: total,
     tooFew: resolved < SHADOW_MIN_TRUST,
   };
+}
+
+/**
+ * True when a resolved A/B shadow still needs real quotes for a replay.
+ * A shadow with no stored path is left out. Missed quotes are not filled in.
+ * Past expiration, or the trading-day cap, ends the path even if a replay is open.
+ */
+export function shadowPathStillNeeded(row: ShadowTrade, now: Date): boolean {
+  if (row.status !== "closed" || isExperimentShadow(row)) return false;
+  if (!(row.entryPrice > 0) || !Number.isFinite(row.entryPrice)) return false;
+  const marks = row.marks ?? [];
+  if (marks.length === 0) return false;
+  if (chicagoTradingDaysElapsed(new Date(row.openedAt), now) >= PATH_MARK_TRADING_DAY_CAP) return false;
+  const dte = calendarDaysBetween(newYorkDate(now), row.expiration);
+  if (dte != null && dte < 0) return false;
+  return !pathScenariosResolved(row);
+}
+
+function pathScenariosResolved(row: ShadowTrade): boolean {
+  const input = {
+    entryPrice: row.entryPrice,
+    openedAt: row.openedAt,
+    expiration: row.expiration,
+    marks: row.marks ?? [],
+  };
+  for (let i = 0; i < WHAT_IF_SCENARIOS.length; i++) {
+    if (replayExit(input, WHAT_IF_SCENARIOS[i]) == null) return false;
+  }
+  return true;
+}
+
+/**
+ * Closed shadows to mark this run. Open shadows are already chosen.
+ * At most PATH_MARK_QUOTES_PER_RUN new contracts, and never past the open cap
+ * plus that bound. A contract the open set already quotes is included for free.
+ */
+export function selectPathMarkShadows(
+  rows: readonly ShadowTrade[],
+  alreadyQuoted: readonly ShadowTrade[],
+  now: Date,
+  uniqueCeiling: number = SHADOW_QUOTES_PER_RUN + PATH_MARK_QUOTES_PER_RUN,
+): ShadowTrade[] {
+  const seen = new Set<string>();
+  for (let i = 0; i < alreadyQuoted.length; i++) seen.add(contractKey(alreadyQuoted[i]));
+  const candidates = rows.filter((row) => shadowPathStillNeeded(row, now)).slice().sort(byPathAge);
+  const out: ShadowTrade[] = [];
+  let added = 0;
+  for (let i = 0; i < candidates.length; i++) {
+    const row = candidates[i];
+    const key = contractKey(row);
+    if (seen.has(key)) {
+      out.push(row);
+      continue;
+    }
+    if (added >= PATH_MARK_QUOTES_PER_RUN || seen.size >= uniqueCeiling) continue;
+    seen.add(key);
+    added += 1;
+    out.push(row);
+  }
+  return out;
+}
+
+function byPathAge(a: ShadowTrade, b: ShadowTrade): number {
+  const age = latestMarkAt(a) - latestMarkAt(b);
+  if (age !== 0) return age;
+  if (a.openedAt !== b.openedAt) return a.openedAt - b.openedAt;
+  if (a.id < b.id) return -1;
+  if (a.id > b.id) return 1;
+  return 0;
+}
+
+function latestMarkAt(row: ShadowTrade): number {
+  const marks = row.marks ?? [];
+  let latest = 0;
+  for (let i = 0; i < marks.length; i++) {
+    if (marks[i].at > latest) latest = marks[i].at;
+  }
+  return latest;
 }
 
 function cappedStop(entry: number, stopFraction: number): number {
