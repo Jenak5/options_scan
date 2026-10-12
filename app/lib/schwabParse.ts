@@ -128,7 +128,7 @@ export function publicTokenStatus(input: {
   }
   if (input.refreshExpiresAt == null) {
     const memoryNote = input.storage === "memory"
-      ? " Token storage is in-memory until Vercel KV, Upstash, or Vercel Blob is set."
+      ? " Token storage is in-memory until Vercel Edge Config, Vercel KV, Upstash, or Vercel Blob is set."
       : "";
     return {
       ...base,

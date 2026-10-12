@@ -100,11 +100,14 @@ Set every secret in Vercel as a **Sensitive** variable. Do not leave them readab
 | `SCHWAB_CLIENT_ID` | Yes | Schwab Market Data app key |
 | `SCHWAB_CLIENT_SECRET` | Yes | Schwab Market Data app secret |
 | `SCHWAB_REDIRECT_URI` | Yes | Must match the callback URL registered on the Schwab app |
-| `KV_REST_API_URL` | Yes | Vercel KV REST URL. Used when both KV variables are set. |
-| `KV_REST_API_TOKEN` | Yes | Vercel KV REST token. Used when both KV variables are set. |
-| `UPSTASH_REDIS_REST_URL` | Yes | Upstash Redis REST URL. Used when the KV pair is not complete and both Upstash variables are set. |
-| `UPSTASH_REDIS_REST_TOKEN` | Yes | Upstash Redis REST token. Used when the KV pair is not complete and both Upstash variables are set. |
-| `BLOB_READ_WRITE_TOKEN` | Yes | Private Vercel Blob token. Used when neither Redis pair is complete. |
+| `EDGE_CONFIG` or `GLOBAL_CONFIG` | Yes | Edge Config connection string. Vercel sets this when the store is connected to the project. Token reads use it. |
+| `VERCEL_API_TOKEN` | Yes | Vercel API token used to write the Schwab token into Edge Config. Not the connection-string read token. |
+| `VERCEL_TEAM_ID` | No | Team id that owns the Edge Config. The write URL needs it for a team store. |
+| `KV_REST_API_URL` | Yes | Vercel KV REST URL. Used for the token when Edge Config is not configured and both KV variables are set. |
+| `KV_REST_API_TOKEN` | Yes | Vercel KV REST token. Used for the token when Edge Config is not configured and both KV variables are set. |
+| `UPSTASH_REDIS_REST_URL` | Yes | Upstash Redis REST URL. Used when Edge Config and the KV pair are not complete and both Upstash variables are set. |
+| `UPSTASH_REDIS_REST_TOKEN` | Yes | Upstash Redis REST token. Used when Edge Config and the KV pair are not complete and both Upstash variables are set. |
+| `BLOB_READ_WRITE_TOKEN` | Yes | Private Vercel Blob token. Document store for alerts, shadows, flow snapshots, the trade log, and scan health. Also the read fallback for a Schwab token that has not been copied to Edge Config yet. |
 | `ALERT_MIN_PREMIUM` | No | Minimum estimated flow premium (volume × mid × 100) before a contract is considered for a Telegram alert. Default $50,000, the B floor. An A still needs $100,000 at grade time. |
 | `ALERT_OTM_ONLY` | No | When `true`, alerts also require the contract to be out of the money |
 | `ALERT_MAX_PER_DAY` | No | Max Telegram alerts per Chicago trading day. Default 5. Only 1–50 is accepted. |
@@ -155,17 +158,25 @@ If the session cookie is missing on the callback, she goes to `/login?next=/api/
 
 ### Where the tokens live
 
-Set **one** of these pairs. Names are exact:
+The Schwab token is encrypted with a key derived from `SESSION_SECRET`. It does not live in Blob once Edge Config is configured.
 
-| Store | Environment variables |
-|-------|------------------------|
-| Vercel KV | `KV_REST_API_URL` and `KV_REST_API_TOKEN` |
-| Upstash Redis | `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` |
-| Vercel Blob | `BLOB_READ_WRITE_TOKEN` |
+| Store | Environment variables | Role |
+|-------|------------------------|------|
+| Vercel Edge Config | `EDGE_CONFIG` or `GLOBAL_CONFIG`, plus `VERCEL_API_TOKEN`. Team stores also need `VERCEL_TEAM_ID`. | Token read and write. Preferred. |
+| Vercel KV | `KV_REST_API_URL` and `KV_REST_API_TOKEN` | Token, if Edge Config is not configured. Also the document store. |
+| Upstash Redis | `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` | Same REST API as KV, used when the KV pair is incomplete. |
+| Vercel Blob | `BLOB_READ_WRITE_TOKEN` | Alert book, shadows, flow snapshots, trade log, and scan health. Token read fallback at `schwab/tokens.json` until the first successful copy. |
 
-A complete KV pair wins. Otherwise a complete Upstash pair. Otherwise `BLOB_READ_WRITE_TOKEN`. The value written there is encrypted with a key derived from `SESSION_SECRET`. Blob is a private store. The encrypted envelope lives at a fixed pathname, `schwab/tokens.json`. Reads bypass the CDN cache, because a refresh token rotates and a stale copy must not be written back over a newer one.
+This project does not have an Edge Config store or a KV/Upstash database yet. Blob is the document store. Create the token store like this. Do not invent the secret values, and do not commit them.
 
-If none of those are set **in production** (including on Vercel), the app does **not** fall back to process memory. Memory does not survive across serverless instances, so a connection saved that way looks lost on the next request. The dashboard banner says storage is not configured and names `KV_REST_API_URL`, `KV_REST_API_TOKEN`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, and `BLOB_READ_WRITE_TOKEN`. Connect and the callback refuse to save a token until one store is set.
+1. Vercel dashboard → the team that owns **options-scan** → **Storage** → **Create** → **Edge Config** (Global Config). Name it `options-scan-tokens`.
+2. Connect that store to the **options-scan** project for Production and Preview. Connecting it sets `EDGE_CONFIG` (or `GLOBAL_CONFIG`). Leave that value Sensitive.
+3. Vercel → **Account Settings** → **Tokens** → create a token that can access this team. On the project, add Sensitive `VERCEL_API_TOKEN` for Production and Preview. This is not the read token inside `EDGE_CONFIG`.
+4. Add `VERCEL_TEAM_ID` for Production and Preview. The value is the team id from **Team Settings** (it looks like `team_...`). The write calls `PATCH /v1/edge-config/{id}/items?teamId=`.
+
+Until those three exist, token reads still try Blob, a warm instance keeps the access token in memory until it is within 90 seconds of expiry, and a Blob 429 does not throw. Reconnect cannot leave Blob until `VERCEL_API_TOKEN` is set. After it is set, Reconnect writes Edge Config, and a later read copies `schwab/tokens.json` once if Edge Config is still empty.
+
+A warm function keeps the decrypted token in memory and does not read the store again until the access token is inside that 90-second window. That is also when the Schwab refresh runs. Alert books and the other JSON files stay on Blob. There is no `list()` call. Repeated reads of the same file inside one cron or Flow request are cached, and a put is skipped when the JSON is unchanged. Scan health is still read from the store so another instance's finished scan stays visible.
 
 Process memory is only for local development, when `NODE_ENV` is not `production` and `VERCEL` is not `1`. A restart drops that token.
 

@@ -9,7 +9,7 @@ import {
 import { redirectPath } from "@/app/lib/redirect";
 import { safeNextPath } from "@/app/lib/safeNext";
 import { SCHWAB_STATE_COOKIE, exchangeAuthorizationCode } from "@/app/lib/schwab";
-import { resolveStoreKind, writeTokens } from "@/app/lib/schwabStore";
+import { resolveTokenBackend, writeTokens } from "@/app/lib/schwabStore";
 
 export const dynamic = "force-dynamic";
 
@@ -32,7 +32,7 @@ export async function GET(request: NextRequest) {
 
   if (params.get("error")) return finish("/?schwab=error&reason=denied");
 
-  if (resolveStoreKind() === "unconfigured") {
+  if (resolveTokenBackend() === "unconfigured") {
     return finish("/?schwab=error&reason=storage");
   }
 
