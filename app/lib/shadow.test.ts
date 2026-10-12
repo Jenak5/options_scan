@@ -1,7 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { emptyCheckpoint, type StoredAlert } from "@/app/lib/alertBook";
 import { TRADE_RULES } from "@/app/lib/alertConfig";
 import { planExits } from "@/app/lib/exits";
+import {
+  PATH_MARK_QUOTES_PER_RUN,
+  replayExit,
+  selectPathMarkShadows,
+  shadowPathStillNeeded,
+  WHAT_IF_SCENARIOS,
+  whatIfFromShadows,
+} from "@/app/lib/exitWhatIf";
 import { SHADOW_QUOTES_PER_RUN } from "@/app/lib/flow";
 import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import {
@@ -13,12 +21,14 @@ import {
 } from "@/app/lib/schwabStore";
 import {
   addMissingShadows,
+  appendShadowPathMark,
   applyShadowQuote,
   emptyShadowBook,
   LAST_WEEK_CALENDAR_DAYS,
   markFromQuote,
   mergeShadowBooks,
   parseShadowBook,
+  SHADOW_MARK_CAP,
   shadowFromAlert,
   shadowsToCsv,
   shadowsToQuote,
@@ -26,6 +36,7 @@ import {
   type ShadowTrade,
 } from "@/app/lib/shadow";
 import { loadShadowPage, openMissingShadows, openScanTickers, runShadowPass, shadowCsv } from "@/app/lib/shadowStore";
+import * as tradeQuotes from "@/app/lib/tradeQuotes";
 import { addTrade, buildTrade, emptyTradeLog } from "@/app/lib/trades";
 
 const OPEN = new Date("2026-10-01T15:00:00Z");
@@ -260,6 +271,147 @@ describe("shadow scorecard", () => {
     expect(merged.records[0].status).toBe("closed");
     expect(parseShadowBook(JSON.stringify(merged)).records[0].exitReason).toBe("profit");
   });
+
+  it("keeps marking a live -25% stop so the -35% replay can resolve, without changing the scorecard", () => {
+    const stopped = applyShadowQuote(openShadow({ rulesVersion: 3 }), { mid: 1.5, bid: 1.45 }, OPEN);
+    expect(stopped.status).toBe("closed");
+    expect(stopped.exitReason).toBe("stop");
+    expect(stopped.exitPrice).toBeCloseTo(1.5, 6);
+    expect(stopped.pnlDollars).toBeCloseTo(-50, 6);
+    expect(TRADE_RULES.stopLossFraction).toBe(0.25);
+    expect(TRADE_RULES.profitTargetFraction).toBe(0.4);
+
+    const replayInput = {
+      entryPrice: stopped.entryPrice,
+      openedAt: stopped.openedAt,
+      expiration: stopped.expiration,
+      marks: stopped.marks ?? [],
+    };
+    const stop35 = WHAT_IF_SCENARIOS.find((row) => row.id === "stop35");
+    const stop25 = WHAT_IF_SCENARIOS.find((row) => row.id === "stop25");
+    if (!stop35 || !stop25) throw new Error("missing scenario");
+    expect(replayExit(replayInput, stop35)).toBeNull();
+    expect(replayExit(replayInput, stop25)?.pnlDollars).toBeCloseTo(-50, 6);
+    const before = whatIfFromShadows([stopped]);
+    expect(before.scenarios.find((row) => row.id === "stop35")).toMatchObject({ resolved: 0, unresolved: 1 });
+
+    const untouched = applyShadowQuote(stopped, { mid: 1.3, bid: 1.25 }, new Date(OPEN.getTime() + 15 * 60_000));
+    expect(untouched).toBe(stopped);
+
+    const later = new Date(OPEN.getTime() + 2 * 60 * 60_000);
+    const continued = appendShadowPathMark(stopped, { mid: 1.3, bid: 1.25 }, later);
+    const { marks, ...live } = stopped;
+    const { marks: path, ...after } = continued;
+    expect(after).toEqual(live);
+    expect(marks).toEqual([{ at: OPEN.getTime(), price: 1.5 }]);
+    expect(path).toEqual([
+      { at: OPEN.getTime(), price: 1.5 },
+      { at: later.getTime(), price: 1.3 },
+    ]);
+    expect(path).toHaveLength(2);
+
+    const cardBefore = summarizeShadows([stopped], new Set(), later);
+    const cardAfter = summarizeShadows([continued], new Set(), later);
+    expect(cardAfter.resolved).toBe(cardBefore.resolved);
+    expect(cardAfter.wins).toBe(0);
+    expect(cardAfter.losses).toBe(1);
+    expect(cardAfter.totalPnl).toBeCloseTo(-50, 6);
+    expect(cardAfter.rows[0].exitReason).toBe("stop");
+    expect(cardAfter.rows[0].exitPrice).toBeCloseTo(1.5, 6);
+    expect(cardAfter.rows[0].pnlDollars).toBeCloseTo(cardBefore.rows[0].pnlDollars ?? 0, 6);
+    expect(continued.rulesVersion).toBe(3);
+
+    const continuedReplay = { ...replayInput, marks: path ?? [] };
+    expect(replayExit(continuedReplay, stop25)?.pnlDollars).toBeCloseTo(-50, 6);
+    expect(replayExit(continuedReplay, stop35)?.pnlDollars).toBeCloseTo(-70, 6);
+    const afterReport = whatIfFromShadows([continued]);
+    expect(afterReport.scenarios.find((row) => row.id === "stop35")).toMatchObject({ resolved: 1, unresolved: 0 });
+    expect(afterReport.included).toBe(1);
+
+    const blank = { ...stopped, id: "blankpath00000001", alertId: "blankpath00000001", marks: [] };
+    expect(shadowPathStillNeeded(blank, later)).toBe(false);
+    expect(whatIfFromShadows([blank]).skipped).toBe(1);
+    expect(whatIfFromShadows([blank]).scenarios.find((row) => row.id === "stop35")?.resolved).toBe(0);
+  });
+
+  it("stops the extra path at the trading-day cap, expiry, or when every replay has an exit", () => {
+    const stopped = applyShadowQuote(openShadow({ expiration: "2026-12-18", rulesVersion: 3 }), { mid: 1.5, bid: 1.45 }, OPEN);
+    expect(shadowPathStillNeeded(stopped, new Date("2026-10-09T15:00:00Z"))).toBe(true);
+    expect(shadowPathStillNeeded(stopped, new Date("2026-10-12T15:00:00Z"))).toBe(false);
+
+    const thanksgivingOpen = new Date("2026-11-25T15:00:00Z");
+    const overHoliday = applyShadowQuote(openShadow({
+      id: "holidaypath0000001",
+      alertId: "holidaypath0000001",
+      openedAt: thanksgivingOpen.getTime(),
+      expiration: "2026-12-18",
+    }), { mid: 1.5, bid: 1.45 }, thanksgivingOpen);
+    expect(shadowPathStillNeeded(overHoliday, new Date("2026-12-04T15:00:00Z"))).toBe(true);
+    expect(shadowPathStillNeeded(overHoliday, new Date("2026-12-07T15:00:00Z"))).toBe(false);
+
+    const expired = applyShadowQuote(openShadow({ expiration: "2026-10-08" }), { mid: 1.5, bid: 1.45 }, OPEN);
+    expect(shadowPathStillNeeded(expired, new Date("2026-10-09T15:00:00Z"))).toBe(false);
+
+    const resolved = appendShadowPathMark(stopped, { mid: 1.3, bid: 1.25 }, new Date(OPEN.getTime() + 15 * 60_000));
+    expect(shadowPathStillNeeded(resolved, new Date(OPEN.getTime() + 15 * 60_000))).toBe(false);
+
+    expect(SHADOW_MARK_CAP).toBeGreaterThanOrEqual(8 * 27);
+    let held = stopped;
+    for (let i = 0; i < SHADOW_MARK_CAP - 1; i++) {
+      held = appendShadowPathMark(held, { mid: 1.4, bid: 1.35 }, new Date(OPEN.getTime() + (i + 1) * 60_000));
+    }
+    expect(held.marks?.[0]).toEqual({ at: OPEN.getTime(), price: 1.5 });
+    expect(held.exitPrice).toBe(stopped.exitPrice);
+  });
+
+  it("quotes resolved shadows in the open batch, without taking an open slot or inventing a path", () => {
+    const stopped = applyShadowQuote(openShadow({ rulesVersion: 3 }), { mid: 1.5, bid: 1.45 }, OPEN);
+    const open: ShadowTrade[] = [];
+    for (let i = 0; i < SHADOW_QUOTES_PER_RUN; i++) {
+      open.push(openShadow({
+        id: `1727790001000-T${i}|2026-10-16|100|call`,
+        alertId: `1727790001000-T${i}|2026-10-16|100|call`,
+        ticker: `T${i}`,
+        strike: 100 + i,
+      }));
+    }
+    const openDue = shadowsToQuote(open.concat([stopped]));
+    expect(openDue).toHaveLength(SHADOW_QUOTES_PER_RUN);
+    expect(openDue.every((row) => row.status === "open")).toBe(true);
+    const withFullBook = selectPathMarkShadows(open.concat([stopped]), openDue, OPEN);
+    expect(withFullBook.map((row) => row.id)).toEqual([stopped.id]);
+
+    const waiting: ShadowTrade[] = [];
+    for (let i = 0; i < PATH_MARK_QUOTES_PER_RUN + 1; i++) {
+      const at = OPEN.getTime() + i * 60_000;
+      waiting.push(applyShadowQuote(openShadow({
+        id: `pathwait${String(i).padStart(8, "0")}`,
+        alertId: `pathwait${String(i).padStart(8, "0")}`,
+        ticker: "IWM",
+        strike: 200 + i,
+        expiration: "2026-12-18",
+      }), { mid: 1.5, bid: 1.45 }, new Date(at)));
+    }
+    const chosen = selectPathMarkShadows(waiting, [], new Date("2026-10-02T15:00:00Z"));
+    expect(chosen).toHaveLength(PATH_MARK_QUOTES_PER_RUN);
+    expect(chosen.map((row) => row.id)).toEqual(waiting.slice(0, PATH_MARK_QUOTES_PER_RUN).map((row) => row.id));
+    expect(PATH_MARK_QUOTES_PER_RUN + SHADOW_QUOTES_PER_RUN).toBeLessThanOrEqual(20);
+
+    const tampered = appendShadowPathMark(stopped, { mid: 1.3, bid: 1.25 }, new Date(OPEN.getTime() + 60_000));
+    const merged = mergeShadowBooks(
+      { version: 1, records: [stopped] },
+      { version: 1, records: [{ ...tampered, exitPrice: 1.3, pnlDollars: -70, status: "open", closedAt: null, exitReason: null }] },
+    );
+    expect(merged.records[0].status).toBe("closed");
+    expect(merged.records[0].exitPrice).toBe(stopped.exitPrice);
+    expect(merged.records[0].pnlDollars).toBe(stopped.pnlDollars);
+    expect(merged.records[0].marks?.map((mark) => mark.price)).toEqual([1.5, 1.3]);
+    const rewritten = mergeShadowBooks(
+      { version: 1, records: [stopped] },
+      { version: 1, records: [{ ...stopped, marks: [{ at: OPEN.getTime() + 60_000, price: 1.3 }] }] },
+    );
+    expect(rewritten.records[0].marks).toEqual(stopped.marks);
+  });
 });
 
 describe("shadow store", () => {
@@ -323,6 +475,55 @@ describe("shadow store", () => {
     const closed = { ...built.trade, id: "t_openscanclosed1", ticker: "AAPL", closedAt: OPEN.getTime(), exitPrice: 2 };
     expect(await updateTradeLog(() => JSON.stringify(addTrade(addTrade(emptyTradeLog(), built.trade), closed)))).toBe(true);
     expect(await openScanTickers()).toEqual(["HOOD", "DIA"]);
+  });
+
+  it("saves continued marks for a stopped shadow and leaves the live exit in the book", async () => {
+    const stopped = applyShadowQuote(openShadow({ rulesVersion: 3 }), { mid: 1.5, bid: 1.45 }, OPEN);
+    const stillOpen = openShadow({
+      id: "openpath0000000001",
+      alertId: "openpath0000000001",
+      ticker: "QQQ",
+      putCall: "put",
+      strike: 500,
+      expiration: "2026-11-20",
+    });
+    expect(await updateShadowBook(() => JSON.stringify({ version: 1, records: [stopped, stillOpen] }))).toBe(true);
+    const later = new Date(OPEN.getTime() + 15 * 60_000);
+    const quoted = vi.spyOn(tradeQuotes, "quoteContractMarks").mockImplementation(async (trades) => {
+      expect(trades.every((trade) => trade.closedAt == null)).toBe(true);
+      return {
+        [stopped.id]: { mid: 1.3, bid: 1.25 },
+        [stillOpen.id]: { mid: 2.1, bid: 2.05 },
+      };
+    });
+    const first = await runShadowPass(later);
+    expect(quoted).toHaveBeenCalledTimes(1);
+    expect(quoted.mock.calls[0][0].map((trade) => trade.id).slice().sort()).toEqual([stillOpen.id, stopped.id].sort());
+    expect(first.closed).toBe(0);
+    expect(first.quoted).toBe(2);
+    const saved = parseShadowBook(await readShadowBookText()).records;
+    const closed = saved.find((row) => row.id === stopped.id);
+    const open = saved.find((row) => row.id === stillOpen.id);
+    expect(closed?.status).toBe("closed");
+    expect(closed?.exitReason).toBe("stop");
+    expect(closed?.exitPrice).toBeCloseTo(1.5, 6);
+    expect(closed?.pnlDollars).toBeCloseTo(-50, 6);
+    expect(closed?.pnlFraction).toBeCloseTo(stopped.pnlFraction ?? 0, 6);
+    expect(closed?.closedAt).toBe(stopped.closedAt);
+    expect(closed?.tradingDaysHeld).toBe(stopped.tradingDaysHeld);
+    expect(closed?.rulesVersion).toBe(3);
+    expect(closed?.marks?.map((mark) => mark.price)).toEqual([1.5, 1.3]);
+    expect(open?.status).toBe("open");
+    expect(open?.marks?.map((mark) => mark.price)).toEqual([2.1]);
+
+    const again = await runShadowPass(new Date(later.getTime() + 15 * 60_000));
+    expect(again.closed).toBe(0);
+    expect(quoted).toHaveBeenCalledTimes(2);
+    expect(quoted.mock.calls[1][0].map((trade) => trade.id)).toEqual([stillOpen.id]);
+    const reread = parseShadowBook(await readShadowBookText()).records.find((row) => row.id === stopped.id);
+    expect(reread?.marks?.map((mark) => mark.price)).toEqual([1.5, 1.3]);
+    expect(reread?.pnlDollars).toBeCloseTo(-50, 6);
+    quoted.mockRestore();
   });
 
   it("does not replace an unreadable scorecard", async () => {

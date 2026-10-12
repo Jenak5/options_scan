@@ -20,8 +20,13 @@ export const SHADOW_MIN_TRUST = 30;
 /** Once this many calendar days remain, the shadow is closed. That is the last week. */
 export const LAST_WEEK_CALENDAR_DAYS = 7;
 
-/** About five sessions of 15-minute marks. Older marks are dropped from the front. */
-export const SHADOW_MARK_CAP = 140;
+/**
+ * Marks kept on one shadow. Older marks are dropped from the front.
+ * The entry session plus 7 later trading days of 15-minute marks,
+ * including the cash-close pass, is 216 quotes. 220 leaves that path intact
+ * so a what-if replay can still see the live exit.
+ */
+export const SHADOW_MARK_CAP = 220;
 
 export const SHADOW_ESTIMATE_NOTE =
   "These results are estimates from quotes (the midpoint, or the bid when the midpoint is missing), not fills. Open shadows are marked every 15 minutes, and the option chain is only a snapshot, so an exit can show up late.";
@@ -290,10 +295,25 @@ export function markFromQuote(quote: ShadowQuote | null): { price: number; sourc
 }
 
 /**
+ * Append one quote to a closed shadow's stored path.
+ * The live exit, P/L, rules version, and scorecard fields stay as they were.
+ * This does not invent the quotes that were missed after the exit.
+ */
+export function appendShadowPathMark(row: ShadowTrade, quote: ShadowQuote | null, now: Date): ShadowTrade {
+  if (row.status !== "closed") return row;
+  const marked = markFromQuote(quote);
+  if (!marked) return row;
+  const marks = appendMark(row.marks, { at: now.getTime(), price: marked.price });
+  if (marks.length === (row.marks ?? []).length) return row;
+  return { ...row, marks };
+}
+
+/**
  * Apply one fresh quote, then the current exit rules for a single contract.
  * Half of one contract is the whole trade, so the profit target closes it.
  * The stop price comes from planExits, which already caps the planned loss at $875.
  * The recorded P/L uses the quote, which can be past that stop because this is a snapshot.
+ * A closed shadow is left unchanged. Continued path marks use appendShadowPathMark.
  */
 export function applyShadowQuote(row: ShadowTrade, quote: ShadowQuote | null, now: Date): ShadowTrade {
   if (row.status === "closed") return row;
@@ -376,10 +396,30 @@ export function mergeShadowBooks(latest: ShadowBook, edited: ShadowBook): Shadow
   for (let i = 0; i < edited.records.length; i++) {
     const row = edited.records[i];
     const prior = byId.get(row.id);
-    if (prior && prior.status === "closed") continue;
+    if (prior && prior.status === "closed") {
+      byId.set(row.id, keepClosedExit(prior, row));
+      continue;
+    }
     byId.set(row.id, row);
   }
   return { version: 1, records: trimShadows(Array.from(byId.values())) };
+}
+
+/** A closed shadow keeps the exit already saved. A longer stored path may be added. */
+function keepClosedExit(prior: ShadowTrade, edited: ShadowTrade): ShadowTrade {
+  const marks = extendedPath(prior.marks, edited.marks);
+  if (!marks) return prior;
+  return { ...prior, marks };
+}
+
+function extendedPath(prior: ShadowMark[] | undefined, edited: ShadowMark[] | undefined): ShadowMark[] | null {
+  const base = prior ?? [];
+  const next = edited ?? [];
+  if (next.length <= base.length) return null;
+  for (let i = 0; i < base.length; i++) {
+    if (base[i].at !== next[i].at || base[i].price !== next[i].price) return null;
+  }
+  return next;
 }
 
 export function summarizeShadows(
