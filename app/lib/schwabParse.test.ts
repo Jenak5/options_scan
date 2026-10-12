@@ -214,6 +214,9 @@ describe("refresh window", () => {
     expect(status.storageWarning).toContain("UPSTASH_REDIS_REST_URL");
     expect(status.storageWarning).toContain("UPSTASH_REDIS_REST_TOKEN");
     expect(status.storageWarning).toContain("BLOB_READ_WRITE_TOKEN");
+    expect(status.storageWarning).toContain("EDGE_CONFIG");
+    expect(status.storageWarning).toContain("VERCEL_API_TOKEN");
+    expect(status.storageWarning).toContain("VERCEL_TEAM_ID");
     expect(status.message).toContain("not configured");
     expect(JSON.stringify(status).includes("fixture")).toBe(false);
   });

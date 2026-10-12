@@ -17,6 +17,7 @@ import { chicagoDate, isChicagoMarketHours, isMarketDay, isNyseHoliday } from "@
 import { noteBrowserScan, recordFlowPageSession } from "@/app/lib/pageScan";
 import { formatScanRunLine } from "@/app/lib/scanHealth";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
+import { withBlobReadCache } from "@/app/lib/schwabStore";
 import { gradeFlowRow } from "@/app/lib/verdict";
 
 export const dynamic = "force-dynamic";
@@ -27,6 +28,10 @@ export const maxDuration = 300;
  * Session required. Read-only. No order endpoint.
  */
 export async function GET(request: NextRequest) {
+  return withBlobReadCache(() => handleFlow(request));
+}
+
+async function handleFlow(request: NextRequest) {
   const denied = await denyIfUnauthorized(request);
   if (denied) return denied;
 

@@ -1,13 +1,26 @@
 /**
  * Exact env var names for the Schwab token store.
- * Selection order is a complete KV pair, then a complete Upstash pair,
- * then BLOB_READ_WRITE_TOKEN. See resolveStoreKind.
+ * Token reads and writes prefer Edge Config when GLOBAL_CONFIG or EDGE_CONFIG
+ * is set together with VERCEL_API_TOKEN. Otherwise a complete KV pair, then a
+ * complete Upstash pair, then BLOB_READ_WRITE_TOKEN. Alert books and the other
+ * JSON documents stay on that document store. See resolveTokenBackend.
  */
 export const SCHWAB_KV_URL_ENV = "KV_REST_API_URL";
 export const SCHWAB_KV_TOKEN_ENV = "KV_REST_API_TOKEN";
 export const SCHWAB_UPSTASH_URL_ENV = "UPSTASH_REDIS_REST_URL";
 export const SCHWAB_UPSTASH_TOKEN_ENV = "UPSTASH_REDIS_REST_TOKEN";
 export const SCHWAB_BLOB_TOKEN_ENV = "BLOB_READ_WRITE_TOKEN";
+
+/** Connection string Vercel injects when a Global Config (Edge Config) store is connected. */
+export const SCHWAB_EDGE_CONFIG_ENV = "EDGE_CONFIG";
+/** Newer name for the same connection string. Checked before EDGE_CONFIG. */
+export const SCHWAB_GLOBAL_CONFIG_ENV = "GLOBAL_CONFIG";
+/** Bearer token for PATCH /v1/edge-config/{id}/items. Not the Edge Config read token. */
+export const SCHWAB_VERCEL_API_TOKEN_ENV = "VERCEL_API_TOKEN";
+/** Team that owns the Edge Config. Required on the write URL for a team store. */
+export const SCHWAB_VERCEL_TEAM_ID_ENV = "VERCEL_TEAM_ID";
+/** Edge Config item key. Letters, digits, and underscores only. */
+export const SCHWAB_EDGE_TOKEN_KEY = "schwabTokens";
 
 /** Fixed private-blob pathname for the encrypted token envelope. */
 export const SCHWAB_BLOB_TOKEN_PATH = "schwab/tokens.json";
@@ -50,7 +63,7 @@ export const SCHWAB_BLOB_STORE_STATUS_PATH = "schwab/store-status.json";
  */
 export const SCHWAB_BLOB_CACHE_CONTROL_MAX_AGE = 60;
 
-export type SchwabStoreKind = "kv" | "blob" | "memory" | "unconfigured";
+export type SchwabStoreKind = "edge" | "kv" | "blob" | "memory" | "unconfigured";
 
 export const SCHWAB_STORAGE_UNCONFIGURED_MESSAGE =
-  "Schwab token storage is not configured. Set KV_REST_API_URL and KV_REST_API_TOKEN (Vercel KV), or UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN (Upstash Redis), or BLOB_READ_WRITE_TOKEN (Vercel Blob). In-memory storage is not used in production, so the connection was not saved.";
+  "Schwab token storage is not configured. Set EDGE_CONFIG (or GLOBAL_CONFIG) and VERCEL_API_TOKEN (Vercel Edge Config; team stores also need VERCEL_TEAM_ID), or KV_REST_API_URL and KV_REST_API_TOKEN (Vercel KV), or UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN (Upstash Redis), or BLOB_READ_WRITE_TOKEN (Vercel Blob). In-memory storage is not used in production, so the connection was not saved.";

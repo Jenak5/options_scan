@@ -9,14 +9,13 @@ import {
   screenQueueLimit,
 } from "@/app/lib/alertPolicy";
 import { currentDailyLoss, loadAlertBook, recordOpeningChecks, rememberSentAlert } from "@/app/lib/alertStore";
-import { lastAlertBookWriteError, noteAlertSentUnsaved } from "@/app/lib/schwabStore";
+import { lastAlertBookWriteError, noteAlertSentUnsaved, readScanHealth, withBlobReadCache, writeScanHealth } from "@/app/lib/schwabStore";
 import { hasValidBearer } from "@/app/lib/auth";
 import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import { openMissingShadows, openScanTickers, recordExperimentalShadows, runShadowPass } from "@/app/lib/shadowStore";
 import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow, isMarketDay } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
-import { readScanHealth, writeScanHealth } from "@/app/lib/schwabStore";
 import { emptyScanHealth, formatScanRunLine, scanSlotDecision, skipNotifyDue, skipTelegramText, skipWarning, type ScanHealth, type ScanRunSummary } from "@/app/lib/scanHealth";
 import { sendTelegramAlert } from "@/app/lib/telegram";
 import { probeTastytrade, tastytradeEnabled } from "@/app/lib/tastytrade";
@@ -199,6 +198,10 @@ async function sendTelegram(message: string): Promise<boolean> {
 
 // ── Main handler ──────────────────────────────────────────────────────────
 export async function GET(request: NextRequest) {
+  return withBlobReadCache(() => handleCron(request));
+}
+
+async function handleCron(request: NextRequest) {
   // Step 1 auth: Bearer only. Do not read ?secret= or x-cron-secret.
   if (!(await hasValidBearer(request))) {
     console.info(formatScanRunLine(emptySummary("unauthorized", "Bearer token rejected.")));

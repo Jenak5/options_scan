@@ -6,6 +6,7 @@ import {
   clearMemoryStoreForTests,
   readScanHealth,
   setSchwabBlobClientForTests,
+  withBlobReadCache,
   writeScanHealth,
   type SchwabBlobClient,
   type SchwabBlobGetResult,
@@ -116,6 +117,31 @@ describe("scan health shared store", () => {
     expect(line.includes("vercel_blob_rw_secret")).toBe(false);
     expect((await readScanHealth()).lastRunAt).toBeNull();
     expect((await readScanHealth()).lastShadowAt).toBeNull();
+  });
+
+  it("re-reads scan health inside one request so a slot claim sees the write", async () => {
+    process.env.BLOB_READ_WRITE_TOKEN = "fixture-blob-token";
+    const mock = createBlobMock();
+    setSchwabBlobClientForTests(mock.client);
+    const now = Date.parse("2026-10-12T14:00:00.000Z");
+    await withBlobReadCache(async () => {
+      expect(await writeScanHealth({
+        ...emptyScanHealth(),
+        lastRunAt: now,
+        lastOutcome: "success",
+        runStartedAt: now,
+      })).toBe(true);
+      expect((await readScanHealth()).runStartedAt).toBe(now);
+      mock.files.set(SCHWAB_BLOB_STORE_STATUS_PATH, {
+        body: statusBody({
+          lastRunAt: now,
+          lastOutcome: "success",
+          runStartedAt: now + 1,
+        }),
+        etag: "etag-other-instance",
+      });
+      expect((await readScanHealth()).runStartedAt).toBe(now + 1);
+    });
   });
 });
 

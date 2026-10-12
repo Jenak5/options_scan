@@ -1,4 +1,5 @@
 import { PRINT_RULES } from "@/app/lib/alertConfig";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   BlobAccessError,
   BlobNotFoundError,
@@ -21,10 +22,15 @@ import {
   SCHWAB_BLOB_TRADE_LOG_PATH,
   SCHWAB_BLOB_TOKEN_ENV,
   SCHWAB_BLOB_TOKEN_PATH,
+  SCHWAB_EDGE_CONFIG_ENV,
+  SCHWAB_EDGE_TOKEN_KEY,
+  SCHWAB_GLOBAL_CONFIG_ENV,
   SCHWAB_KV_TOKEN_ENV,
   SCHWAB_KV_URL_ENV,
   SCHWAB_UPSTASH_TOKEN_ENV,
   SCHWAB_UPSTASH_URL_ENV,
+  SCHWAB_VERCEL_API_TOKEN_ENV,
+  SCHWAB_VERCEL_TEAM_ID_ENV,
   type SchwabStoreKind,
 } from "@/app/lib/schwabStorage";
 import type { AlertBookNotice } from "@/app/lib/storeStatus";
@@ -32,10 +38,20 @@ import type { AlertBookNotice } from "@/app/lib/storeStatus";
 /**
  * Server-side Schwab token store.
  *
- * Production, in order: a complete Vercel KV pair, a complete Upstash Redis
- * pair (same REST API), then a private Vercel Blob store
- * (BLOB_READ_WRITE_TOKEN). The token JSON is encrypted with a key derived
- * from SESSION_SECRET before it is written. Values are never logged.
+ * The Schwab token prefers Vercel Edge Config (GLOBAL_CONFIG or EDGE_CONFIG
+ * for reads, VERCEL_API_TOKEN for writes). Otherwise a complete Vercel KV
+ * pair, a complete Upstash Redis pair, then a private Vercel Blob store.
+ * The token JSON is encrypted with a key derived from SESSION_SECRET before
+ * it is written. Values are never logged. A warm instance keeps the token
+ * in memory until the access token is near expiry. Blob remains a read
+ * fallback for a token that has not been copied yet. A Blob 429 does not
+ * throw and does not discard a token this instance already holds.
+ *
+ * Alert books, the trade log, shadows, and flow snapshots stay on the
+ * document store (KV, then Blob). Those reads are cached for the current
+ * request. Scan health is not: the cron confirms its own slot write, and a
+ * later read in the same request must see another instance's overwrite.
+ * A put is skipped when the JSON did not change.
  *
  * Blob reads pass useCache: false so a refresh does not follow a stale CDN
  * copy. That flag only adds ?cache=0. It does not change the ETag.
@@ -68,6 +84,10 @@ const TRADE_LOG_KEY = "oes:trade:log";
 const SHADOW_BOOK_KEY = "oes:alert:shadows";
 const BLOB_WRITE_ATTEMPTS = 4;
 const JSON_CONDITIONAL_ATTEMPTS = 3;
+/** Re-read the token store only inside this window before access-token expiry. */
+const TOKEN_CACHE_SKEW_MS = 90_000;
+/** After a Blob 429, skip further token Blob reads on this instance for a short time. */
+const TOKEN_BLOB_BACKOFF_MS = 20_000;
 const STORE_STATUS_KEY = "oes:store:status";
 /** Holds the full flow watchlist so a rotated scan still has the prior volume. */
 const FLOW_SNAPSHOT_MAX_TICKERS = 48;
@@ -166,6 +186,7 @@ export interface SchwabBlobClient {
 type BlobRead =
   | { state: "missing" }
   | { state: "error" }
+  | { state: "rate-limited" }
   | { state: "corrupt"; etag: string }
   | { state: "ok"; etag: string; envelope: TokenEnvelope };
 
@@ -197,6 +218,31 @@ function defaultBlobClient(): SchwabBlobClient {
 let blobClient: SchwabBlobClient = defaultBlobClient();
 let memoryStoreStatus: PersistedStoreStatus | null = null;
 
+interface TokenCache {
+  tokens: StoredTokens | null;
+  alerts: AlertMeta;
+}
+
+let tokenCache: TokenCache | null = null;
+let tokenBlobBlockedUntil = 0;
+let blobMigrationAttempted = false;
+let rateLimitLogged = false;
+
+interface BlobTextCacheEntry {
+  text: string | null;
+}
+
+const blobReadCache = new AsyncLocalStorage<Map<string, BlobTextCacheEntry>>();
+
+/**
+ * Share Blob document reads for one request. A warm instance must not reuse
+ * the map on the next request, so callers enter it at the start of the handler.
+ */
+export function withBlobReadCache<T>(run: () => Promise<T>): Promise<T> {
+  if (blobReadCache.getStore()) return run();
+  return blobReadCache.run(new Map(), run);
+}
+
 /** Tests inject a fake put/get/del client. Pass null to restore the SDK. */
 export function setSchwabBlobClientForTests(next: SchwabBlobClient | null): void {
   blobClient = next ?? defaultBlobClient();
@@ -219,6 +265,10 @@ export function clearMemoryStoreForTests(): void {
   const g = globalThis as typeof globalThis & { __oesSchwabMemory?: MemoryBag };
   g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null };
   memoryStoreStatus = null;
+  tokenCache = null;
+  tokenBlobBlockedUntil = 0;
+  blobMigrationAttempted = false;
+  rateLimitLogged = false;
 }
 
 function envPair(urlName: string, tokenName: string): { url: string; token: string } | null {
@@ -249,19 +299,60 @@ export function resolveStoreKind(): StoreKind {
   return "memory";
 }
 
-export async function readTokens(): Promise<StoredTokens | null> {
-  const kind = resolveStoreKind();
-  if (kind === "unconfigured") return null;
-  if (kind === "memory") return memoryBag().tokens;
-  if (kind === "blob") return readBlobTokens();
+interface EdgeReadConfig {
+  origin: string;
+  id: string;
+  readToken: string;
+}
+
+function edgeReadConfig(): EdgeReadConfig | null {
+  const raw = process.env[SCHWAB_GLOBAL_CONFIG_ENV]?.trim()
+    || process.env[SCHWAB_EDGE_CONFIG_ENV]?.trim()
+    || "";
+  if (!raw) return null;
   try {
-    const raw = await kvCommand(["GET", TOKEN_KEY]);
-    if (typeof raw !== "string" || raw.length === 0) return null;
-    const json = await decryptTokenPayload(raw);
-    return parseStored(json);
-  } catch (err) {
-    logStoreFailure("Schwab token store could not be read", err);
+    const url = new URL(raw);
+    const readToken = url.searchParams.get("token")?.trim() ?? "";
+    const id = url.pathname.split("/").filter(Boolean)[0] ?? "";
+    if (!readToken || !id.startsWith("ecfg_")) return null;
+    return { origin: url.origin, id, readToken };
+  } catch {
     return null;
+  }
+}
+
+function edgeApiToken(): string {
+  return process.env[SCHWAB_VERCEL_API_TOKEN_ENV]?.trim()
+    || process.env.VERCEL_ACCESS_TOKEN?.trim()
+    || "";
+}
+
+function edgeWriteReady(): boolean {
+  return edgeReadConfig() !== null && edgeApiToken().length > 0;
+}
+
+/**
+ * Where the Schwab token is read and written.
+ * Edge Config wins when both the connection string and the write token exist.
+ * Documents (alerts, shadows, flow, trades, scan health) still use resolveStoreKind.
+ */
+export function resolveTokenBackend(): StoreKind {
+  if (edgeWriteReady()) return "edge";
+  return resolveStoreKind();
+}
+
+export async function readTokens(options?: { bypassCache?: boolean }): Promise<StoredTokens | null> {
+  const backend = resolveTokenBackend();
+  if (backend === "unconfigured") return null;
+  if (backend === "memory") return memoryBag().tokens;
+  if (!options?.bypassCache && tokenCacheFresh()) return tokenCache?.tokens ?? null;
+  if (backend === "blob" && Date.now() < tokenBlobBlockedUntil) return tokenCache?.tokens ?? null;
+  try {
+    return await readTokensFromStore();
+  } catch (err) {
+    if (isRateLimit(err)) return tokenCache?.tokens ?? null;
+    logStoreFailure("Schwab token store could not be read", err);
+    return tokenCache?.tokens ?? null;
   }
 }
 
@@ -269,20 +360,29 @@ export async function writeTokens(tokens: StoredTokens): Promise<void> {
   if (!tokens.accessToken || !tokens.refreshToken) {
     throw new Error("Refusing to store an empty Schwab token");
   }
-  const kind = resolveStoreKind();
-  if (kind === "unconfigured") {
+  const backend = resolveTokenBackend();
+  if (backend === "unconfigured") {
     throw new Error("Schwab token storage is not configured");
   }
-  if (kind === "memory") {
+  if (backend === "memory") {
     memoryBag().tokens = tokens;
+    rememberTokenCache(tokens, memoryBag().alerts);
     return;
   }
   const cipher = await encryptTokenPayload(JSON.stringify(tokens));
-  if (kind === "blob") {
-    await updateBlobEnvelope((envelope) => ({ ...envelope, cipher }));
+  if (backend === "edge") {
+    const alerts = await alertsForEdgeWrite();
+    await writeEdgeEnvelope({ cipher, alerts });
+    rememberTokenCache(tokens, alerts);
+    return;
+  }
+  if (backend === "blob") {
+    const alerts = await updateBlobEnvelope((envelope) => ({ ...envelope, cipher }));
+    rememberTokenCache(tokens, alerts);
     return;
   }
   await kvCommand(["SET", TOKEN_KEY, cipher]);
+  rememberTokenCache(tokens, tokenCache?.alerts ?? { ...EMPTY_ALERTS });
 }
 
 /**
@@ -294,19 +394,36 @@ export async function commitRefreshedTokens(basis: StoredTokens, next: StoredTok
   if (!next.accessToken || !next.refreshToken) {
     throw new Error("Refusing to store an empty Schwab token");
   }
-  const kind = resolveStoreKind();
-  if (kind === "unconfigured") {
+  const backend = resolveTokenBackend();
+  if (backend === "unconfigured") {
     throw new Error("Schwab token storage is not configured");
   }
-  if (kind !== "blob") {
-    const latest = await readTokens();
+  if (backend !== "blob") {
+    let latest: StoredTokens | null = null;
+    try {
+      latest = await readTokensFromStore();
+    } catch (err) {
+      if (!isRateLimit(err)) throw err;
+      rememberTokenCache(next, tokenCache?.alerts ?? { ...EMPTY_ALERTS });
+      return next;
+    }
     if (latest && keepStoredTokens(latest, basis, next)) return latest;
-    await writeTokens(next);
+    try {
+      await writeTokens(next);
+    } catch (err) {
+      if (!isRateLimit(err)) throw err;
+      rememberTokenCache(next, tokenCache?.alerts ?? { ...EMPTY_ALERTS });
+      return next;
+    }
     return next;
   }
   const token = requireBlobToken();
   for (let attempt = 0; attempt < BLOB_WRITE_ATTEMPTS; attempt++) {
-    const read = await readBlobRecord(token);
+    const read = await readBlobRecord(token, true);
+    if (read.state === "rate-limited") {
+      rememberTokenCache(next, tokenCache?.alerts ?? { ...EMPTY_ALERTS });
+      return next;
+    }
     if (read.state === "error") throw new Error("Schwab token store could not be read");
     if (read.state === "corrupt") {
       if (!read.etag) throw new Error("Schwab token store etag could not be confirmed");
@@ -315,10 +432,14 @@ export async function commitRefreshedTokens(basis: StoredTokens, next: StoredTok
       const again = await readBlobRecord(token);
       if (again.state !== "missing") continue;
       await putEnvelope(token, { cipher: await encryptTokenPayload(JSON.stringify(next)), alerts: { ...EMPTY_ALERTS } });
+      rememberTokenCache(next, { ...EMPTY_ALERTS });
       return next;
     }
     const latest = read.state === "ok" ? await tokensFromCipher(read.envelope.cipher) : null;
-    if (latest && keepStoredTokens(latest, basis, next)) return latest;
+    if (read.state === "ok" && latest && keepStoredTokens(latest, basis, next)) {
+      rememberTokenCache(latest, read.envelope.alerts);
+      return latest;
+    }
     const envelope = read.state === "ok" ? read.envelope : { cipher: null, alerts: { ...EMPTY_ALERTS } };
     const etag = read.state === "ok" ? read.etag : undefined;
     if (read.state === "ok" && !etag) throw new Error("Schwab token store etag could not be confirmed");
@@ -327,8 +448,13 @@ export async function commitRefreshedTokens(basis: StoredTokens, next: StoredTok
         cipher: await encryptTokenPayload(JSON.stringify(next)),
         alerts: envelope.alerts,
       }, etag);
+      rememberTokenCache(next, envelope.alerts);
       return next;
     } catch (err) {
+      if (isRateLimit(err)) {
+        rememberTokenCache(next, envelope.alerts);
+        return next;
+      }
       if (!isPreconditionFailed(err) || attempt === BLOB_WRITE_ATTEMPTS - 1) throw err;
     }
   }
@@ -341,15 +467,24 @@ function keepStoredTokens(latest: StoredTokens, basis: StoredTokens, next: Store
 }
 
 export async function readAlertMeta(): Promise<AlertMeta> {
-  const kind = resolveStoreKind();
-  if (kind === "unconfigured") return { ...EMPTY_ALERTS };
-  if (kind === "memory") return memoryBag().alerts;
-  if (kind === "blob") {
-    const token = blobToken();
-    if (!token) return { ...EMPTY_ALERTS };
-    const read = await readBlobRecord(token);
-    if (read.state !== "ok") return { ...EMPTY_ALERTS };
-    return read.envelope.alerts;
+  const backend = resolveTokenBackend();
+  if (backend === "unconfigured") return { ...EMPTY_ALERTS };
+  if (backend === "memory") return memoryBag().alerts;
+  if ((backend === "edge" || backend === "blob") && tokenCacheFresh() && tokenCache) {
+    return { ...tokenCache.alerts };
+  }
+  if (backend === "edge" || backend === "blob") {
+    try {
+      const loaded = await loadTokenEnvelope(backend);
+      if (loaded.kind === "rate-limited") return { ...(tokenCache?.alerts ?? EMPTY_ALERTS) };
+      if (loaded.kind === "ok" && loaded.alerts) {
+        rememberTokenCache(loaded.tokens, loaded.alerts);
+        return { ...loaded.alerts };
+      }
+    } catch (err) {
+      if (isRateLimit(err)) return { ...(tokenCache?.alerts ?? EMPTY_ALERTS) };
+    }
+    return { ...(tokenCache?.alerts ?? EMPTY_ALERTS) };
   }
   try {
     const raw = await kvCommand(["GET", ALERT_KEY]);
@@ -626,14 +761,26 @@ async function updateBlobAlertBook(change: (current: string | null) => string | 
 }
 
 export async function writeAlertMeta(meta: AlertMeta): Promise<void> {
-  const kind = resolveStoreKind();
-  if (kind === "unconfigured") return;
-  if (kind === "memory") {
+  const backend = resolveTokenBackend();
+  if (backend === "unconfigured") return;
+  if (backend === "memory") {
     memoryBag().alerts = meta;
+    rememberTokenCache(memoryBag().tokens, meta);
     return;
   }
-  if (kind === "blob") {
-    await updateBlobEnvelope((envelope) => ({ ...envelope, alerts: meta }));
+  if (backend === "blob") {
+    const alerts = await updateBlobEnvelope((envelope) => ({ ...envelope, alerts: meta }));
+    rememberTokenCache(tokenCache?.tokens ?? null, alerts);
+    return;
+  }
+  if (backend === "edge") {
+    const current = await readEdgeEnvelope();
+    if (current.kind !== "ok") {
+      if (tokenCache) tokenCache = { ...tokenCache, alerts: meta };
+      return;
+    }
+    await writeEdgeEnvelope({ ...current.envelope, alerts: meta });
+    rememberTokenCache(tokenCache?.tokens ?? null, meta);
     return;
   }
   await kvCommand(["SET", ALERT_KEY, JSON.stringify(meta)]);
@@ -661,12 +808,192 @@ export async function decryptTokenPayload(payload: string): Promise<string> {
   return new TextDecoder().decode(plain);
 }
 
-async function readBlobTokens(): Promise<StoredTokens | null> {
+function tokenCacheFresh(now = Date.now()): boolean {
+  if (!tokenCache?.tokens) return false;
+  return tokenCache.tokens.accessExpiresAt - TOKEN_CACHE_SKEW_MS > now;
+}
+
+function rememberTokenCache(tokens: StoredTokens | null, alerts: AlertMeta): void {
+  tokenCache = { tokens, alerts: { ...alerts } };
+}
+
+function isRateLimit(err: unknown): boolean {
+  if (storeErrorStatus(err) === 429) return true;
+  const message = err instanceof Error ? err.message : "";
+  return /\b429\b/.test(message) || /too many requests/i.test(message);
+}
+
+function noteBlobRateLimit(sentence: string): void {
+  tokenBlobBlockedUntil = Date.now() + TOKEN_BLOB_BACKOFF_MS;
+  if (rateLimitLogged) return;
+  rateLimitLogged = true;
+  console.error(`${sentence}: Vercel Blob returned 429 Too Many Requests`);
+}
+
+type EnvelopeLoad =
+  | { kind: "ok"; tokens: StoredTokens | null; alerts: AlertMeta | null }
+  | { kind: "missing" }
+  | { kind: "rate-limited" }
+  | { kind: "error" };
+
+async function readTokensFromStore(): Promise<StoredTokens | null> {
+  const backend = resolveTokenBackend();
+  if (backend === "memory") return memoryBag().tokens;
+  if (backend === "unconfigured") return null;
+  const loaded = await loadTokenEnvelope(backend);
+  if (loaded.kind === "rate-limited") {
+    noteBlobRateLimit("Schwab token store could not be read");
+    throw new Error("Vercel Blob: Failed to fetch blob: 429 Too Many Requests");
+  }
+  if (loaded.kind === "ok") {
+    rememberTokenCache(loaded.tokens, loaded.alerts ?? tokenCache?.alerts ?? { ...EMPTY_ALERTS });
+    return loaded.tokens;
+  }
+  if (loaded.kind === "missing") tokenCache = null;
+  return null;
+}
+
+async function loadTokenEnvelope(backend: StoreKind): Promise<EnvelopeLoad> {
+  if (backend === "edge") {
+    const edge = await readEdgeEnvelope();
+    if (edge.kind === "rate-limited") return { kind: "rate-limited" };
+    if (edge.kind === "ok" && edge.envelope.cipher) {
+      return {
+        kind: "ok",
+        tokens: await tokensFromCipher(edge.envelope.cipher),
+        alerts: edge.envelope.alerts,
+      };
+    }
+    if (!blobConfigured()) {
+      if (edge.kind === "ok") return { kind: "ok", tokens: null, alerts: edge.envelope.alerts };
+      return edge.kind === "error" ? { kind: "error" } : { kind: "missing" };
+    }
+    const blob = await readBlobEnvelope();
+    if (blob.kind === "rate-limited") return { kind: "rate-limited" };
+    if (blob.kind === "ok" && blob.envelope.cipher) {
+      await migrateBlobEnvelopeToEdge(blob.envelope);
+      return {
+        kind: "ok",
+        tokens: await tokensFromCipher(blob.envelope.cipher),
+        alerts: blob.envelope.alerts,
+      };
+    }
+    if (edge.kind === "ok") return { kind: "ok", tokens: null, alerts: edge.envelope.alerts };
+    return blob.kind === "error" || edge.kind === "error" ? { kind: "error" } : { kind: "missing" };
+  }
+  if (backend === "kv") {
+    try {
+      const raw = await kvCommand(["GET", TOKEN_KEY]);
+      if (typeof raw !== "string" || raw.length === 0) return { kind: "missing" };
+      return { kind: "ok", tokens: parseStored(await decryptTokenPayload(raw)), alerts: null };
+    } catch (err) {
+      if (isRateLimit(err)) return { kind: "rate-limited" };
+      logStoreFailure("Schwab token store could not be read", err);
+      return { kind: "error" };
+    }
+  }
+  if (backend === "blob") {
+    const blob = await readBlobEnvelope();
+    if (blob.kind === "rate-limited") return { kind: "rate-limited" };
+    if (blob.kind === "ok") {
+      return {
+        kind: "ok",
+        tokens: await tokensFromCipher(blob.envelope.cipher),
+        alerts: blob.envelope.alerts,
+      };
+    }
+    return blob.kind === "error" ? { kind: "error" } : { kind: "missing" };
+  }
+  return { kind: "missing" };
+}
+
+async function readBlobEnvelope(): Promise<
+  | { kind: "ok"; envelope: TokenEnvelope }
+  | { kind: "missing" }
+  | { kind: "rate-limited" }
+  | { kind: "error" }
+> {
   const token = blobToken();
-  if (!token) return null;
-  const read = await readBlobRecord(token);
-  if (read.state !== "ok") return null;
-  return tokensFromCipher(read.envelope.cipher);
+  if (!token) return { kind: "missing" };
+  const read = await readBlobRecord(token, false);
+  if (read.state === "rate-limited") return { kind: "rate-limited" };
+  if (read.state === "ok") return { kind: "ok", envelope: read.envelope };
+  if (read.state === "missing") return { kind: "missing" };
+  return { kind: "error" };
+}
+
+async function alertsForEdgeWrite(): Promise<AlertMeta> {
+  const edge = await readEdgeEnvelope();
+  if (edge.kind === "ok") return edge.envelope.alerts;
+  if (tokenCache?.alerts) return tokenCache.alerts;
+  if (!blobConfigured()) return { ...EMPTY_ALERTS };
+  const blob = await readBlobEnvelope();
+  if (blob.kind === "ok") return blob.envelope.alerts;
+  return { ...EMPTY_ALERTS };
+}
+
+async function readEdgeEnvelope(): Promise<
+  | { kind: "ok"; envelope: TokenEnvelope }
+  | { kind: "missing" }
+  | { kind: "rate-limited" }
+  | { kind: "error" }
+> {
+  const cfg = edgeReadConfig();
+  if (!cfg) return { kind: "missing" };
+  const url = `${cfg.origin}/${cfg.id}/item/${encodeURIComponent(SCHWAB_EDGE_TOKEN_KEY)}?token=${encodeURIComponent(cfg.readToken)}`;
+  let res: Response;
+  try {
+    res = await fetch(url, { cache: "no-store" });
+  } catch (err) {
+    logStoreFailure("Schwab token store could not be read", err);
+    return { kind: "error" };
+  }
+  if (res.status === 404) return { kind: "missing" };
+  if (res.status === 429) return { kind: "rate-limited" };
+  if (!res.ok) {
+    logStoreFailure("Schwab token store could not be read", new Error(`Edge Config read failed (${res.status})`));
+    return { kind: "error" };
+  }
+  let payload: unknown;
+  try {
+    payload = await res.json();
+  } catch {
+    return { kind: "error" };
+  }
+  const envelope = parseEnvelope(typeof payload === "string" ? payload : JSON.stringify(payload));
+  if (!envelope) return { kind: "error" };
+  return { kind: "ok", envelope };
+}
+
+async function writeEdgeEnvelope(envelope: TokenEnvelope): Promise<void> {
+  const cfg = edgeReadConfig();
+  const apiToken = edgeApiToken();
+  if (!cfg || !apiToken) throw new Error("Schwab token storage is not configured");
+  const url = new URL(`https://api.vercel.com/v1/edge-config/${cfg.id}/items`);
+  const teamId = process.env[SCHWAB_VERCEL_TEAM_ID_ENV]?.trim() ?? "";
+  if (teamId) url.searchParams.set("teamId", teamId);
+  const res = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${apiToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      items: [{ operation: "upsert", key: SCHWAB_EDGE_TOKEN_KEY, value: envelope }],
+    }),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`Schwab token store could not be written (${res.status})`);
+}
+
+async function migrateBlobEnvelopeToEdge(envelope: TokenEnvelope): Promise<void> {
+  if (blobMigrationAttempted || !envelope.cipher || !edgeWriteReady()) return;
+  blobMigrationAttempted = true;
+  try {
+    await writeEdgeEnvelope(envelope);
+  } catch (err) {
+    logStoreFailure("Schwab token could not be copied off Blob", err);
+  }
 }
 
 async function tokensFromCipher(cipher: string | null): Promise<StoredTokens | null> {
@@ -680,26 +1007,30 @@ async function tokensFromCipher(cipher: string | null): Promise<StoredTokens | n
   }
 }
 
-async function updateBlobEnvelope(change: (envelope: TokenEnvelope) => TokenEnvelope): Promise<void> {
+async function updateBlobEnvelope(change: (envelope: TokenEnvelope) => TokenEnvelope): Promise<AlertMeta> {
   const token = requireBlobToken();
   for (let attempt = 0; attempt < BLOB_WRITE_ATTEMPTS; attempt++) {
-    const read = await readBlobRecord(token);
-    if (read.state === "error") throw new Error("Schwab token store could not be read");
+    const read = await readBlobRecord(token, true);
+    if (read.state === "error" || read.state === "rate-limited") {
+      throw new Error("Schwab token store could not be read");
+    }
     if (read.state === "corrupt") {
       if (!read.etag) throw new Error("Schwab token store etag could not be confirmed");
       const removed = await deleteBlobIfMatch(token, read.etag);
       if (!removed) continue;
-      const again = await readBlobRecord(token);
+      const again = await readBlobRecord(token, false);
       if (again.state !== "missing") continue;
-      await putEnvelope(token, change({ cipher: null, alerts: { ...EMPTY_ALERTS } }));
-      return;
+      const created = change({ cipher: null, alerts: { ...EMPTY_ALERTS } });
+      await putEnvelope(token, created);
+      return created.alerts;
     }
     const envelope = read.state === "ok" ? read.envelope : { cipher: null, alerts: { ...EMPTY_ALERTS } };
     const etag = read.state === "ok" ? read.etag : undefined;
     if (read.state === "ok" && !etag) throw new Error("Schwab token store etag could not be confirmed");
     try {
-      await putEnvelope(token, change(envelope), etag);
-      return;
+      const next = change(envelope);
+      await putEnvelope(token, next, etag);
+      return next.alerts;
     } catch (err) {
       if (!isPreconditionFailed(err) || attempt === BLOB_WRITE_ATTEMPTS - 1) throw err;
     }
@@ -707,7 +1038,8 @@ async function updateBlobEnvelope(change: (envelope: TokenEnvelope) => TokenEnve
   throw new Error("Schwab token store could not be updated");
 }
 
-async function readBlobRecord(token: string): Promise<BlobRead> {
+async function readBlobRecord(token: string, needEtag = false): Promise<BlobRead> {
+  if (Date.now() < tokenBlobBlockedUntil) return { state: "rate-limited" };
   let result: SchwabBlobGetResult | null;
   try {
     result = await blobClient.get(SCHWAB_BLOB_TOKEN_PATH, {
@@ -716,22 +1048,39 @@ async function readBlobRecord(token: string): Promise<BlobRead> {
       token,
     });
   } catch (err) {
+    if (isRateLimit(err)) {
+      noteBlobRateLimit("Schwab token store could not be read");
+      return { state: "rate-limited" };
+    }
     logStoreFailure("Schwab token store could not be read", err);
     return { state: "error" };
   }
   if (!result) return { state: "missing" };
   if (result.statusCode !== 200 || !result.stream) {
-    logStoreFailure("Schwab token store could not be read", new Error(`Blob read failed (status ${result.statusCode})`));
+    const failure = new Error(`Blob read failed (status ${result.statusCode})`);
+    if (result.statusCode === 429) {
+      noteBlobRateLimit("Schwab token store could not be read");
+      return { state: "rate-limited" };
+    }
+    logStoreFailure("Schwab token store could not be read", failure);
     return { state: "error" };
   }
   let text: string;
   try {
     text = await new Response(result.stream).text();
   } catch (err) {
+    if (isRateLimit(err)) {
+      noteBlobRateLimit("Schwab token store could not be read");
+      return { state: "rate-limited" };
+    }
     logStoreFailure("Schwab token store could not be read", err);
     return { state: "error" };
   }
-  const etag = (await strongMatchToken(SCHWAB_BLOB_TOKEN_PATH, token, result.blob.etag)) ?? "";
+  let etag = "";
+  if (needEtag) {
+    etag = (await strongMatchToken(SCHWAB_BLOB_TOKEN_PATH, token, result.blob.etag)) ?? "";
+    if (!etag && Date.now() < tokenBlobBlockedUntil) return { state: "rate-limited" };
+  }
   const envelope = parseEnvelope(text);
   if (!envelope) return { state: "corrupt", etag };
   return { state: "ok", etag, envelope };
@@ -796,6 +1145,10 @@ async function strongMatchToken(pathname: string, token: string, downloadEtag: s
       const fromHead = strongApiEtag(meta?.etag);
       if (fromHead) return fromHead;
     } catch (err) {
+      if (isRateLimit(err)) {
+        noteBlobRateLimit("Blob metadata could not be read");
+        return undefined;
+      }
       if (!(err instanceof BlobNotFoundError)) {
         logStoreFailure("Blob metadata could not be read", err);
       }
@@ -851,11 +1204,36 @@ async function writeBlobFlowSnapshots(patch: FlowSnapshotBook): Promise<void> {
   });
 }
 
-async function readBlobJson(pathname: string, token: string): Promise<
+/** Scan health must be re-read so a slot claim can see its write and a racing overwrite. */
+function requestCachedPath(pathname: string): boolean {
+  return pathname !== SCHWAB_BLOB_STORE_STATUS_PATH;
+}
+
+function cachedBlobText(pathname: string): { hit: true; text: string | null } | { hit: false } {
+  if (!requestCachedPath(pathname)) return { hit: false };
+  const store = blobReadCache.getStore();
+  if (!store || !store.has(pathname)) return { hit: false };
+  return { hit: true, text: store.get(pathname)?.text ?? null };
+}
+
+function storeCachedBlob(pathname: string, text: string | null): void {
+  if (!requestCachedPath(pathname)) return;
+  const store = blobReadCache.getStore();
+  if (store) store.set(pathname, { text });
+}
+
+async function readBlobJson(pathname: string, token: string, bypassCache = false): Promise<
   | { state: "missing" }
   | { state: "error"; error: unknown }
   | { state: "ok"; downloadEtag: string; text: string }
 > {
+  if (!bypassCache) {
+    const cached = cachedBlobText(pathname);
+    if (cached.hit) {
+      if (cached.text == null) return { state: "missing" };
+      return { state: "ok", downloadEtag: "", text: cached.text };
+    }
+  }
   let result: SchwabBlobGetResult | null;
   try {
     result = await blobClient.get(pathname, {
@@ -866,12 +1244,16 @@ async function readBlobJson(pathname: string, token: string): Promise<
   } catch (err) {
     return { state: "error", error: err };
   }
-  if (!result || result.statusCode === 404) return { state: "missing" };
+  if (!result || result.statusCode === 404) {
+    storeCachedBlob(pathname, null);
+    return { state: "missing" };
+  }
   if (result.statusCode !== 200 || !result.stream) {
     return { state: "error", error: new Error(`Blob read failed (status ${result.statusCode})`) };
   }
   try {
     const text = await new Response(result.stream).text();
+    storeCachedBlob(pathname, text);
     return { state: "ok", downloadEtag: result.blob.etag, text };
   } catch (err) {
     return { state: "error", error: err };
@@ -937,7 +1319,7 @@ async function attemptJsonPut(
   change: (current: string | null) => string | null,
   conditional: boolean,
 ): Promise<"ok" | "retry" | "stop"> {
-  const read = await readBlobJson(pathname, token);
+  const read = await readBlobJson(pathname, token, true);
   if (read.state === "error") {
     await recordStoreFailure(target, "read", read.error);
     return "stop";
@@ -948,6 +1330,7 @@ async function attemptJsonPut(
     await recordStoreFailure(target, "write", new Error(`Refusing to overwrite an unreadable ${label.toLowerCase()}`));
     return "stop";
   }
+  if (next === current) return "ok";
   const etag = conditional
     ? await strongMatchToken(pathname, token, read.state === "ok" ? read.downloadEtag : undefined)
     : undefined;
@@ -961,6 +1344,7 @@ async function attemptJsonPut(
       token,
       ...(etag ? { ifMatch: etag } : {}),
     });
+    storeCachedBlob(pathname, next);
     return "ok";
   } catch (err) {
     if (conditional && isPreconditionFailed(err)) return "retry";
@@ -1220,6 +1604,10 @@ function warnScanHealthWrite(err: unknown): void {
 
 async function recordStoreFailure(target: JsonStoreTarget, operation: "read" | "write", err: unknown): Promise<void> {
   const sentence = operation === "read" ? `${storeLabel(target)} could not be read` : `${storeLabel(target)} could not be written`;
+  if (isRateLimit(err)) {
+    noteBlobRateLimit(sentence);
+    return;
+  }
   logStoreFailure(sentence, err);
   const status = await loadStatusForWrite();
   status.failures[target] = {

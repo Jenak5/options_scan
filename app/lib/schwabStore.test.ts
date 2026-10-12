@@ -15,7 +15,9 @@ import {
   readFlowSnapshots,
   readTokens,
   resolveStoreKind,
+  resolveTokenBackend,
   setSchwabBlobClientForTests,
+  withBlobReadCache,
   writeAlertMeta,
   writeFlowSnapshots,
   writeTokens,
@@ -32,6 +34,11 @@ const ENV_KEYS = [
   "UPSTASH_REDIS_REST_TOKEN",
   "BLOB_READ_WRITE_TOKEN",
   "SESSION_SECRET",
+  "EDGE_CONFIG",
+  "GLOBAL_CONFIG",
+  "VERCEL_API_TOKEN",
+  "VERCEL_ACCESS_TOKEN",
+  "VERCEL_TEAM_ID",
 ] as const;
 
 const saved: Record<string, string | undefined> = {};
@@ -353,6 +360,54 @@ describe("blob token store", () => {
     spy.mockRestore();
   });
 
+  it("reuses a fresh access token from memory and keeps it when Blob returns 429", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-10-12T14:00:00.000Z"));
+      const fresh = { ...tokens, accessExpiresAt: Date.now() + 30 * 60 * 1000 };
+      await writeTokens(fresh);
+      const gets = mock.get.mock.calls.length;
+      expect(await readTokens()).toEqual(fresh);
+      expect(mock.get.mock.calls.length).toBe(gets);
+
+      vi.setSystemTime(new Date("2026-10-12T14:29:00.000Z"));
+      mock.get.mockRejectedValue(new Error("Vercel Blob: Failed to fetch blob: 429 Too Many Requests"));
+      await expect(readTokens()).resolves.toEqual(fresh);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns null instead of throwing when Blob rate-limits a cold token read", async () => {
+    mock.get.mockRejectedValue(new Error("Vercel Blob: Failed to fetch blob: 429 Too Many Requests"));
+    await expect(readTokens()).resolves.toBeNull();
+  });
+
+  it("does not fail a refresh when Blob rate-limits the token read", async () => {
+    await writeTokens(tokens);
+    mock.get.mockRejectedValue(new Error("Vercel Blob: Failed to fetch blob: 429 Too Many Requests"));
+    const next = { ...tokens, accessToken: "fixture-access-next", accessExpiresAt: tokens.accessExpiresAt + 1_000 };
+    await expect(commitRefreshedTokens(tokens, next)).resolves.toEqual(next);
+  });
+
+  it("reads a document once per request and skips an unchanged put", async () => {
+    await withBlobReadCache(async () => {
+      expect(await readFlowSnapshots()).toEqual({});
+      expect(await readFlowSnapshots()).toEqual({});
+    });
+    const flowGets = mock.get.mock.calls.filter((call) => call[0] === SCHWAB_BLOB_FLOW_PATH);
+    expect(flowGets).toHaveLength(1);
+
+    const patch = {
+      SPY: { scannedAt: 1_700_000_000_000, volumes: { "2026-10-08|105|call": 1 } },
+    };
+    await writeFlowSnapshots(patch);
+    const puts = mock.put.mock.calls.filter((call) => call[0] === SCHWAB_BLOB_FLOW_PATH).length;
+    await writeFlowSnapshots(patch);
+    expect(mock.put.mock.calls.filter((call) => call[0] === SCHWAB_BLOB_FLOW_PATH)).toHaveLength(puts);
+    expect((await readFlowSnapshots()).SPY.volumes["2026-10-08|105|call"]).toBe(1);
+  });
+
   it("does not put when the blob read fails", async () => {
     mock.get.mockImplementation(async () => {
       throw new Error("blob down");
@@ -360,6 +415,82 @@ describe("blob token store", () => {
     await expect(writeTokens(tokens)).rejects.toThrow(/could not be read/);
     expect(mock.put).not.toHaveBeenCalled();
     expect(mock.del).not.toHaveBeenCalled();
+  });
+});
+
+describe("edge config token store", () => {
+  const edgeUrl = "https://edge-config.vercel.com/ecfg_test?token=edge-read-token";
+
+  beforeEach(() => {
+    process.env.EDGE_CONFIG = edgeUrl;
+    process.env.VERCEL_API_TOKEN = "vercel-api-token";
+    process.env.VERCEL_TEAM_ID = "team_test";
+    process.env.BLOB_READ_WRITE_TOKEN = "fixture-blob-token";
+    process.env.SESSION_SECRET = "unit-test-session-secret";
+  });
+
+  it("writes and reads the token on Edge Config and does not call Blob", async () => {
+    let stored: unknown = null;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.includes("/v1/edge-config/ecfg_test/items") && init?.method === "PATCH") {
+        const body = JSON.parse(String(init.body)) as { items: { value: unknown }[] };
+        stored = body.items[0].value;
+        expect(url).toContain("teamId=team_test");
+        expect(init.headers).toMatchObject({ Authorization: "Bearer vercel-api-token" });
+        return new Response("{}", { status: 200 });
+      }
+      if (url.includes("/item/schwabTokens")) {
+        if (!stored) return new Response("missing", { status: 404 });
+        return new Response(JSON.stringify(stored), { status: 200 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    expect(resolveTokenBackend()).toBe("edge");
+    expect(resolveStoreKind()).toBe("blob");
+    await writeTokens(tokens);
+    expect(await readTokens()).toEqual(tokens);
+    expect(stored).toEqual(expect.objectContaining({ alerts: { expiryAlertAt: null, refreshFailAlertAt: null } }));
+    expect(JSON.stringify(stored)).not.toContain("fixture-access");
+    expect(JSON.stringify(stored)).not.toContain("fixture-refresh");
+  });
+
+  it("falls back to the Blob token when Edge Config is empty, then copies it", async () => {
+    const mock = createBlobMock();
+    setSchwabBlobClientForTests(mock.client);
+    const cipher = await encryptTokenPayload(JSON.stringify(tokens));
+    mock.seed(SCHWAB_BLOB_TOKEN_PATH, JSON.stringify({
+      cipher,
+      alerts: { expiryAlertAt: 4, refreshFailAlertAt: null },
+    }));
+    const patches: unknown[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.includes("/item/schwabTokens")) return new Response("missing", { status: 404 });
+      if (url.includes("/v1/edge-config/") && init?.method === "PATCH") {
+        patches.push(JSON.parse(String(init.body)));
+        return new Response("{}", { status: 200 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    expect(await readTokens()).toEqual(tokens);
+    expect(await readAlertMeta()).toEqual({ expiryAlertAt: 4, refreshFailAlertAt: null });
+    expect(patches).toHaveLength(1);
+    expect(mock.put).not.toHaveBeenCalled();
+  });
+
+  it("does not throw when the Blob fallback is rate-limited and Edge Config is empty", async () => {
+    const mock = createBlobMock();
+    setSchwabBlobClientForTests(mock.client);
+    mock.get.mockRejectedValue(new Error("Vercel Blob: Failed to fetch blob: 429 Too Many Requests"));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/item/schwabTokens")) return new Response("missing", { status: 404 });
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    await expect(readTokens()).resolves.toBeNull();
   });
 });
 

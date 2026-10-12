@@ -21,7 +21,7 @@ import {
   commitRefreshedTokens,
   readAlertMeta,
   readTokens,
-  resolveStoreKind,
+  resolveTokenBackend,
   writeAlertMeta,
 } from "@/app/lib/schwabStore";
 import { sendTelegramAlert, telegramConfigured } from "@/app/lib/telegram";
@@ -85,7 +85,7 @@ export async function getSchwabStatus(now: number = Date.now()): Promise<SchwabP
   const stored = await readTokens();
   return publicTokenStatus({
     configured: schwabConfigured(),
-    storage: resolveStoreKind(),
+    storage: resolveTokenBackend(),
     accessExpiresAt: stored?.accessExpiresAt ?? null,
     refreshExpiresAt: stored?.refreshExpiresAt ?? null,
     now,
@@ -221,8 +221,7 @@ async function resolveUsableTokens(stored: StoredTokens, forceRefresh: boolean):
 }
 
 async function fresherStoredTokens(stored: StoredTokens): Promise<StoredTokens> {
-  if (resolveStoreKind() !== "blob") return stored;
-  const latest = await readTokens();
+  const latest = await readTokens({ bypassCache: true });
   if (!latest) return stored;
   if (latest.refreshToken !== stored.refreshToken || latest.accessExpiresAt > stored.accessExpiresAt) {
     return latest;

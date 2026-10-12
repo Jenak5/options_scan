@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createSignedOAuthState, denyIfUnauthorized, oauthStateCookieOptions } from "@/app/lib/auth";
 import { redirectPath } from "@/app/lib/redirect";
 import { SCHWAB_STATE_COOKIE, schwabAuthorizeUrl, schwabConfigured } from "@/app/lib/schwab";
-import { resolveStoreKind } from "@/app/lib/schwabStore";
+import { resolveTokenBackend } from "@/app/lib/schwabStore";
 
 export const dynamic = "force-dynamic";
 
@@ -11,7 +11,7 @@ export async function GET(request: NextRequest) {
   const denied = await denyIfUnauthorized(request);
   if (denied) return denied;
 
-  if (resolveStoreKind() === "unconfigured") {
+  if (resolveTokenBackend() === "unconfigured") {
     return redirectPath("/?schwab=error&reason=storage");
   }
 

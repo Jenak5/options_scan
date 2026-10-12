@@ -627,9 +627,12 @@ function AlertsTab() {
     { name: "SCHWAB_CLIENT_ID",         note: "Sensitive · Market Data app key" },
     { name: "SCHWAB_CLIENT_SECRET",     note: "Sensitive · Market Data secret" },
     { name: "SCHWAB_REDIRECT_URI",      note: "Sensitive · must match the callback URL" },
-    { name: "KV_REST_API_URL",          note: "Sensitive · token store, or Upstash or Blob" },
-    { name: "KV_REST_API_TOKEN",        note: "Sensitive · token store" },
-    { name: "BLOB_READ_WRITE_TOKEN",    note: "Sensitive · private Blob token store" },
+    { name: "EDGE_CONFIG",              note: "Sensitive · Schwab token reads. Set by connecting Edge Config" },
+    { name: "VERCEL_API_TOKEN",         note: "Sensitive · writes the Schwab token to Edge Config" },
+    { name: "VERCEL_TEAM_ID",           note: "Team id for the Edge Config write. Team stores need it" },
+    { name: "KV_REST_API_URL",          note: "Sensitive · token fallback, or Upstash, when Edge Config is unset" },
+    { name: "KV_REST_API_TOKEN",        note: "Sensitive · token fallback" },
+    { name: "BLOB_READ_WRITE_TOKEN",    note: "Sensitive · alerts, shadows, flow, trades, scan health. Token read fallback" },
   ];
 
   return (
