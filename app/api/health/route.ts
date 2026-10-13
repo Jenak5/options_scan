@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { loadAlertBook } from "@/app/lib/alertStore";
 import { hasHealthBearer } from "@/app/lib/auth";
+import { emptyCandleHealth, readCandleHealth } from "@/app/lib/candleStore";
 import { buildHealthReport, countShadowTotals, trackedAlertCounts } from "@/app/lib/healthReport";
 import { emptyScanHealth } from "@/app/lib/scanHealth";
 import { getSchwabStatus } from "@/app/lib/schwab";
@@ -20,7 +21,7 @@ export async function GET(request: NextRequest) {
   }
 
   const now = new Date();
-  const [health, schwab, book, shadowText] = await Promise.all([
+  const [health, schwab, book, shadowText, candles] = await Promise.all([
     readScanHealth().catch(() => emptyScanHealth()),
     getSchwabStatus().then(
       (status) => status.connected === true,
@@ -28,6 +29,7 @@ export async function GET(request: NextRequest) {
     ),
     loadAlertBook().catch(() => ({ records: [] })),
     readShadowBookText().catch(() => ""),
+    readCandleHealth().catch(() => emptyCandleHealth()),
   ]);
   const shadowBook = parseShadowBook(shadowText);
   const totals = countShadowTotals(shadowBook.records);
@@ -42,6 +44,9 @@ export async function GET(request: NextRequest) {
     trackedAlertsTotal: tracked.trackedAlertsTotal,
     trackedAlertsActive: tracked.trackedAlertsActive,
     trackedAlertsComplete: tracked.trackedAlertsComplete,
+    candlesLastRun: candles.candlesLastRun,
+    candleAlertsCovered: candles.candleAlertsCovered,
+    candleErrors: candles.candleErrors,
     now,
   }));
 }

@@ -33,6 +33,12 @@ export interface HealthReport {
   trackedAlertsActive: number;
   /** Finished the 7-trading-day window. An earlier expiration is not this count. */
   trackedAlertsComplete: number;
+  /** ISO time of the last candle cron or backfill. Null until one has been saved. */
+  candlesLastRun: string | null;
+  /** Alerts with at least one stored 1-minute candle day. */
+  candleAlertsCovered: number;
+  /** Symbols that failed on the last candle run. */
+  candleErrors: number;
 }
 
 export function buildHealthReport(input: {
@@ -45,6 +51,9 @@ export function buildHealthReport(input: {
   trackedAlertsTotal?: number;
   trackedAlertsActive?: number;
   trackedAlertsComplete?: number;
+  candlesLastRun?: string | null;
+  candleAlertsCovered?: number;
+  candleErrors?: number;
   now: Date;
 }): HealthReport {
   const latest = latestScan(input.health);
@@ -76,6 +85,9 @@ export function buildHealthReport(input: {
     trackedAlertsTotal: input.trackedAlertsTotal ?? 0,
     trackedAlertsActive: input.trackedAlertsActive ?? 0,
     trackedAlertsComplete: input.trackedAlertsComplete ?? 0,
+    candlesLastRun: input.candlesLastRun ?? null,
+    candleAlertsCovered: input.candleAlertsCovered ?? 0,
+    candleErrors: input.candleErrors ?? 0,
   };
 }
 

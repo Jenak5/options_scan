@@ -11,6 +11,7 @@ import { likelySideFromEstimate, likelySideText, openingLabel } from "@/app/lib/
 import { MAX_BID_ASK_SPREAD_OF_MID, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import { chicagoClock } from "@/app/lib/marketHours";
 import { SHADOW_MIN_TRUST, isExperimentShadow, shadowExitLabel, type ShadowTrade } from "@/app/lib/shadow";
+import type { CandleBar } from "@/app/lib/candleTypes";
 import { whatIfFromShadows, type WhatIfReport } from "@/app/lib/exitWhatIf";
 import type { ResearchTrack } from "@/app/lib/researchTrack";
 import { tradeMetrics, type StoredTrade } from "@/app/lib/trades";
@@ -120,6 +121,8 @@ export interface LearnInput {
    */
   grades?: readonly string[];
   research?: readonly ResearchTrack[];
+  /** Stored 1-minute candles keyed by contract. Missing keys stay on 15-minute marks. */
+  candles?: ReadonlyMap<string, readonly CandleBar[]>;
 }
 
 const ESTIMATE_NOTE =
@@ -169,9 +172,11 @@ export function analyzeLearning(input: LearnInput): LearnReport {
     checksNote: CHECKS_NOTE,
     whatIf: whatIfFromShadows(
       input.shadows,
-      input.grades && input.grades.length > 0
-        ? { grades: input.grades, research: input.research }
-        : undefined,
+      {
+        grades: input.grades && input.grades.length > 0 ? input.grades : undefined,
+        research: input.grades && input.grades.length > 0 ? input.research : undefined,
+        candles: input.candles,
+      },
     ),
     factors: ranked,
     unavailable,

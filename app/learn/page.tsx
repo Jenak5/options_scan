@@ -83,6 +83,9 @@ interface Page {
     pathNote: string;
     included: number;
     skipped: number;
+    candlePaths?: number;
+    markPaths?: number;
+    coverageNote?: string;
     scenarios: Array<{
       id: string;
       label: string;
@@ -96,6 +99,8 @@ interface Page {
       averageLoss: number | null;
       totalPnl: number;
       tooFew: boolean;
+      source?: "1m" | "15m" | "mixed";
+      ambiguous?: number;
     }>;
   };
   factors: Factor[];
@@ -165,6 +170,7 @@ export default function LearnPage() {
                 <h2 style={heading}>Exit what-ifs</h2>
                 <Note color="#94a3b8">{page.whatIf.note}</Note>
                 <p style={prose}>{page.whatIf.pathNote}</p>
+                {page.whatIf.coverageNote && <p style={prose}>{page.whatIf.coverageNote}</p>}
                 <p style={prose}>
                   {page.whatIf.included} shadow{page.whatIf.included === 1 ? "" : "s"} with a stored quote path.
                   {page.whatIf.skipped > 0 ? ` ${page.whatIf.skipped} left out because the path was not stored.` : ""}
@@ -179,6 +185,8 @@ export default function LearnPage() {
                       {" "}Win rate {row.winRate == null ? "n/a" : rate(row.winRate)}.
                       {" "}Total P/L {signed(row.totalPnl)}.
                       {row.tooFew ? " Too few to trust." : ""}
+                      {" "}{candleSourceLabel(row.source, page.whatIf.candlePaths ?? 0, page.whatIf.markPaths ?? 0)}
+                      {row.ambiguous ? ` ${row.ambiguous} candle${row.ambiguous === 1 ? "" : "s"} touched both the stop and the target and counted as a stop.` : ""}
                     </p>
                   </div>
                 ))}
@@ -307,6 +315,14 @@ function moneyOrUnknown(value: number | null): string {
 function signed(value: number): string {
   const sign = value > 0 ? "+" : "";
   return `${sign}$${value.toFixed(2)}`;
+}
+
+function candleSourceLabel(source: "1m" | "15m" | "mixed" | undefined, candlePaths: number, markPaths: number): string {
+  if (source === "1m") return "Data: 1-minute candles.";
+  if (source === "mixed") {
+    return `Data: mixed, ${candlePaths} on 1-minute candles and ${markPaths} on 15-minute marks.`;
+  }
+  return "Data: 15-minute marks.";
 }
 
 function rate(fraction: number): string {
