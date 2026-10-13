@@ -1,23 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { buildStoredAlert, type StoredAlert } from "@/app/lib/alertBook";
+import { buildStoredAlert } from "@/app/lib/alertBook";
 import type { AlertVerdict } from "@/app/lib/verdict";
 import { EMPTY_PRINTS } from "@/app/lib/prints";
 import { SPY_TREND_NOTE } from "@/app/lib/marketContext";
 import {
   RESEARCH_MARK_CAP,
   addResearchTracks,
-  researchSessionOpen,
-  selectResearchMarks,
   trimResearchTracks,
   type ResearchTrack,
 } from "@/app/lib/researchTrack";
 import { SHADOW_MARK_CAP, parseShadowBook, shadowFromAlert, summarizeShadows } from "@/app/lib/shadow";
-import { loadShadowPage, runShadowPass } from "@/app/lib/shadowStore";
+import { loadShadowPage, markShadowsFromRows, runShadowPass } from "@/app/lib/shadowStore";
 import { parseLearnGrades } from "@/app/lib/learnStore";
 import { clearMemoryStoreForTests, readShadowBookText, readTokens, updateShadowBook } from "@/app/lib/schwabStore";
 import * as schwab from "@/app/lib/schwab";
 import * as tradeQuotes from "@/app/lib/tradeQuotes";
-import { RESEARCH_QUOTE_CHUNK, RESEARCH_QUOTES_PER_RUN, type FlowRow } from "@/app/lib/flow";
+import type { FlowRow } from "@/app/lib/flow";
 
 const OPEN = new Date("2026-10-01T15:00:00Z");
 const EVENING = new Date("2026-10-01T22:00:00Z");
@@ -126,39 +124,34 @@ afterEach(() => {
 });
 
 describe("research tracks", () => {
-  it("records a new C with the entry split and leaves an older alert alone", () => {
+  it("does not open a new C or D, and leaves a stored track in place", () => {
     expect(SPY_TREND_NOTE).toMatch(/session VWAP/);
     expect(SPY_TREND_NOTE).toMatch(/not a 20-day or 50-day/);
     expect(RESEARCH_MARK_CAP).toBe(SHADOW_MARK_CAP);
-    const opened = addResearchTracks([], [{ row: row(), grade: "C" }, { row: row({ id: "SPY|2026-12-18|670|call", ticker: "SPY", putCall: "call", strike: 670 }), grade: "A" }], [], OPEN);
-    expect(opened.opened).toBe(1);
-    expect(opened.tracks[0]).toMatchObject({
-      putCall: "put",
-      grade: "C",
-      entryPrice: 1.2,
-      entryUnderlying: 238,
-      spyTrend: "down",
-      marks: [],
-    });
-    const again = addResearchTracks(opened.tracks, [{ row: row(), grade: "C" }], [], OPEN);
-    expect(again.opened).toBe(0);
-    const saved = buildStoredAlert(row(), verdict("C"), OPEN);
-    expect(saved.trackQuotes).toBe(true);
-    const fromAlert = addResearchTracks([], [], [saved], OPEN);
-    expect(fromAlert.opened).toBe(1);
-    expect(fromAlert.tracks[0].alertId).toBe(saved.id);
-    const old: StoredAlert = { ...saved, id: "olderalert00000001", trackQuotes: undefined };
-    expect(addResearchTracks([], [], [old], OPEN).opened).toBe(0);
+    const stored = track(1, OPEN.getTime());
+    stored.marks = [{ at: OPEN.getTime(), price: 1.1 }];
+    const opened = addResearchTracks(
+      [stored],
+      [
+        { row: row(), grade: "C" },
+        { row: row({ id: "QQQ|2026-12-18|500|put", ticker: "QQQ", putCall: "put", strike: 500 }), grade: "D" },
+        { row: row({ id: "SPY|2026-12-18|670|call", ticker: "SPY", putCall: "call", strike: 670 }), grade: "A" },
+      ],
+      [buildStoredAlert(row(), verdict("C"), OPEN)],
+      OPEN,
+    );
+    expect(opened.opened).toBe(0);
+    expect(opened.tracks).toEqual([stored]);
     const scorecard = shadowFromAlert(buildStoredAlert(row({ id: "SPY|2026-12-18|670|call", ticker: "SPY", putCall: "call", strike: 670, ask: 2 }), verdict("A"), OPEN));
     expect(scorecard?.quoteTrack).toBe(true);
     expect(scorecard?.entryUnderlying).toBe(238);
     expect(scorecard?.spyTrend).toBe("down");
-    expect(shadowFromAlert({ ...saved, grade: "A", trackQuotes: undefined })?.quoteTrack).toBeUndefined();
+    expect(shadowFromAlert(buildStoredAlert(row(), verdict("C"), OPEN))).toBeNull();
   });
 
   it("keeps C and D off the scorecard and out of the default what-if", async () => {
-    const added = addResearchTracks([], [{ row: row(), grade: "D" }], [], OPEN);
-    expect(await updateShadowBook(() => JSON.stringify({ version: 1, records: [], research: added.tracks }))).toBe(true);
+    const stored = track(1, OPEN.getTime());
+    expect(await updateShadowBook(() => JSON.stringify({ version: 1, records: [], research: [stored] }))).toBe(true);
     const book = parseShadowBook(await readShadowBookText());
     expect(book.records).toHaveLength(0);
     expect(book.research).toHaveLength(1);
@@ -172,79 +165,52 @@ describe("research tracks", () => {
     expect(parseLearnGrades("c, D, no")).toEqual(["C", "D"]);
   });
 
-  it("quotes the oldest research tracks in chunks and skips the rest without a token read", async () => {
-    process.env.SCHWAB_CLIENT_ID = "id";
-    process.env.SCHWAB_CLIENT_SECRET = "secret";
-    process.env.SCHWAB_REDIRECT_URI = "https://example.com/callback";
-    const tracks: ResearchTrack[] = [];
-    for (let i = 0; i < RESEARCH_QUOTES_PER_RUN + 1; i++) {
-      const rowTrack = track(i, OPEN.getTime() + i * 1000);
-      rowTrack.ticker = "SPY";
-      tracks.push(rowTrack);
-    }
-    expect(await updateShadowBook(() => JSON.stringify({ version: 1, records: [], research: tracks }))).toBe(true);
-    const quoted = vi.spyOn(schwab, "getQuoteEntries").mockImplementation(async (symbols) => ({
-      entries: symbols.map((symbol) => ({
-        symbol,
-        contract: {
-          bid: 1.2,
-          ask: 1.4,
-          last: 1.3,
-          volume: 10,
-          openInterest: 10,
-          delta: null,
-          iv: null,
-          strike: 100,
-          expiration: "2026-12-18",
-          putCall: "call" as const,
-        },
-      })),
-      problem: null,
-    }));
-    vi.spyOn(tradeQuotes, "quoteContractMarks").mockResolvedValue({});
-    const tokens = vi.spyOn(await import("@/app/lib/schwabStore"), "readTokens");
-    const info = vi.spyOn(console, "info").mockImplementation(() => {});
-    const writes = vi.spyOn(await import("@/app/lib/schwabStore"), "updateShadowBook");
-    const first = await runShadowPass(OPEN, []);
-    expect(first.researchSkipped).toBe(1);
-    expect(first.researchQuoted).toBe(RESEARCH_QUOTES_PER_RUN);
-    expect(quoted).toHaveBeenCalledTimes(RESEARCH_QUOTES_PER_RUN / RESEARCH_QUOTE_CHUNK);
-    for (let i = 0; i < quoted.mock.calls.length; i++) {
-      expect(quoted.mock.calls[i][0].length).toBeLessThanOrEqual(RESEARCH_QUOTE_CHUNK);
-    }
-    expect(tokens).not.toHaveBeenCalled();
-    expect(info.mock.calls.map((call) => String(call[0])).join("\n")).toMatch(/skipped 1/);
-    expect(writes).toHaveBeenCalledTimes(1);
+  it("does not quote a stored C or D, and still marks an open A", async () => {
+    const stored = track(1, OPEN.getTime());
+    stored.marks = [{ at: OPEN.getTime() - 60_000, price: 1.05 }];
+    const scorecard = shadowFromAlert(buildStoredAlert(
+      row({ id: "SPY|2026-12-18|670|call", ticker: "SPY", putCall: "call", strike: 670, ask: 2 }),
+      verdict("A"),
+      OPEN,
+    ));
+    expect(scorecard).not.toBeNull();
+    expect(await updateShadowBook(() => JSON.stringify({
+      version: 1,
+      records: [scorecard],
+      research: [stored],
+    }))).toBe(true);
+    const quotes = vi.spyOn(schwab, "getQuoteEntries").mockResolvedValue({ entries: [], problem: null });
+    vi.spyOn(tradeQuotes, "quoteContractMarks").mockImplementation(async (trades) => {
+      const marks: Record<string, { mid: number | null; bid: number | null }> = {};
+      for (let i = 0; i < trades.length; i++) marks[trades[i].id] = { mid: 2.1, bid: 2 };
+      return marks;
+    });
+    const first = await runShadowPass(OPEN, [{ row: row(), grade: "C" }, { row: row({ id: "QQQ|2026-12-18|500|put", ticker: "QQQ", putCall: "put", strike: 500 }), grade: "D" }]);
+    expect(first.researchOpened).toBe(0);
+    expect(first.researchQuoted).toBe(0);
+    expect(first.researchSkipped).toBe(0);
+    expect(quotes).not.toHaveBeenCalled();
     const saved = parseShadowBook(await readShadowBookText());
-    const marked = (saved.research ?? []).filter((item) => item.marks.length > 0);
-    expect(marked).toHaveLength(RESEARCH_QUOTES_PER_RUN);
-    expect(marked[0].marks[0].price).toBeCloseTo(1.3, 6);
-    const newest = (saved.research ?? []).find((item) => item.contractKey.endsWith(`|${100 + RESEARCH_QUOTES_PER_RUN}|call`));
-    expect(newest?.marks).toEqual([]);
+    expect(saved.research).toHaveLength(1);
+    expect(saved.research?.[0].marks).toEqual(stored.marks);
+    expect(saved.records).toHaveLength(1);
+    expect(saved.records[0].lastMark).toBeCloseTo(2.1);
     const page = await loadShadowPage(OPEN);
-    expect(page.open).toBe(0);
-    expect(page.resolved).toBe(0);
+    expect(page.open).toBe(1);
 
-    writes.mockClear();
-    quoted.mockClear();
-    const soon = await runShadowPass(new Date(OPEN.getTime() + 5 * 60_000), []);
-    expect(soon.researchQuoted).toBe(1);
-    expect(soon.researchSkipped).toBe(0);
-    expect(quoted).toHaveBeenCalledTimes(1);
-    expect(writes).toHaveBeenCalledTimes(1);
-    const rotated = parseShadowBook(await readShadowBookText());
-    expect((rotated.research ?? []).filter((item) => item.marks.length === 1)).toHaveLength(RESEARCH_QUOTES_PER_RUN + 1);
-    writes.mockClear();
-    quoted.mockClear();
-    const held = await runShadowPass(new Date(OPEN.getTime() + 6 * 60_000), []);
-    expect(held.researchQuoted).toBe(0);
-    expect(writes).not.toHaveBeenCalled();
-    expect(researchSessionOpen(EVENING)).toBe(false);
-    expect(researchSessionOpen(new Date("2026-11-26T15:00:00Z"))).toBe(false);
+    const chain = row({ id: stored.contractKey, ticker: stored.ticker, putCall: stored.putCall, strike: stored.strike, mid: 1.4, bid: 1.3, ask: 1.5 });
+    const fromPage = await markShadowsFromRows([chain], new Date(OPEN.getTime() + 20 * 60_000), [{ row: chain, grade: "D" }]);
+    expect(fromPage.marked).toBe(0);
+    const afterPage = parseShadowBook(await readShadowBookText());
+    expect(afterPage.research).toEqual(saved.research);
+    expect(afterPage.research).toHaveLength(1);
+
     const evening = await runShadowPass(EVENING, [{ row: row(), grade: "C" }]);
     expect(evening.researchOpened).toBe(0);
-    expect(selectResearchMarks(tracks, OPEN).due).toHaveLength(RESEARCH_QUOTES_PER_RUN);
-    expect(selectResearchMarks(tracks, OPEN).skipped).toBe(1);
+    expect(evening.researchQuoted).toBe(0);
+    const afterEvening = parseShadowBook(await readShadowBookText());
+    expect(afterEvening.research).toHaveLength(1);
+    expect(afterEvening.research?.[0].marks).toEqual(stored.marks);
   });
 
   it("keeps every active track when the book is past the old 400-row cap", () => {

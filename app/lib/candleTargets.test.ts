@@ -23,7 +23,7 @@ describe("candle schedule and targets", () => {
     expect(candleCronDecision(new Date("2026-10-13T18:00:00Z"), true).run).toBe(true);
   });
 
-  it("includes every grade, research tracks, and scorecard shadows, and backfill keeps older contracts", () => {
+  it("fetches open scorecard shadows and A/B alerts, and leaves C/D off the 3:30 cron", () => {
     const shadows = [
       shadow({ id: "open-spy", status: "open", openedAt: Date.parse("2026-08-03T15:00:00Z") }),
       shadow({
@@ -36,16 +36,23 @@ describe("candle schedule and targets", () => {
       }),
     ];
     const research = [track({ id: "research-c", grade: "C", ticker: "QQQ", strike: 500 })];
-    const alerts = [alert({ id: "alert-d", grade: "D", ticker: "DIA", strike: 480, putCall: "put" })];
+    const alerts = [
+      alert({ id: "alert-d", grade: "D", ticker: "DIA", strike: 480, putCall: "put" }),
+      alert({ id: "alert-a", grade: "A", ticker: "AAPL", strike: 200, putCall: "call" }),
+    ];
     const daily = dailyCandleTargets({ alerts, shadows, research, now: NOW });
     const keys = daily.map((row) => row.contractKey).sort();
     expect(keys).toContain("SPY|2026-12-18|670|call");
-    expect(keys).toContain("QQQ|2026-12-18|500|call");
-    expect(keys).toContain("DIA|2026-12-18|480|put");
+    expect(keys).toContain("AAPL|2026-12-18|200|call");
+    expect(keys).not.toContain("QQQ|2026-12-18|500|call");
+    expect(keys).not.toContain("DIA|2026-12-18|480|put");
     expect(keys).not.toContain("IWM|2026-12-18|240|put");
 
     const backfill = backfillCandleTargets({ alerts, shadows, research });
-    expect(backfill.map((row) => row.contractKey)).toContain("IWM|2026-12-18|240|put");
+    const filled = backfill.map((row) => row.contractKey);
+    expect(filled).toContain("IWM|2026-12-18|240|put");
+    expect(filled).toContain("QQQ|2026-12-18|500|call");
+    expect(filled).toContain("DIA|2026-12-18|480|put");
     expect(backfill.find((row) => row.contractKey === "SPY|2026-12-18|670|call")?.streamer).toBe(".SPY261218C670");
   });
 });

@@ -68,8 +68,29 @@ describe("candle job batches", () => {
     const books = book(3);
     vi.spyOn(schwabStore, "readAlertBookText").mockResolvedValue(books.alerts);
     vi.spyOn(schwabStore, "readShadowBookText").mockResolvedValue(books.shadows);
-    let clock = 1_000;
     const fetchCandles = vi.fn(async (subs: readonly CandleSubscription[]) => {
+      const streamer = subs[0].streamer;
+      return {
+        candles: new Map([[streamer, [BAR]]]),
+        completed: [streamer],
+        errors: [],
+        errorSample: null,
+      };
+    });
+    const skipped = await runCandleJob({
+      mode: "daily",
+      now: NOW,
+      cap: 50,
+      budgetMs: CANDLE_TIME_BUDGET_MS,
+      fetchCandles,
+    });
+    expect(skipped.processed).toBe(0);
+    expect(skipped.remaining).toBe(0);
+    expect(fetchCandles).not.toHaveBeenCalled();
+
+    vi.spyOn(schwabStore, "readShadowBookText").mockResolvedValue(openShadows(3));
+    let clock = 1_000;
+    fetchCandles.mockImplementation(async (subs: readonly CandleSubscription[]) => {
       clock += CANDLE_TIME_BUDGET_MS;
       const streamer = subs[0].streamer;
       return {
@@ -131,6 +152,36 @@ function memory() {
   process.env.TASTYTRADE_CLIENT_SECRET = "client-secret";
   process.env.TASTYTRADE_REFRESH_TOKEN = "refresh-token";
   return { files, puts };
+}
+
+function openShadows(count: number): string {
+  const names = ["SPY", "QQQ", "IWM"];
+  const strikes = [670, 500, 240];
+  const records = [];
+  for (let i = 0; i < count; i++) {
+    const ticker = names[i];
+    const strike = strikes[i];
+    const id = `172779000000${i}-${ticker}|2026-12-18|${strike}|call`;
+    records.push({
+      id,
+      alertId: id,
+      openedAt: Date.parse("2026-10-12T15:00:00Z"),
+      ticker,
+      putCall: "call",
+      strike,
+      expiration: "2026-12-18",
+      grade: "A",
+      cohort: "ab",
+      contracts: 1,
+      entryPrice: 1.2,
+      status: "open",
+      closedAt: null,
+      exitPrice: null,
+      exitReason: null,
+      marks: [],
+    });
+  }
+  return JSON.stringify({ version: 1, records });
 }
 
 function book(count: number): { alerts: string; shadows: string } {

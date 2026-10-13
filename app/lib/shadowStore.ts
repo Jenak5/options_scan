@@ -7,15 +7,9 @@ import { chooseExperimental, experimentalShadow } from "@/app/lib/experiment";
 import type { FlowRow } from "@/app/lib/flow";
 import {
   addResearchTracks,
-  appendResearchMark,
-  applyResearchRowQuotes,
-  quoteResearchSymbols,
-  researchSessionOpen,
-  selectResearchMarks,
   type ResearchCandidate,
   type ResearchTrack,
 } from "@/app/lib/researchTrack";
-import { RESEARCH_QUOTES_PER_RUN } from "@/app/lib/flow";
 import {
   addMissingShadows,
   addShadowRecords,
@@ -151,27 +145,16 @@ function quotesFromRows(rows: readonly FlowRow[]): Map<string, { mid: number | n
 function previewRowPass(
   book: ShadowBook,
   quotes: ReadonlyMap<string, { mid: number | null; bid: number | null }>,
-  candidates: readonly ResearchCandidate[],
+  _candidates: readonly ResearchCandidate[],
   now: Date,
 ): { book: ShadowBook; marked: number; closed: number; researchOpened: number; changed: boolean } {
   const applied = applyRowMarks(book, quotes, now);
-  if (!researchSessionOpen(now)) {
-    return {
-      book: { ...book, records: applied.records },
-      marked: applied.marked,
-      closed: applied.closed,
-      researchOpened: 0,
-      changed: applied.marked > 0,
-    };
-  }
-  const added = addResearchTracks(book.research ?? [], candidates, [], now);
-  const researchMarks = applyResearchRowQuotes(added.tracks, quotes, now);
   return {
-    book: { version: 1, records: applied.records, research: researchMarks.tracks },
+    book: { ...book, records: applied.records },
     marked: applied.marked,
     closed: applied.closed,
-    researchOpened: added.opened,
-    changed: applied.marked > 0 || added.opened > 0 || researchMarks.marked > 0,
+    researchOpened: 0,
+    changed: applied.marked > 0,
   };
 }
 
@@ -240,10 +223,7 @@ export async function runShadowPass(
   const parsed = parseShadowBook(currentText);
   const synced = addMissingShadows(parsed, alertBook.records);
   const withFeatures = attachMissingFeatures(synced.book.records, alertBook.records);
-  const session = researchSessionOpen(now);
-  const researchAdded = session
-    ? addResearchTracks(synced.book.research ?? [], candidates, alertBook.records, now)
-    : { tracks: synced.book.research ?? [], opened: 0 };
+  const researchAdded = addResearchTracks(synced.book.research ?? [], candidates, alertBook.records, now);
   const featured: ShadowBook = { version: 1, records: withFeatures, research: researchAdded.tracks };
   const openDue = shadowsToQuote(featured.records);
   const pathDue = selectPathMarkShadows(featured.records, openDue, now);
@@ -265,7 +245,7 @@ export async function runShadowPass(
     return applyShadowQuote(row, quote, now);
   });
   const quoted = quotedIds.size;
-  const researchPass = await markResearchTracks(researchAdded.tracks, now, session);
+  const researchPass = await markResearchTracks(researchAdded.tracks);
   const edited: ShadowBook = { version: 1, records: nextRecords, research: researchPass.tracks };
   const closed = countClosed(featured.records, edited.records);
   const idle = shadowBooksEqual(featured, edited) && synced.opened === 0 && researchAdded.opened === 0;
@@ -296,31 +276,12 @@ export async function runShadowPass(
 }
 
 /**
- * Research marks share this cron's quote pass. They use the quotes endpoint in chunks,
- * after the scorecard chains, and they do not add a token read per symbol.
+ * Stored C and D tracks are not quoted. Their marks stay as saved.
  */
 async function markResearchTracks(
   tracks: readonly ResearchTrack[],
-  now: Date,
-  session: boolean,
 ): Promise<{ tracks: ResearchTrack[]; quoted: number; skipped: number }> {
-  if (!session || tracks.length === 0) return { tracks: tracks.slice(), quoted: 0, skipped: 0 };
-  const selected = selectResearchMarks(tracks, now);
-  if (selected.skipped > 0) {
-    console.info(`Research marks skipped ${selected.skipped} contracts (cap ${RESEARCH_QUOTES_PER_RUN}, oldest mark first).`);
-  }
-  if (selected.due.length === 0) return { tracks: tracks.slice(), quoted: 0, skipped: selected.skipped };
-  const quotes = await quoteResearchSymbols(selected.due);
-  let quoted = 0;
-  const next = tracks.map((row) => {
-    const quote = quotes.get(row.contractKey);
-    if (!quote) return row;
-    const updated = appendResearchMark(row, quote, now);
-    if (updated === row) return row;
-    quoted += 1;
-    return updated;
-  });
-  return { tracks: next, quoted, skipped: selected.skipped };
+  return { tracks: tracks.slice(), quoted: 0, skipped: 0 };
 }
 
 /**
