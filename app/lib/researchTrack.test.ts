@@ -8,6 +8,7 @@ import {
   addResearchTracks,
   researchSessionOpen,
   selectResearchMarks,
+  trimResearchTracks,
   type ResearchTrack,
 } from "@/app/lib/researchTrack";
 import { SHADOW_MARK_CAP, parseShadowBook, shadowFromAlert, summarizeShadows } from "@/app/lib/shadow";
@@ -244,5 +245,24 @@ describe("research tracks", () => {
     expect(evening.researchOpened).toBe(0);
     expect(selectResearchMarks(tracks, OPEN).due).toHaveLength(RESEARCH_QUOTES_PER_RUN);
     expect(selectResearchMarks(tracks, OPEN).skipped).toBe(1);
+  });
+
+  it("keeps every active track when the book is past the old 400-row cap", () => {
+    const now = new Date("2026-10-13T18:00:00Z");
+    const active = Array.from({ length: 401 }, (_, index) => track(index, Date.parse("2026-10-12T15:00:00Z")));
+    const kept = addResearchTracks(active, [], [], now);
+    expect(kept.tracks).toHaveLength(401);
+    expect(kept.opened).toBe(0);
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const older = track(500, Date.parse("2026-08-03T15:00:00Z"));
+    const finished = track(501, Date.parse("2026-09-01T15:00:00Z"));
+    const stillOpen = [track(502, Date.parse("2026-10-12T15:00:00Z")), track(503, Date.parse("2026-10-13T14:00:00Z"))];
+    const trimmed = trimResearchTracks([older, finished, ...stillOpen], now, 3);
+    expect(trimmed.map((row) => row.id).sort()).toEqual([finished, ...stillOpen].map((row) => row.id).sort());
+    expect(trimmed.some((row) => row.id === older.id)).toBe(false);
+    expect(String(info.mock.calls[0]?.[0])).toMatch(/finished rows outside the 7-day window/);
+    expect(String(info.mock.calls)).not.toMatch(/oldest rows/);
+    const onlyActive = trimResearchTracks(stillOpen, now, 1);
+    expect(onlyActive).toHaveLength(2);
   });
 });

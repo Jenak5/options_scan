@@ -13,7 +13,8 @@ export const maxDuration = 300;
  * is 3:30pm America/Chicago, depending on daylight time. The other returns
  * before any Tastytrade or Blob write. A market holiday returns before both.
  * ?manual=true skips the clock check and still requires the bearer token.
- * Live scorecard exits are not recomputed here.
+ * One call stores at most 50 contracts, or stops after about 240 seconds, and
+ * returns processed and remaining. Live scorecard exits are not recomputed here.
  */
 export async function GET(request: NextRequest) {
   return withBlobReadCache(() => handleCandleCron(request));

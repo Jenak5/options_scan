@@ -39,7 +39,12 @@ export interface TrackedShadow {
  * Marks are real quotes. A missed 15-minute slot is left blank.
  */
 
-export const RESEARCH_TRACK_CAP = 400;
+/**
+ * Finished tracks kept on the scorecard document together with every active one.
+ * A track still inside 7 trading days is never removed to fit this number.
+ * One scan still rewrites one scorecard blob. Finished rows are not sharded into more blobs.
+ */
+export const RESEARCH_TRACK_CAP = 2000;
 
 /** Skip a second mark when this track was quoted a few minutes ago. */
 export const RESEARCH_MARK_REUSE_MS = 10 * 60 * 1000;
@@ -199,7 +204,35 @@ export function addResearchTracks(
     if (item.grade !== "C" && item.grade !== "D") continue;
     consider(researchFromRow(item.row, item.grade, now));
   }
-  return { tracks: trimResearch(tracks, now), opened };
+  return { tracks: trimResearchTracks(tracks, now), opened };
+}
+
+/**
+ * Keep every track that is still inside the 7-day window.
+ * Only finished rows are removed, and only after the document is past the cap.
+ */
+export function trimResearchTracks(
+  tracks: readonly ResearchTrack[],
+  now: Date,
+  cap: number = RESEARCH_TRACK_CAP,
+): ResearchTrack[] {
+  const active: ResearchTrack[] = [];
+  const finished: ResearchTrack[] = [];
+  for (let i = 0; i < tracks.length; i++) {
+    const row = tracks[i];
+    if (trackWindowOpen(row.openedAt, row.expiration, now)) active.push(row);
+    else finished.push(row);
+  }
+  finished.sort((a, b) => a.openedAt - b.openedAt);
+  const room = Math.max(0, cap - active.length);
+  const dropped = Math.max(0, finished.length - room);
+  const keptFinished = dropped > 0 ? finished.slice(finished.length - room) : finished;
+  if (dropped > 0) {
+    console.info(
+      `Research tracks kept ${active.length} active rows and dropped ${dropped} finished rows outside the 7-day window to stay within ${cap}.`,
+    );
+  }
+  return active.concat(keptFinished);
 }
 
 export function selectResearchMarks(
@@ -345,30 +378,6 @@ function buildTrack(row: ResearchTrack): ResearchTrack | null {
     spyTrend: spyTrendFromDirection(row.spyTrend),
     marks: [],
   };
-}
-
-function trimResearch(tracks: ResearchTrack[], now: Date): ResearchTrack[] {
-  if (tracks.length <= RESEARCH_TRACK_CAP) return tracks;
-  const drop = new Set<string>();
-  let extra = tracks.length - RESEARCH_TRACK_CAP;
-  const finished = tracks.filter((row) => !trackWindowOpen(row.openedAt, row.expiration, now))
-    .slice()
-    .sort((a, b) => a.openedAt - b.openedAt);
-  for (let i = 0; i < finished.length && extra > 0; i++) {
-    drop.add(finished[i].id);
-    extra -= 1;
-  }
-  if (extra > 0) {
-    const rest = tracks.filter((row) => !drop.has(row.id)).slice().sort((a, b) => a.openedAt - b.openedAt);
-    for (let i = 0; i < rest.length && extra > 0; i++) {
-      drop.add(rest[i].id);
-      extra -= 1;
-    }
-  }
-  if (drop.size > 0) {
-    console.info(`Research tracks dropped ${drop.size} oldest rows to stay within ${RESEARCH_TRACK_CAP}.`);
-  }
-  return tracks.filter((row) => !drop.has(row.id));
 }
 
 function byResearchAge(a: ResearchTrack, b: ResearchTrack): number {

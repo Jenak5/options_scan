@@ -84,6 +84,11 @@ interface CandleTransport {
 
 type Connect = (url: string) => Promise<CandleTransport>;
 
+/** One OAuth access token, reused for every quote session in a run. */
+export interface CandleAccess {
+  access: string;
+}
+
 export function tastytradeCandleConfigured(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
@@ -222,6 +227,25 @@ export function parseCompactCandles(data: unknown): ParsedCandle[] {
   return out;
 }
 
+export async function openCandleAccess(deps?: {
+  fetchImpl?: typeof fetch;
+  env?: Record<string, string | undefined>;
+}): Promise<{ access: CandleAccess; errorSample: null } | { access: null; errorSample: string }> {
+  const fetchImpl = deps?.fetchImpl ?? fetch;
+  const env = deps?.env ?? process.env;
+  const creds = readTastytradeCredentials(env);
+  if (!creds) return { access: null, errorSample: "Tastytrade candles are not configured." };
+  try {
+    const access = await requestAccessToken(fetchImpl, creds);
+    return { access: { access }, errorSample: null };
+  } catch (err) {
+    const sample = err instanceof TastytradeOAuthError
+      ? err.sample
+      : clip(err instanceof Error ? err.message : "Tastytrade OAuth failed");
+    return { access: null, errorSample: sample };
+  }
+}
+
 export async function fetchOptionCandles(
   subs: readonly CandleSubscription[],
   deps?: {
@@ -231,6 +255,8 @@ export async function fetchOptionCandles(
     quietMs?: number;
     emptyWaitMs?: number;
     env?: Record<string, string | undefined>;
+    /** When set, this run does not request another OAuth token. */
+    access?: CandleAccess | null;
   },
 ): Promise<CandleFetchResult> {
   const candles = new Map<string, CandleBar[]>();
@@ -244,23 +270,13 @@ export async function fetchOptionCandles(
   const quietMs = deps?.quietMs ?? 2500;
   const emptyWaitMs = deps?.emptyWaitMs ?? 8000;
   const env = deps?.env ?? process.env;
-  const creds = readTastytradeCredentials(env);
-  if (!creds) {
-    return {
-      candles,
-      completed,
-      errors: ["Tastytrade candles are not configured."],
-      errorSample: null,
-    };
-  }
-  let access = "";
-  try {
-    access = await requestAccessToken(fetchImpl, creds);
-  } catch (err) {
-    const sample = err instanceof TastytradeOAuthError
-      ? err.sample
-      : clip(err instanceof Error ? err.message : "Tastytrade OAuth failed");
-    return { candles, completed, errors: [sample], errorSample: sample };
+  let access = deps?.access?.access ?? "";
+  if (!access) {
+    const opened = await openCandleAccess({ fetchImpl, env });
+    if (!opened.access) {
+      return { candles, completed, errors: [opened.errorSample], errorSample: opened.errorSample };
+    }
+    access = opened.access.access;
   }
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i];
