@@ -2,6 +2,7 @@ import type { StoredAlert } from "@/app/lib/alertBook";
 import { chicagoDate, isMarketDay, isNyseHoliday } from "@/app/lib/marketHours";
 import { RULES_VERSION } from "@/app/lib/rulesVersion";
 import { latestScan, type ScanHealth, type ScanOutcome } from "@/app/lib/scanHealth";
+import { countTrackedAlerts, type ResearchTrack, type TrackedShadow } from "@/app/lib/researchTrack";
 import { isExperimentShadow, type ShadowTrade } from "@/app/lib/shadow";
 
 /**
@@ -26,6 +27,12 @@ export interface HealthReport {
   marketDay: boolean;
   /** "holiday" on a full-day NYSE close, so a missing scan is expected. Otherwise null. */
   reason: "holiday" | null;
+  /** Scorecard quote-tracks plus research tracks. Alerts saved before tracking are not in this count. */
+  trackedAlertsTotal: number;
+  /** Still inside 7 Chicago trading days and not past expiration. */
+  trackedAlertsActive: number;
+  /** Finished the 7-trading-day window. An earlier expiration is not this count. */
+  trackedAlertsComplete: number;
 }
 
 export function buildHealthReport(input: {
@@ -35,6 +42,9 @@ export function buildHealthReport(input: {
   alerts: readonly StoredAlert[];
   openShadows: number;
   resolvedShadows: number;
+  trackedAlertsTotal?: number;
+  trackedAlertsActive?: number;
+  trackedAlertsComplete?: number;
   now: Date;
 }): HealthReport {
   const latest = latestScan(input.health);
@@ -63,7 +73,18 @@ export function buildHealthReport(input: {
     rulesVersion: RULES_VERSION,
     marketDay: isMarketDay(input.now),
     reason: isNyseHoliday(input.now) ? "holiday" : null,
+    trackedAlertsTotal: input.trackedAlertsTotal ?? 0,
+    trackedAlertsActive: input.trackedAlertsActive ?? 0,
+    trackedAlertsComplete: input.trackedAlertsComplete ?? 0,
   };
+}
+
+export function trackedAlertCounts(
+  shadows: readonly TrackedShadow[],
+  research: readonly ResearchTrack[],
+  now: Date,
+): { trackedAlertsTotal: number; trackedAlertsActive: number; trackedAlertsComplete: number } {
+  return countTrackedAlerts(shadows, research, now);
 }
 
 export function countShadowTotals(records: readonly ShadowTrade[]): { openShadows: number; resolvedShadows: number } {

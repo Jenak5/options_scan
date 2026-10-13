@@ -88,6 +88,16 @@ export const FLOW_HISTORY_MAX_PER_MINUTE = 60;
 export const SHADOW_QUOTES_PER_RUN = 16;
 
 /**
+ * Research-track option quotes on one cron run.
+ * These use the quotes endpoint, chunked, not one chain per contract.
+ * Oldest mark first. Contracts past the cap wait for a later run.
+ */
+export const RESEARCH_QUOTES_PER_RUN = 40;
+
+/** Symbols on one quotes request. The brief uses the same size. */
+export const RESEARCH_QUOTE_CHUNK = 20;
+
+/**
  * Planning figure for one Schwab or earnings GET.
  * Used to decide the slice size. It is not a measured latency.
  */
@@ -385,6 +395,8 @@ export function cronRequestBudget(input: {
   alertQuotes: number;
   shadowQuotes: number;
   volSymbols: number;
+  /** Quotes-endpoint calls for research tracks. Not chains. */
+  researchQuoteRequests?: number;
 }): RequestBudget {
   const tickers = Math.max(0, input.tickers);
   const followUpTickers = Math.max(0, input.followUpTickers);
@@ -392,12 +404,14 @@ export function cronRequestBudget(input: {
   const alertQuotes = Math.max(0, input.alertQuotes);
   const shadowQuotes = Math.max(0, input.shadowQuotes);
   const volSymbols = Math.max(0, input.volSymbols);
+  const researchQuoteRequests = Math.max(0, input.researchQuoteRequests ?? 0);
   const historyCap = FLOW_HISTORY_MAX_PER_MINUTE;
   const chainRequests = tickers
     + followUpTickers * followUpReads
     + alertQuotes
     + shadowQuotes
-    + volSymbols;
+    + volSymbols
+    + researchQuoteRequests;
   const historyRequests = tickers * 2;
   const volHistoryRequests = volSymbols;
   const scanBatches = tickers === 0 ? 0 : Math.ceil(tickers / FLOW_BATCH_SIZE);
@@ -411,9 +425,10 @@ export function cronRequestBudget(input: {
   const alertMs = alertQuotes * FLOW_ASSUMED_REQUEST_MS;
   const shadowBatches = shadowQuotes === 0 ? 0 : Math.ceil(shadowQuotes / FLOW_BATCH_SIZE);
   const shadowMs = shadowBatches * FLOW_ASSUMED_REQUEST_MS;
+  const researchMs = researchQuoteRequests * FLOW_ASSUMED_REQUEST_MS;
   const volBatches = volSymbols === 0 ? 0 : Math.ceil(volSymbols / 2);
   const volMs = volBatches * 2 * FLOW_ASSUMED_REQUEST_MS;
-  let estimatedWallMs = scanMs + followMs + alertMs + shadowMs + volMs;
+  let estimatedWallMs = scanMs + followMs + alertMs + shadowMs + researchMs + volMs;
   const withinChainCap = chainRequests <= FLOW_MAX_REQUESTS_PER_MINUTE;
   const withinHistoryCap = historyRequests <= historyCap;
   if (!withinChainCap) estimatedWallMs += 60_000;
@@ -437,6 +452,7 @@ function standardLoad(tickers: number): {
   alertQuotes: number;
   shadowQuotes: number;
   volSymbols: number;
+  researchQuoteRequests: number;
 } {
   const count = Math.max(0, tickers);
   return {
@@ -446,6 +462,7 @@ function standardLoad(tickers: number): {
     alertQuotes: OUTCOME_RULES.maxFollowUpQuotesPerRun,
     shadowQuotes: SHADOW_QUOTES_PER_RUN,
     volSymbols: ALERT_POLICY.maxPerDay + ALERT_POLICY.screenBuffer,
+    researchQuoteRequests: Math.ceil(RESEARCH_QUOTES_PER_RUN / RESEARCH_QUOTE_CHUNK),
   };
 }
 

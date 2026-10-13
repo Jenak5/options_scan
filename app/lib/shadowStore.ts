@@ -6,6 +6,17 @@ import { parseTradeLog } from "@/app/lib/trades";
 import { chooseExperimental, experimentalShadow } from "@/app/lib/experiment";
 import type { FlowRow } from "@/app/lib/flow";
 import {
+  addResearchTracks,
+  appendResearchMark,
+  applyResearchRowQuotes,
+  quoteResearchSymbols,
+  researchSessionOpen,
+  selectResearchMarks,
+  type ResearchCandidate,
+  type ResearchTrack,
+} from "@/app/lib/researchTrack";
+import { RESEARCH_QUOTES_PER_RUN } from "@/app/lib/flow";
+import {
   addMissingShadows,
   addShadowRecords,
   appendShadowPathMark,
@@ -16,6 +27,8 @@ import {
   isExperimentShadow,
   mergeShadowBooks,
   parseShadowBook,
+  serializeShadowBook,
+  shadowBooksEqual,
   shadowsToCsv,
   shadowsToQuote,
   summarizeShadows,
@@ -41,6 +54,9 @@ export interface ShadowPassResult {
   quoted: number;
   closed: number;
   saved: boolean;
+  researchOpened: number;
+  researchQuoted: number;
+  researchSkipped: number;
 }
 
 export interface ShadowPage extends ShadowScorecard {
@@ -102,19 +118,20 @@ const MARK_REUSE_MS = 10 * 60 * 1000;
 export async function markShadowsFromRows(
   rows: readonly FlowRow[],
   now: Date,
+  candidates: readonly ResearchCandidate[] = [],
 ): Promise<{ marked: number; closed: number; saved: boolean }> {
   const quotes = quotesFromRows(rows);
-  if (quotes.size === 0) return { marked: 0, closed: 0, saved: true };
-  const preview = applyRowMarks(parseShadowBook(await readShadowBookText()), quotes, now);
-  if (preview.marked === 0) return { marked: 0, closed: 0, saved: true };
+  const current = parseShadowBook(await readShadowBookText());
+  const preview = previewRowPass(current, quotes, candidates, now);
+  if (!preview.changed) return { marked: 0, closed: 0, saved: true };
   let marked = 0;
   let closed = 0;
   const saved = await updateShadowBook((text) => {
-    const applied = applyRowMarks(parseShadowBook(text), quotes, now);
+    const applied = previewRowPass(parseShadowBook(text), quotes, candidates, now);
     marked = applied.marked;
     closed = applied.closed;
-    if (applied.marked === 0) return text ?? JSON.stringify({ version: 1, records: applied.records });
-    return JSON.stringify({ version: 1, records: applied.records });
+    if (!applied.changed) return text ?? serializeShadowBook(applied.book);
+    return serializeShadowBook(applied.book);
   });
   return { marked: saved ? marked : 0, closed: saved ? closed : 0, saved };
 }
@@ -129,6 +146,33 @@ function quotesFromRows(rows: readonly FlowRow[]): Map<string, { mid: number | n
     quotes.set(row.id, { mid, bid });
   }
   return quotes;
+}
+
+function previewRowPass(
+  book: ShadowBook,
+  quotes: ReadonlyMap<string, { mid: number | null; bid: number | null }>,
+  candidates: readonly ResearchCandidate[],
+  now: Date,
+): { book: ShadowBook; marked: number; closed: number; researchOpened: number; changed: boolean } {
+  const applied = applyRowMarks(book, quotes, now);
+  if (!researchSessionOpen(now)) {
+    return {
+      book: { ...book, records: applied.records },
+      marked: applied.marked,
+      closed: applied.closed,
+      researchOpened: 0,
+      changed: applied.marked > 0,
+    };
+  }
+  const added = addResearchTracks(book.research ?? [], candidates, [], now);
+  const researchMarks = applyResearchRowQuotes(added.tracks, quotes, now);
+  return {
+    book: { version: 1, records: applied.records, research: researchMarks.tracks },
+    marked: applied.marked,
+    closed: applied.closed,
+    researchOpened: added.opened,
+    changed: applied.marked > 0 || added.opened > 0 || researchMarks.marked > 0,
+  };
 }
 
 function applyRowMarks(
@@ -171,7 +215,11 @@ export async function openMissingShadows(): Promise<{ opened: number; saved: boo
   const saved = await updateShadowBook((current) => {
     const latest = parseShadowBook(current);
     const again = addMissingShadows(latest, alertBook.records);
-    return JSON.stringify({ version: 1, records: attachMissingFeatures(again.book.records, alertBook.records) });
+    return serializeShadowBook({
+      version: 1,
+      records: attachMissingFeatures(again.book.records, alertBook.records),
+      research: again.book.research,
+    });
   });
   return { opened: saved ? synced.opened : 0, saved };
 }
@@ -184,11 +232,19 @@ export async function openMissingShadows(): Promise<{ opened: number; saved: boo
  * resolved on its original exit.
  * Quote work is outside the store write so a retried save does not fetch the chain again.
  */
-export async function runShadowPass(now: Date): Promise<ShadowPassResult> {
+export async function runShadowPass(
+  now: Date,
+  candidates: readonly ResearchCandidate[] = [],
+): Promise<ShadowPassResult> {
   const [alertBook, currentText] = await Promise.all([loadAlertBook(), readShadowBookText()]);
-  const synced = addMissingShadows(parseShadowBook(currentText), alertBook.records);
+  const parsed = parseShadowBook(currentText);
+  const synced = addMissingShadows(parsed, alertBook.records);
   const withFeatures = attachMissingFeatures(synced.book.records, alertBook.records);
-  const featured: ShadowBook = { version: 1, records: withFeatures };
+  const session = researchSessionOpen(now);
+  const researchAdded = session
+    ? addResearchTracks(synced.book.research ?? [], candidates, alertBook.records, now)
+    : { tracks: synced.book.research ?? [], opened: 0 };
+  const featured: ShadowBook = { version: 1, records: withFeatures, research: researchAdded.tracks };
   const openDue = shadowsToQuote(featured.records);
   const pathDue = selectPathMarkShadows(featured.records, openDue, now);
   const due = openDue.concat(pathDue);
@@ -209,16 +265,62 @@ export async function runShadowPass(now: Date): Promise<ShadowPassResult> {
     return applyShadowQuote(row, quote, now);
   });
   const quoted = quotedIds.size;
-  const edited: ShadowBook = { version: 1, records: nextRecords };
+  const researchPass = await markResearchTracks(researchAdded.tracks, now, session);
+  const edited: ShadowBook = { version: 1, records: nextRecords, research: researchPass.tracks };
   const closed = countClosed(featured.records, edited.records);
-  if (sameBook(featured, edited) && synced.opened === 0) {
-    return { opened: 0, quoted, closed: 0, saved: true };
+  const idle = shadowBooksEqual(featured, edited) && synced.opened === 0 && researchAdded.opened === 0;
+  if (idle) {
+    return {
+      opened: 0,
+      quoted,
+      closed: 0,
+      saved: true,
+      researchOpened: 0,
+      researchQuoted: researchPass.quoted,
+      researchSkipped: researchPass.skipped,
+    };
   }
   const saved = await updateShadowBook((current) => {
     const merged = mergeShadowBooks(parseShadowBook(current), edited);
-    return JSON.stringify(merged);
+    return serializeShadowBook(merged);
   });
-  return { opened: synced.opened, quoted, closed, saved };
+  return {
+    opened: synced.opened,
+    quoted,
+    closed,
+    saved,
+    researchOpened: saved ? researchAdded.opened : 0,
+    researchQuoted: researchPass.quoted,
+    researchSkipped: researchPass.skipped,
+  };
+}
+
+/**
+ * Research marks share this cron's quote pass. They use the quotes endpoint in chunks,
+ * after the scorecard chains, and they do not add a token read per symbol.
+ */
+async function markResearchTracks(
+  tracks: readonly ResearchTrack[],
+  now: Date,
+  session: boolean,
+): Promise<{ tracks: ResearchTrack[]; quoted: number; skipped: number }> {
+  if (!session || tracks.length === 0) return { tracks: tracks.slice(), quoted: 0, skipped: 0 };
+  const selected = selectResearchMarks(tracks, now);
+  if (selected.skipped > 0) {
+    console.info(`Research marks skipped ${selected.skipped} contracts (cap ${RESEARCH_QUOTES_PER_RUN}, oldest mark first).`);
+  }
+  if (selected.due.length === 0) return { tracks: tracks.slice(), quoted: 0, skipped: selected.skipped };
+  const quotes = await quoteResearchSymbols(selected.due);
+  let quoted = 0;
+  const next = tracks.map((row) => {
+    const quote = quotes.get(row.contractKey);
+    if (!quote) return row;
+    const updated = appendResearchMark(row, quote, now);
+    if (updated === row) return row;
+    quoted += 1;
+    return updated;
+  });
+  return { tracks: next, quoted, skipped: selected.skipped };
 }
 
 /**
@@ -244,8 +346,8 @@ export async function recordExperimentalShadows(
       if (shadow) added.push(shadow);
     }
     opened = added.length;
-    if (added.length === 0) return JSON.stringify(latest);
-    return JSON.stringify(addShadowRecords(latest, added));
+    if (added.length === 0) return serializeShadowBook(latest);
+    return serializeShadowBook(addShadowRecords(latest, added));
   });
   return { opened: saved ? opened : 0, saved };
 }
@@ -297,10 +399,6 @@ function countClosed(before: readonly ShadowTrade[], after: readonly ShadowTrade
     if (wasOpen.has(after[i].id) && after[i].status === "closed") closed += 1;
   }
   return closed;
-}
-
-function sameBook(left: ShadowBook, right: ShadowBook): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 export { emptyShadowBook };

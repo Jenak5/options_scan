@@ -396,12 +396,12 @@ describe("estimated flow scoring", () => {
 
     const planned = plannedCronBudget(list, open);
     expect(planned.tickers).toBe(29);
-    expect(planned.chainRequests).toBe(82);
+    expect(planned.chainRequests).toBe(84);
     expect(planned.historyRequests).toBe(58);
     expect(planned.volHistoryRequests).toBe(9);
     expect(planned.withinChainCap).toBe(true);
     expect(planned.withinHistoryCap).toBe(true);
-    expect(planned.estimatedWallMs).toBe(76_000);
+    expect(planned.estimatedWallMs).toBe(77_600);
     expect(planned.estimatedWallMs).toBeGreaterThan(60_000);
     expect(planned.fitsFunctionBudget).toBe(true);
     expect(FLOW_FUNCTION_BUDGET_MS).toBe(300_000);

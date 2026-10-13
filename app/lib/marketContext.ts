@@ -109,6 +109,30 @@ export function indexDirection(price: number | null, vwap: number | null): Index
   return "unknown";
 }
 
+/**
+ * SPY trend recorded at entry for a later research split.
+ * up: SPY's underlying is above its session VWAP by at least 0.05%.
+ * down: below its session VWAP by at least 0.05%.
+ * flat: inside that band.
+ * unknown: this scan did not include SPY, or the price or VWAP was missing.
+ * That is the direction indexDirection already computes from the SPY row in the same scan.
+ * It is not SPY versus a 20-day or 50-day average. Daily history on a scan is about one month,
+ * which can fill a 20-day average on the ticker and does not fill a 50-day average.
+ * This field does not start another price-history read.
+ */
+export const SPY_TREND_NOTE =
+  "SPY trend at entry is SPY's price versus its session VWAP on the scan that saved the alert. Above by 0.05% or more is up, below by 0.05% or more is down, and inside that band is flat. Unknown means SPY or its VWAP was not in that scan. This is not a 20-day or 50-day average, and it does not add a price-history request.";
+
+export function spyTrendFromDirection(value: IndexDirection | null | undefined): IndexDirection {
+  if (value === "up" || value === "down" || value === "flat" || value === "unknown") return value;
+  return "unknown";
+}
+
+export function parseSpyTrend(value: unknown): IndexDirection | null {
+  if (value === "up" || value === "down" || value === "flat" || value === "unknown") return value;
+  return null;
+}
+
 /** Both indexes have to agree. One unknown or flat index stays unknown, so it cannot fail a trade. */
 export function marketAlignment(putCall: PutCall, spy: IndexDirection, qqq: IndexDirection): TrendAlignment {
   if (spy === "unknown" || qqq === "unknown" || spy === "flat" || qqq === "flat") return "unknown";

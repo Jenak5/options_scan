@@ -90,7 +90,11 @@ export async function recordDisplayedAlerts(
   }
 
   const opened = await openMissingShadows();
-  const marks = await markShadowsFromRows(rows, now);
+  const marks = await markShadowsFromRows(
+    rows,
+    now,
+    graded.map((item) => ({ row: item.row, grade: item.verdict.grade })),
+  );
   return {
     saved,
     opened: opened.saved ? opened.opened : 0,

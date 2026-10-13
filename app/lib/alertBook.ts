@@ -70,6 +70,11 @@ export interface StoredAlert {
   maxContracts: number | null;
   checkpoints: Record<CheckpointName, CheckpointQuote>;
   outcome: OutcomeGrade;
+  /**
+   * True on an alert saved after research quote tracking shipped.
+   * Older alerts omit this. They are not backfilled and their prices are not invented.
+   */
+  trackQuotes?: boolean;
 }
 
 export interface DailyLoss {
@@ -176,6 +181,7 @@ export function buildStoredAlert(row: FlowRow, verdict: AlertVerdict, now: Date)
       close: emptyCheckpoint(),
     },
     outcome: "pending",
+    trackQuotes: true,
   };
 }
 
@@ -524,6 +530,7 @@ function parseAlert(value: unknown): StoredAlert | null {
     checkpoints,
     outcome: "pending",
   };
+  if (row.trackQuotes === true) alert.trackQuotes = true;
   alert.outcome = gradeOutcome(alert);
   return alert;
 }

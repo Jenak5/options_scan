@@ -13,6 +13,7 @@ import { lastAlertBookWriteError, noteAlertSentUnsaved, readScanHealth, withBlob
 import { hasValidBearer } from "@/app/lib/auth";
 import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
+import type { ResearchCandidate } from "@/app/lib/researchTrack";
 import { openMissingShadows, openScanTickers, recordExperimentalShadows, runShadowPass } from "@/app/lib/shadowStore";
 import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow, isMarketDay } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
@@ -265,7 +266,7 @@ async function handleCron(request: NextRequest) {
     }
 
     if (!inSession && !isManual) {
-      const shadow = await markShadows(now, log);
+      const shadow = await markShadows(now, log, []);
       noteShadows(summary, shadow.opened, shadow.quoted, shadow.closed, shadow.saved);
       if (shadowTouched(shadow)) shadowAt = now.getTime();
       summary.outcome = "success";
@@ -406,7 +407,7 @@ async function handleCron(request: NextRequest) {
       const openedLate = await openMissingShadows();
       noteShadows(summary, openedLate.opened, 0, 0, openedLate.saved);
       if (openedLate.opened > 0 && openedLate.saved) shadowAt = now.getTime();
-      const shadow = await markShadows(now, log);
+      const shadow = await markShadows(now, log, graded.map((item) => ({ row: item.row, grade: item.verdict.grade })));
       noteShadows(summary, shadow.opened, shadow.quoted, shadow.closed, shadow.saved);
       if (shadowTouched(shadow) || (openedLate.opened > 0 && openedLate.saved)) shadowAt = now.getTime();
     } catch (err) {
@@ -433,7 +434,7 @@ async function handleCron(request: NextRequest) {
     summary.outcome = "failed";
     summary.reason = message;
     try {
-      const shadow = await markShadows(now, log);
+      const shadow = await markShadows(now, log, []);
       noteShadows(summary, shadow.opened, shadow.quoted, shadow.closed, shadow.saved);
       if (shadowTouched(shadow)) shadowAt = now.getTime();
     } catch {
@@ -477,10 +478,17 @@ function shadowTouched(shadow: { opened: number; quoted: number; closed: number;
   return shadow.saved && (shadow.opened > 0 || shadow.quoted > 0 || shadow.closed > 0);
 }
 
-async function markShadows(now: Date, log: string[]): Promise<{ opened: number; quoted: number; closed: number; saved: boolean }> {
-  const shadow = await runShadowPass(now);
+async function markShadows(
+  now: Date,
+  log: string[],
+  candidates: readonly ResearchCandidate[],
+): Promise<{ opened: number; quoted: number; closed: number; saved: boolean }> {
+  const shadow = await runShadowPass(now, candidates);
   const saved = shadow.saved ? "saved" : "not saved";
   log.push(`Shadow alerts: ${shadow.opened} opened, ${shadow.quoted} quoted, ${shadow.closed} closed (${saved})`);
+  if (shadow.researchOpened > 0 || shadow.researchQuoted > 0 || shadow.researchSkipped > 0) {
+    log.push(`Research tracks: ${shadow.researchOpened} opened, ${shadow.researchQuoted} quoted, ${shadow.researchSkipped} skipped`);
+  }
   return shadow;
 }
 
