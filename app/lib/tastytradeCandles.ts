@@ -50,6 +50,25 @@ export interface CandleFetchResult {
   /** Streamer symbols whose session finished. An empty list means no trades, not a failure. */
   completed: string[];
   errors: string[];
+  /**
+   * Tastytrade OAuth `error` and `error_description` from this run.
+   * Null when the token request succeeded. Never includes secrets.
+   */
+  errorSample: string | null;
+}
+
+export interface TastytradeCredentials {
+  clientId: string;
+  clientSecret: string;
+  refreshToken: string;
+}
+
+export interface TastytradeTokenRequest {
+  url: string;
+  method: "POST";
+  headers: Record<string, string>;
+  /** application/x-www-form-urlencoded body. A string, so fetch does not add a charset. */
+  body: string;
 }
 
 interface QuoteSession {
@@ -68,9 +87,73 @@ type Connect = (url: string) => Promise<CandleTransport>;
 export function tastytradeCandleConfigured(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
-  return present(env.TASTYTRADE_CLIENT_ID)
-    && present(env.TASTYTRADE_CLIENT_SECRET)
-    && present(env.TASTYTRADE_REFRESH_TOKEN);
+  return readTastytradeCredentials(env) != null;
+}
+
+/** Drop CR/LF anywhere, then trim. Vercel values are sometimes pasted with a trailing newline. */
+export function cleanTastytradeEnv(value: string | undefined): string {
+  if (typeof value !== "string") return "";
+  return value.replace(/[\r\n]+/g, "").trim();
+}
+
+export function readTastytradeCredentials(
+  env: Record<string, string | undefined> = process.env,
+): TastytradeCredentials | null {
+  const clientId = cleanTastytradeEnv(env.TASTYTRADE_CLIENT_ID);
+  const clientSecret = cleanTastytradeEnv(env.TASTYTRADE_CLIENT_SECRET);
+  const refreshToken = cleanTastytradeEnv(env.TASTYTRADE_REFRESH_TOKEN);
+  if (!clientId || !clientSecret || !refreshToken) return null;
+  return { clientId, clientSecret, refreshToken };
+}
+
+/**
+ * Documented Tastytrade refresh:
+ * POST https://api.tastyworks.com/oauth/token
+ * Content-Type: application/x-www-form-urlencoded
+ * grant_type=refresh_token, refresh_token, client_secret, and client_id.
+ * User-Agent is required. The body is a string so the content type stays without ";charset".
+ */
+export function tastytradeTokenRequest(creds: TastytradeCredentials): TastytradeTokenRequest {
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: creds.refreshToken,
+    client_secret: creds.clientSecret,
+    client_id: creds.clientId,
+  }).toString();
+  return {
+    url: TOKEN_URL,
+    method: "POST",
+    headers: {
+      "User-Agent": USER_AGENT,
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    },
+    body,
+  };
+}
+
+/**
+ * Keep only OAuth `error` and `error_description`. The raw body is not returned:
+ * a 400 can echo the form, including the refresh token.
+ */
+export function tastytradeOAuthErrorSample(
+  status: number,
+  body: string,
+  secrets: readonly string[] = [],
+): string {
+  let error = "";
+  let description = "";
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    if (typeof parsed.error === "string") error = parsed.error;
+    if (typeof parsed.error_description === "string") description = parsed.error_description;
+  } catch {
+    error = "";
+  }
+  const text = [error, description].filter((part) => part.length > 0).join(": ");
+  const safe = redactSecrets(text, secrets);
+  if (!safe) return `Tastytrade OAuth failed (${status})`;
+  return clip(safe);
 }
 
 export function chunkCandleSubs<T>(items: readonly T[], limit: number = CANDLE_SUBSCRIPTION_LIMIT): T[][] {
@@ -161,17 +244,28 @@ export async function fetchOptionCandles(
   const quietMs = deps?.quietMs ?? 2500;
   const emptyWaitMs = deps?.emptyWaitMs ?? 8000;
   const env = deps?.env ?? process.env;
-  if (!tastytradeCandleConfigured(env)) {
+  const creds = readTastytradeCredentials(env);
+  if (!creds) {
     return {
       candles,
       completed,
       errors: ["Tastytrade candles are not configured."],
+      errorSample: null,
     };
+  }
+  let access = "";
+  try {
+    access = await requestAccessToken(fetchImpl, creds);
+  } catch (err) {
+    const sample = err instanceof TastytradeOAuthError
+      ? err.sample
+      : clip(err instanceof Error ? err.message : "Tastytrade OAuth failed");
+    return { candles, completed, errors: [sample], errorSample: sample };
   }
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i];
     try {
-      const session = await openQuoteSession(fetchImpl, env);
+      const session = await openQuoteSession(fetchImpl, access);
       const result = await runDxlinkBatch(session, batch, connect, timeoutMs, quietMs, emptyWaitMs);
       result.candles.forEach((bars, symbol) => {
         candles.set(symbol, bars);
@@ -185,7 +279,36 @@ export async function fetchOptionCandles(
       errors.push(clip(err instanceof Error ? err.message : "Candle fetch failed"));
     }
   }
-  return { candles, completed, errors: errors.slice(0, 8) };
+  return { candles, completed, errors: errors.slice(0, 8), errorSample: null };
+}
+
+class TastytradeOAuthError extends Error {
+  readonly sample: string;
+
+  constructor(sample: string) {
+    super(sample);
+    this.name = "TastytradeOAuthError";
+    this.sample = sample;
+  }
+}
+
+async function requestAccessToken(fetchImpl: typeof fetch, creds: TastytradeCredentials): Promise<string> {
+  const request = tastytradeTokenRequest(creds);
+  const oauth = await fetchImpl(request.url, {
+    method: request.method,
+    headers: request.headers,
+    body: request.body,
+  });
+  if (!oauth.ok) {
+    const body = await oauth.text().catch(() => "");
+    const sample = tastytradeOAuthErrorSample(oauth.status, body, [creds.clientSecret, creds.refreshToken]);
+    console.error(`Tastytrade OAuth failed (${oauth.status}): ${sample}`);
+    throw new TastytradeOAuthError(sample);
+  }
+  const oauthJson = await oauth.json() as Record<string, unknown>;
+  const access = typeof oauthJson.access_token === "string" ? oauthJson.access_token : "";
+  if (!access) throw new TastytradeOAuthError("Tastytrade OAuth did not return an access token");
+  return access;
 }
 
 export function feedMessages(subs: readonly CandleSubscription[]): object[] {
@@ -215,34 +338,7 @@ export function feedMessages(subs: readonly CandleSubscription[]): object[] {
   ];
 }
 
-async function openQuoteSession(
-  fetchImpl: typeof fetch,
-  env: Record<string, string | undefined>,
-): Promise<QuoteSession> {
-  const clientId = env.TASTYTRADE_CLIENT_ID?.trim() ?? "";
-  const clientSecret = env.TASTYTRADE_CLIENT_SECRET?.trim() ?? "";
-  const refreshToken = env.TASTYTRADE_REFRESH_TOKEN?.trim() ?? "";
-  const body = new URLSearchParams({
-    grant_type: "refresh_token",
-    refresh_token: refreshToken,
-    client_id: clientId,
-    client_secret: clientSecret,
-  });
-  const oauth = await fetchImpl(TOKEN_URL, {
-    method: "POST",
-    headers: {
-      "User-Agent": USER_AGENT,
-      "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json",
-    },
-    body,
-  });
-  if (!oauth.ok) {
-    throw new Error(`Tastytrade OAuth failed (${oauth.status})`);
-  }
-  const oauthJson = await oauth.json() as Record<string, unknown>;
-  const access = typeof oauthJson.access_token === "string" ? oauthJson.access_token : "";
-  if (!access) throw new Error("Tastytrade OAuth did not return an access token");
+async function openQuoteSession(fetchImpl: typeof fetch, access: string): Promise<QuoteSession> {
   const quote = await fetchImpl(QUOTE_URL, {
     headers: {
       "User-Agent": USER_AGENT,
@@ -383,8 +479,19 @@ function dxErrorText(row: Record<string, unknown> | null): string {
   return message;
 }
 
-function present(value: string | undefined): boolean {
-  return typeof value === "string" && value.trim().length > 0;
+function redactSecrets(text: string, secrets: readonly string[]): string {
+  let out = text;
+  for (let i = 0; i < secrets.length; i++) {
+    const secret = secrets[i];
+    if (secret.length < 8) continue;
+    out = out.split(secret).join("[redacted]");
+  }
+  return out
+    .replace(/bearer\s+\S+/gi, "bearer [redacted]")
+    .replace(
+      /(refresh_token|client_secret|access_token)(["']?\s*[:=]\s*)("[^"]*"|'[^']*'|\S+)/gi,
+      "$1$2[redacted]",
+    );
 }
 
 function clip(value: string): string {

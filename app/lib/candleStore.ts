@@ -31,6 +31,8 @@ export interface CandleIndex {
   lastRunAt: number | null;
   errors: number;
   errorNotes: string[];
+  /** Last OAuth error and error_description. Null when that request succeeded. */
+  errorSample: string | null;
   contracts: Record<string, CandleContractMeta>;
 }
 
@@ -38,6 +40,8 @@ export interface CandleHealth {
   candlesLastRun: string | null;
   candleAlertsCovered: number;
   candleErrors: number;
+  /** Tastytrade OAuth error and error_description. Null when the last token request succeeded. */
+  candleErrorSample: string | null;
 }
 
 export interface CandleCoverage extends CandleHealth {
@@ -70,11 +74,11 @@ let blobOverride: CandleBlob | null = null;
 let rateLimitedUntil = 0;
 
 export function emptyCandleIndex(): CandleIndex {
-  return { version: 1, lastRunAt: null, errors: 0, errorNotes: [], contracts: {} };
+  return { version: 1, lastRunAt: null, errors: 0, errorNotes: [], errorSample: null, contracts: {} };
 }
 
 export function emptyCandleHealth(): CandleHealth {
-  return { candlesLastRun: null, candleAlertsCovered: 0, candleErrors: 0 };
+  return { candlesLastRun: null, candleAlertsCovered: 0, candleErrors: 0, candleErrorSample: null };
 }
 
 export function setCandleBlobForTests(next: CandleBlob | null): void {
@@ -105,6 +109,7 @@ export function candleHealthFromIndex(index: CandleIndex): CandleHealth {
       : null,
     candleAlertsCovered: coveredAlertCount(index),
     candleErrors: index.errors,
+    candleErrorSample: index.errorSample,
   };
 }
 
@@ -149,6 +154,7 @@ export async function commitCandleRun(input: {
   now: number;
   errors: number;
   errorNotes: readonly string[];
+  errorSample?: string | null;
   writes: readonly CandleWrite[];
 }): Promise<CandleCommitResult> {
   if (Date.now() < rateLimitedUntil) {
@@ -215,6 +221,7 @@ export async function commitCandleRun(input: {
   index.lastRunAt = input.now;
   index.errors = input.errors;
   index.errorNotes = input.errorNotes.slice(0, 8).map((note) => note.slice(0, 180));
+  index.errorSample = input.errorSample ? input.errorSample.slice(0, 180) : null;
   if (!rateLimited) {
     try {
       const latestText = await readText(CANDLE_INDEX_PATH);
@@ -290,6 +297,9 @@ export function parseCandleIndex(text: string): CandleIndex {
       errorNotes: Array.isArray(parsed.errorNotes)
         ? parsed.errorNotes.filter((note): note is string => typeof note === "string").slice(0, 8)
         : [],
+      errorSample: typeof parsed.errorSample === "string" && parsed.errorSample.length > 0
+        ? parsed.errorSample.slice(0, 180)
+        : null,
       contracts,
     };
   } catch {

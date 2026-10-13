@@ -57,7 +57,22 @@ describe("candle blob writes", () => {
     const health = await readCandleHealth();
     expect(health.candleAlertsCovered).toBe(1);
     expect(health.candleErrors).toBe(0);
+    expect(health.candleErrorSample).toBeNull();
     expect(health.candlesLastRun).toBe(new Date(NOW + 60_000).toISOString());
+  });
+
+  it("keeps the OAuth error sample and clears it after a later run", async () => {
+    memory();
+    await commitCandleRun({
+      now: NOW,
+      errors: 1,
+      errorNotes: ["invalid_grant: refresh token is invalid"],
+      errorSample: "invalid_grant: refresh token is invalid",
+      writes: [],
+    });
+    expect((await readCandleHealth()).candleErrorSample).toBe("invalid_grant: refresh token is invalid");
+    await commitCandleRun({ now: NOW + 60_000, errors: 0, errorNotes: [], errorSample: null, writes: [] });
+    expect((await readCandleHealth()).candleErrorSample).toBeNull();
   });
 
   it("stops further blob puts after a 429", async () => {

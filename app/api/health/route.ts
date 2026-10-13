@@ -47,6 +47,7 @@ export async function GET(request: NextRequest) {
     candlesLastRun: candles.candlesLastRun,
     candleAlertsCovered: candles.candleAlertsCovered,
     candleErrors: candles.candleErrors,
+    candleErrorSample: candles.candleErrorSample,
     now,
   }));
 }
