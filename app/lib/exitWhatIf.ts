@@ -1,9 +1,10 @@
 import { TRADE_RULES } from "@/app/lib/alertConfig";
 import type { CandleBar } from "@/app/lib/candleTypes";
-import { calendarDaysBetween, newYorkDate, SHADOW_QUOTES_PER_RUN } from "@/app/lib/flow";
-import { chicagoTradingDaysElapsed, PATH_MARK_TRADING_DAY_CAP } from "@/app/lib/marketHours";
+import { addCalendarDays, calendarDaysBetween, newYorkDate, SHADOW_QUOTES_PER_RUN } from "@/app/lib/flow";
+import { chicagoTradingDayCutoffMs, chicagoTradingDaysElapsed, PATH_MARK_TRADING_DAY_CAP } from "@/app/lib/marketHours";
 import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import { contractKey, isExperimentShadow, LAST_WEEK_CALENDAR_DAYS, SHADOW_MIN_TRUST, type ShadowTrade } from "@/app/lib/shadow";
+import { chicagoYmd, newYorkMidnightMs, newYorkYmd } from "@/app/lib/zonedDay";
 
 /**
  * Replay stored shadow marks under other exit rules.
@@ -16,6 +17,9 @@ export const WHAT_IF_NOTE =
 
 export const WHAT_IF_PATH_NOTE =
   "Shadows that stored a quote path are included. A stored 1-minute candle series is included even when the 15-minute path is missing. Older shadows kept the best and worst price, not the path, so they are left out instead of guessed.";
+
+/** Stop the 1-minute replay after this and finish the remaining paths on 15-minute marks. */
+export const WHAT_IF_CANDLE_BUDGET_MS = 45_000;
 
 export interface ShadowMark {
   at: number;
@@ -140,6 +144,8 @@ export function replayExit(
   if (marks.length === 0) return null;
   const stopPrice = cappedStop(input.entryPrice, rule.stopFraction);
   const profitPrice = rule.profitFraction == null ? null : input.entryPrice * (1 + rule.profitFraction);
+  const lastWeekAt = lastWeekCutoffMs(input.expiration);
+  const flatAt = flatCutoffMs(input.openedAt, rule.flatDays);
   let peak = input.entryPrice;
   let armed = false;
   for (let i = 0; i < marks.length; i++) {
@@ -152,10 +158,8 @@ export function replayExit(
       return priced(input.entryPrice, mark.price);
     }
     if (profitPrice != null && mark.price + PRICE_EPS >= profitPrice) return priced(input.entryPrice, mark.price);
-    const dte = calendarDaysBetween(newYorkDate(new Date(mark.at)), input.expiration);
-    if (dte != null && dte <= LAST_WEEK_CALENDAR_DAYS) return priced(input.entryPrice, mark.price);
-    const days = chicagoTradingDaysElapsed(new Date(input.openedAt), new Date(mark.at));
-    if (days >= rule.flatDays) return priced(input.entryPrice, mark.price);
+    if (mark.at >= lastWeekAt) return priced(input.entryPrice, mark.price);
+    if (mark.at >= flatAt) return priced(input.entryPrice, mark.price);
   }
   return null;
 }
@@ -177,43 +181,15 @@ export function replayCandleExit(
   rule: WhatIfScenario,
 ): CandleWalk | null {
   if (!(input.entryPrice > 0) || !Number.isFinite(input.entryPrice)) return null;
-  const bars = usableCandleBars(input.candles, input.openedAt);
+  const bars = stampBars(usableCandleBars(input.candles, input.openedAt));
   if (bars.length === 0) return null;
-  const stopPrice = cappedStop(input.entryPrice, rule.stopFraction);
-  const profitPrice = rule.profitFraction == null ? null : input.entryPrice * (1 + rule.profitFraction);
-  let peak = input.entryPrice;
-  let armed = false;
-  for (let i = 0; i < bars.length; i++) {
-    const bar = bars[i];
-    const stopHit = bar.l <= stopPrice + PRICE_EPS;
-    const targetHit = profitPrice != null && bar.h + PRICE_EPS >= profitPrice;
-    if (stopHit && targetHit) {
-      return walked(priced(input.entryPrice, stopFill(bar, stopPrice)), true, bar.t, bars.length);
-    }
-    if (stopHit) {
-      return walked(priced(input.entryPrice, stopFill(bar, stopPrice)), false, bar.t, bars.length);
-    }
-    if (armed && rule.trailGiveback != null) {
-      const trailPrice = peak * (1 - rule.trailGiveback);
-      if (bar.l <= trailPrice + PRICE_EPS) {
-        const fill = bar.o <= trailPrice + PRICE_EPS ? bar.o : trailPrice;
-        const sameBarPeak = bar.h > peak + PRICE_EPS;
-        return walked(priced(input.entryPrice, fill), sameBarPeak, bar.t, bars.length);
-      }
-    }
-    if (bar.h > peak) peak = bar.h;
-    if (rule.trailArm != null && (peak - input.entryPrice) / input.entryPrice + PRICE_EPS >= rule.trailArm) armed = true;
-    if (targetHit) {
-      return walked(priced(input.entryPrice, targetFill(bar, profitPrice as number)), false, bar.t, bars.length);
-    }
-    const dte = calendarDaysBetween(newYorkDate(new Date(bar.t)), input.expiration);
-    if (dte != null && dte <= LAST_WEEK_CALENDAR_DAYS) {
-      return walked(priced(input.entryPrice, bar.c), false, bar.t, bars.length);
-    }
-    const days = chicagoTradingDaysElapsed(new Date(input.openedAt), new Date(bar.t));
-    if (days >= rule.flatDays) return walked(priced(input.entryPrice, bar.c), false, bar.t, bars.length);
-  }
-  return { exit: null, ambiguous: false, at: null, barsUsed: bars.length };
+  return walkCandles(
+    input.entryPrice,
+    bars,
+    lastWeekCutoffMs(input.expiration),
+    flatCutoffMs(input.openedAt, rule.flatDays),
+    rule,
+  );
 }
 
 /** Traded minutes at or after entry. The gap between two timestamps is left empty. */
@@ -221,10 +197,7 @@ export function usableCandleBars(bars: readonly CandleBar[], openedAt: number): 
   const filtered: CandleBar[] = [];
   for (let i = 0; i < bars.length; i++) {
     const bar = bars[i];
-    if (!Number.isFinite(bar.t) || bar.t < openedAt) continue;
-    if (!Number.isFinite(bar.o) || !Number.isFinite(bar.h) || !Number.isFinite(bar.l) || !Number.isFinite(bar.c)) continue;
-    if (!(bar.o > 0) || !(bar.h > 0) || !(bar.l > 0) || !(bar.c > 0)) continue;
-    if (bar.h + PRICE_EPS < bar.l) continue;
+    if (!barUsable(bar, openedAt)) continue;
     filtered.push(bar);
   }
   filtered.sort((a, b) => a.t - b.t);
@@ -248,10 +221,13 @@ export function whatIfFromShadows(
     grades?: readonly string[];
     research?: readonly WhatIfPath[];
     candles?: ReadonlyMap<string, readonly CandleBar[]>;
+    /** Defaults to WHAT_IF_CANDLE_BUDGET_MS. Zero finishes every candle path on 15-minute marks. */
+    budgetMs?: number;
+    nowMs?: () => number;
   },
 ): WhatIfReport {
   const grades = options?.grades;
-  const usable: WhatIfPath[] = [];
+  const pending: WhatIfPath[] = [];
   let skipped = 0;
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -259,12 +235,12 @@ export function whatIfFromShadows(
     if (grades && grades.indexOf(row.grade) === -1) continue;
     const marks = row.marks ?? [];
     const key = contractKey(row);
-    const candles = candlesFor(key, row.openedAt, options?.candles);
+    const candles = rawCandles(key, options?.candles);
     if ((marks.length === 0 && candles.length === 0) || !(row.entryPrice > 0)) {
       skipped += 1;
       continue;
     }
-    usable.push({
+    pending.push({
       grade: row.grade,
       entryPrice: row.entryPrice,
       openedAt: row.openedAt,
@@ -280,30 +256,33 @@ export function whatIfFromShadows(
       if (grades.indexOf(row.grade) === -1) continue;
       const marks = row.marks ?? [];
       const candles = row.candles && row.candles.length > 0
-        ? usableCandleBars(row.candles, row.openedAt)
-        : candlesFor(row.contractKey, row.openedAt, options.candles);
+        ? row.candles
+        : rawCandles(row.contractKey, options.candles);
       if ((marks.length === 0 && candles.length === 0) || !(row.entryPrice > 0)) {
         skipped += 1;
         continue;
       }
-      usable.push({ ...row, marks, candles });
+      pending.push({ ...row, marks, candles });
     }
   }
-  const candlePaths = usable.filter((row) => usableCandleBars(row.candles ?? [], row.openedAt).length > 0).length;
-  const markPaths = usable.length - candlePaths;
+  const nowMs = options?.nowMs ?? Date.now;
+  const budgetMs = options?.budgetMs ?? WHAT_IF_CANDLE_BUDGET_MS;
+  const replayed = replayPaths(pending, budgetMs, nowMs);
+  skipped += replayed.skipped;
   return {
     note: WHAT_IF_NOTE,
     pathNote: WHAT_IF_PATH_NOTE,
-    included: usable.length,
+    included: replayed.included,
     skipped,
-    candlePaths,
-    markPaths,
-    coverageNote: whatIfCoverageNote(candlePaths, markPaths),
-    scenarios: WHAT_IF_SCENARIOS.map((rule) => summarize(rule, usable, candlePaths, markPaths)),
+    candlePaths: replayed.candlePaths,
+    markPaths: replayed.markPaths,
+    coverageNote: whatIfCoverageNote(replayed.candlePaths, replayed.markPaths, replayed.budgetPaths),
+    scenarios: replayed.scenarios,
   };
 }
 
-export function whatIfCoverageNote(candlePaths: number, markPaths: number): string {
+export function whatIfCoverageNote(candlePaths: number, markPaths: number, budgetPaths = 0): string {
+  if (budgetPaths > 0) return budgetCoverageNote(candlePaths, markPaths, budgetPaths);
   if (candlePaths === 0 && markPaths === 0) {
     return "No path has 1-minute candles or 15-minute marks yet.";
   }
@@ -318,73 +297,21 @@ export function whatIfCoverageNote(candlePaths: number, markPaths: number): stri
   return `${candleLabel} use 1-minute highs and lows. ${markLabel} Minutes with no trades are left as gaps.`;
 }
 
-function summarize(
-  rule: WhatIfScenario,
-  rows: readonly WhatIfPath[],
-  candlePaths: number,
-  markPaths: number,
-): WhatIfResult {
-  let wins = 0;
-  let losses = 0;
-  let flats = 0;
-  let unresolved = 0;
-  let winDollars = 0;
-  let lossDollars = 0;
-  let total = 0;
-  let ambiguous = 0;
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    const bars = usableCandleBars(row.candles ?? [], row.openedAt);
-    let exit: ReplayExit | null;
-    if (bars.length > 0) {
-      const walked = replayCandleExit({
-        entryPrice: row.entryPrice,
-        openedAt: row.openedAt,
-        expiration: row.expiration,
-        candles: bars,
-      }, rule);
-      exit = walked?.exit ?? null;
-      if (walked?.ambiguous) ambiguous += 1;
-    } else {
-      exit = replayExit({
-        entryPrice: row.entryPrice,
-        openedAt: row.openedAt,
-        expiration: row.expiration,
-        marks: row.marks ?? [],
-      }, rule);
-    }
-    if (!exit) {
-      unresolved += 1;
-      continue;
-    }
-    total += exit.pnlDollars;
-    if (Math.abs(exit.pnlDollars) < TRADE_RULES.flatAbsDollars) flats += 1;
-    else if (exit.pnlDollars > 0) {
-      wins += 1;
-      winDollars += exit.pnlDollars;
-    } else {
-      losses += 1;
-      lossDollars += Math.abs(exit.pnlDollars);
-    }
+function budgetCoverageNote(candlePaths: number, markPaths: number, budgetPaths: number): string {
+  const storedMarks = markPaths - budgetPaths;
+  if (candlePaths === 0 && storedMarks <= 0) {
+    return "The 1-minute replay hit its time budget, so every row uses the 15-minute marks.";
   }
-  const resolved = wins + losses + flats;
-  const decided = wins + losses;
-  return {
-    id: rule.id,
-    label: rule.label,
-    resolved,
-    unresolved,
-    wins,
-    losses,
-    flats,
-    winRate: decided > 0 ? wins / decided : null,
-    averageWin: wins > 0 ? winDollars / wins : null,
-    averageLoss: losses > 0 ? lossDollars / losses : null,
-    totalPnl: total,
-    tooFew: resolved < SHADOW_MIN_TRUST,
-    source: candlePaths > 0 && markPaths > 0 ? "mixed" : candlePaths > 0 ? "1m" : "15m",
-    ambiguous,
-  };
+  const parts: string[] = [];
+  if (candlePaths > 0) {
+    parts.push(`${candlePaths} included path${candlePaths === 1 ? "" : "s"} use 1-minute highs and lows.`);
+  }
+  if (storedMarks > 0) {
+    parts.push(`${storedMarks} use 15-minute marks because no candles are stored for them.`);
+  }
+  parts.push(`${budgetPaths} use 15-minute marks because the 1-minute replay hit its time budget.`);
+  parts.push("Minutes with no trades are left as gaps.");
+  return parts.join(" ");
 }
 
 /**
@@ -496,15 +423,303 @@ function targetFill(bar: CandleBar, target: number): number {
   return target;
 }
 
-function candlesFor(
+interface PreparedBar extends CandleBar {
+  nyDate: string;
+  chicagoDate: string;
+}
+
+interface ReadyPath {
+  entryPrice: number;
+  openedAt: number;
+  expiration: string;
+  marks: readonly ShadowMark[];
+  bars: PreparedBar[];
+  lastWeekAt: number;
+  /** Parallel to WHAT_IF_SCENARIOS. Chicago midnight when that scenario's flat days have elapsed. */
+  flatAt: number[];
+  useCandles: boolean;
+}
+
+interface Tally {
+  wins: number;
+  losses: number;
+  flats: number;
+  unresolved: number;
+  winDollars: number;
+  lossDollars: number;
+  total: number;
+  ambiguous: number;
+}
+
+const SCENARIO_FLAT_DAYS: readonly number[] = (() => {
+  const out: number[] = [];
+  for (let i = 0; i < WHAT_IF_SCENARIOS.length; i++) {
+    const days = WHAT_IF_SCENARIOS[i].flatDays;
+    if (out.indexOf(days) === -1) out.push(days);
+  }
+  return out;
+})();
+
+function rawCandles(
   key: string | undefined,
-  openedAt: number,
   map: ReadonlyMap<string, readonly CandleBar[]> | undefined,
-): CandleBar[] {
+): readonly CandleBar[] {
   if (!key || !map) return [];
-  const found = map.get(key);
-  if (!found) return [];
-  return usableCandleBars(found, openedAt);
+  return map.get(key) ?? [];
+}
+
+function barUsable(bar: CandleBar, openedAt: number): boolean {
+  if (!Number.isFinite(bar.t) || bar.t < openedAt) return false;
+  if (!Number.isFinite(bar.o) || !Number.isFinite(bar.h) || !Number.isFinite(bar.l) || !Number.isFinite(bar.c)) return false;
+  if (!(bar.o > 0) || !(bar.h > 0) || !(bar.l > 0) || !(bar.c > 0)) return false;
+  if (bar.h + PRICE_EPS < bar.l) return false;
+  return true;
+}
+
+function hasUsableCandle(bars: readonly CandleBar[], openedAt: number): boolean {
+  for (let i = 0; i < bars.length; i++) {
+    if (barUsable(bars[i], openedAt)) return true;
+  }
+  return false;
+}
+
+/** One pass over the traded minutes. Later scenarios read this same list. */
+function stampBars(bars: readonly CandleBar[]): PreparedBar[] {
+  const out = new Array<PreparedBar>(bars.length);
+  for (let i = 0; i < bars.length; i++) {
+    const bar = bars[i];
+    out[i] = {
+      t: bar.t,
+      o: bar.o,
+      h: bar.h,
+      l: bar.l,
+      c: bar.c,
+      nyDate: newYorkYmd(bar.t),
+      chicagoDate: chicagoYmd(bar.t),
+    };
+  }
+  return out;
+}
+
+function lastWeekCutoffMs(expiration: string): number {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(expiration)) return Number.POSITIVE_INFINITY;
+  const start = addCalendarDays(expiration, -LAST_WEEK_CALENDAR_DAYS);
+  const ms = newYorkMidnightMs(start);
+  return ms == null ? Number.POSITIVE_INFINITY : ms;
+}
+
+function flatCutoffMs(openedAt: number, flatDays: number): number {
+  if (!(flatDays > 0) || !Number.isFinite(openedAt)) return Number.NEGATIVE_INFINITY;
+  const ms = chicagoTradingDayCutoffMs(new Date(openedAt), flatDays);
+  return ms == null ? Number.POSITIVE_INFINITY : ms;
+}
+
+function flatCutoffs(openedAt: number): number[] {
+  const byDays = new Map<number, number>();
+  for (let i = 0; i < SCENARIO_FLAT_DAYS.length; i++) {
+    const days = SCENARIO_FLAT_DAYS[i];
+    byDays.set(days, flatCutoffMs(openedAt, days));
+  }
+  const out = new Array<number>(WHAT_IF_SCENARIOS.length);
+  for (let i = 0; i < WHAT_IF_SCENARIOS.length; i++) {
+    out[i] = byDays.get(WHAT_IF_SCENARIOS[i].flatDays) ?? Number.POSITIVE_INFINITY;
+  }
+  return out;
+}
+
+function walkCandles(
+  entryPrice: number,
+  bars: readonly PreparedBar[],
+  lastWeekAt: number,
+  flatAt: number,
+  rule: WhatIfScenario,
+): CandleWalk | null {
+  if (bars.length === 0) return null;
+  const stopPrice = cappedStop(entryPrice, rule.stopFraction);
+  const profitPrice = rule.profitFraction == null ? null : entryPrice * (1 + rule.profitFraction);
+  let peak = entryPrice;
+  let armed = false;
+  for (let i = 0; i < bars.length; i++) {
+    const bar = bars[i];
+    const stopHit = bar.l <= stopPrice + PRICE_EPS;
+    const targetHit = profitPrice != null && bar.h + PRICE_EPS >= profitPrice;
+    if (stopHit && targetHit) {
+      return walked(priced(entryPrice, stopFill(bar, stopPrice)), true, bar.t, bars.length);
+    }
+    if (stopHit) {
+      return walked(priced(entryPrice, stopFill(bar, stopPrice)), false, bar.t, bars.length);
+    }
+    if (armed && rule.trailGiveback != null) {
+      const trailPrice = peak * (1 - rule.trailGiveback);
+      if (bar.l <= trailPrice + PRICE_EPS) {
+        const fill = bar.o <= trailPrice + PRICE_EPS ? bar.o : trailPrice;
+        const sameBarPeak = bar.h > peak + PRICE_EPS;
+        return walked(priced(entryPrice, fill), sameBarPeak, bar.t, bars.length);
+      }
+    }
+    if (bar.h > peak) peak = bar.h;
+    if (rule.trailArm != null && (peak - entryPrice) / entryPrice + PRICE_EPS >= rule.trailArm) armed = true;
+    if (targetHit) {
+      return walked(priced(entryPrice, targetFill(bar, profitPrice as number)), false, bar.t, bars.length);
+    }
+    if (bar.t >= lastWeekAt) return walked(priced(entryPrice, bar.c), false, bar.t, bars.length);
+    if (bar.t >= flatAt) return walked(priced(entryPrice, bar.c), false, bar.t, bars.length);
+  }
+  return { exit: null, ambiguous: false, at: null, barsUsed: bars.length };
+}
+
+function emptyTally(): Tally {
+  return { wins: 0, losses: 0, flats: 0, unresolved: 0, winDollars: 0, lossDollars: 0, total: 0, ambiguous: 0 };
+}
+
+function addExit(tally: Tally, exit: ReplayExit | null, ambiguous: boolean): void {
+  if (ambiguous) tally.ambiguous += 1;
+  if (!exit) {
+    tally.unresolved += 1;
+    return;
+  }
+  tally.total += exit.pnlDollars;
+  if (Math.abs(exit.pnlDollars) < TRADE_RULES.flatAbsDollars) tally.flats += 1;
+  else if (exit.pnlDollars > 0) {
+    tally.wins += 1;
+    tally.winDollars += exit.pnlDollars;
+  } else {
+    tally.losses += 1;
+    tally.lossDollars += Math.abs(exit.pnlDollars);
+  }
+}
+
+function markReady(row: WhatIfPath): ReadyPath {
+  return {
+    entryPrice: row.entryPrice,
+    openedAt: row.openedAt,
+    expiration: row.expiration,
+    marks: row.marks ?? [],
+    bars: [],
+    lastWeekAt: Number.POSITIVE_INFINITY,
+    flatAt: [],
+    useCandles: false,
+  };
+}
+
+function candleReady(row: WhatIfPath, bars: PreparedBar[]): ReadyPath {
+  return {
+    entryPrice: row.entryPrice,
+    openedAt: row.openedAt,
+    expiration: row.expiration,
+    marks: row.marks ?? [],
+    bars,
+    lastWeekAt: lastWeekCutoffMs(row.expiration),
+    flatAt: flatCutoffs(row.openedAt),
+    useCandles: true,
+  };
+}
+
+function replayPaths(
+  rows: readonly WhatIfPath[],
+  budgetMs: number,
+  nowMs: () => number,
+): {
+  included: number;
+  skipped: number;
+  candlePaths: number;
+  markPaths: number;
+  budgetPaths: number;
+  scenarios: WhatIfResult[];
+} {
+  const started = nowMs();
+  let budgetHit = false;
+  let candlePaths = 0;
+  let budgetPaths = 0;
+  let skipped = 0;
+  const ready: ReadyPath[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const marks = row.marks ?? [];
+    const candles = row.candles ?? [];
+    const mayCandle = candles.length > 0;
+    if (mayCandle && !budgetHit && nowMs() - started >= budgetMs) budgetHit = true;
+    if (mayCandle && !budgetHit) {
+      const bars = stampBars(usableCandleBars(candles, row.openedAt));
+      if (bars.length === 0 && marks.length === 0) {
+        skipped += 1;
+        continue;
+      }
+      if (bars.length > 0) {
+        candlePaths += 1;
+        ready.push(candleReady(row, bars));
+        continue;
+      }
+      ready.push(markReady(row));
+      continue;
+    }
+    if (mayCandle && budgetHit) {
+      const usable = hasUsableCandle(candles, row.openedAt);
+      if (!usable && marks.length === 0) {
+        skipped += 1;
+        continue;
+      }
+      if (usable) budgetPaths += 1;
+      ready.push(markReady(row));
+      continue;
+    }
+    if (marks.length === 0) {
+      skipped += 1;
+      continue;
+    }
+    ready.push(markReady(row));
+  }
+  const markPaths = ready.length - candlePaths;
+  const source: WhatIfSource = candlePaths > 0 && markPaths > 0 ? "mixed" : candlePaths > 0 ? "1m" : "15m";
+  const tallies = WHAT_IF_SCENARIOS.map(() => emptyTally());
+  for (let i = 0; i < ready.length; i++) {
+    const row = ready[i];
+    if (row.useCandles) {
+      for (let s = 0; s < WHAT_IF_SCENARIOS.length; s++) {
+        const walked = walkCandles(row.entryPrice, row.bars, row.lastWeekAt, row.flatAt[s], WHAT_IF_SCENARIOS[s]);
+        addExit(tallies[s], walked?.exit ?? null, walked?.ambiguous ?? false);
+      }
+      continue;
+    }
+    for (let s = 0; s < WHAT_IF_SCENARIOS.length; s++) {
+      const exit = replayExit({
+        entryPrice: row.entryPrice,
+        openedAt: row.openedAt,
+        expiration: row.expiration,
+        marks: row.marks,
+      }, WHAT_IF_SCENARIOS[s]);
+      addExit(tallies[s], exit, false);
+    }
+  }
+  return {
+    included: ready.length,
+    skipped,
+    candlePaths,
+    markPaths,
+    budgetPaths,
+    scenarios: WHAT_IF_SCENARIOS.map((rule, index) => resultFromTally(rule, tallies[index], source)),
+  };
+}
+
+function resultFromTally(rule: WhatIfScenario, tally: Tally, source: WhatIfSource): WhatIfResult {
+  const resolved = tally.wins + tally.losses + tally.flats;
+  const decided = tally.wins + tally.losses;
+  return {
+    id: rule.id,
+    label: rule.label,
+    resolved,
+    unresolved: tally.unresolved,
+    wins: tally.wins,
+    losses: tally.losses,
+    flats: tally.flats,
+    winRate: decided > 0 ? tally.wins / decided : null,
+    averageWin: tally.wins > 0 ? tally.winDollars / tally.wins : null,
+    averageLoss: tally.losses > 0 ? tally.lossDollars / tally.losses : null,
+    totalPnl: tally.total,
+    tooFew: resolved < SHADOW_MIN_TRUST,
+    source,
+    ambiguous: tally.ambiguous,
+  };
 }
 
 function scenario(

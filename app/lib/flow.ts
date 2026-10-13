@@ -4,6 +4,7 @@ import type { KeyLevels } from "@/app/lib/levels";
 import type { FlowContext } from "@/app/lib/marketContext";
 import { ALERT_POLICY, ALERT_RULES, EXPERIMENT_DTE, OUTCOME_RULES, PRINT_RULES } from "@/app/lib/alertConfig";
 import { chicagoClock } from "@/app/lib/marketHours";
+import { newYorkYmd } from "@/app/lib/zonedDay";
 import { checkBidAskSpread, openInterestPasses, volumePasses } from "@/app/lib/gate";
 import {
   detectPrints,
@@ -487,13 +488,17 @@ export function isFlowTicker(value: string): boolean {
   return TICKER_PATTERN.test(value.trim().toUpperCase());
 }
 
+const newYorkDateFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/New_York",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
 export function newYorkDate(now: Date): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(now);
+  const ms = now.getTime();
+  if (!Number.isFinite(ms)) return newYorkDateFormatter.format(now);
+  return newYorkYmd(ms);
 }
 
 export function addCalendarDays(ymd: string, days: number): string {
