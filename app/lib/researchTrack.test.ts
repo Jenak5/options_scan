@@ -5,9 +5,7 @@ import { EMPTY_PRINTS } from "@/app/lib/prints";
 import { SPY_TREND_NOTE } from "@/app/lib/marketContext";
 import {
   RESEARCH_MARK_CAP,
-  RESEARCH_QUOTES_PER_RUN,
   addResearchTracks,
-  researchFromRow,
   researchSessionOpen,
   selectResearchMarks,
   type ResearchTrack,
@@ -18,8 +16,7 @@ import { parseLearnGrades } from "@/app/lib/learnStore";
 import { clearMemoryStoreForTests, readShadowBookText, readTokens, updateShadowBook } from "@/app/lib/schwabStore";
 import * as schwab from "@/app/lib/schwab";
 import * as tradeQuotes from "@/app/lib/tradeQuotes";
-import type { FlowRow } from "@/app/lib/flow";
-import { RESEARCH_QUOTE_CHUNK } from "@/app/lib/flow";
+import { RESEARCH_QUOTE_CHUNK, RESEARCH_QUOTES_PER_RUN, type FlowRow } from "@/app/lib/flow";
 
 const OPEN = new Date("2026-10-01T15:00:00Z");
 const EVENING = new Date("2026-10-01T22:00:00Z");
@@ -34,7 +31,7 @@ function verdict(grade: "A" | "B" | "C" | "D"): AlertVerdict {
     note: "",
     levels: null,
     levelsNote: null,
-    eventLine: null,
+    eventLine: "",
     maxContracts: 1,
     singleContractExceedsCap: false,
     suggestion: null,
@@ -228,8 +225,18 @@ describe("research tracks", () => {
     expect(page.resolved).toBe(0);
 
     writes.mockClear();
+    quoted.mockClear();
     const soon = await runShadowPass(new Date(OPEN.getTime() + 5 * 60_000), []);
-    expect(soon.researchQuoted).toBe(0);
+    expect(soon.researchQuoted).toBe(1);
+    expect(soon.researchSkipped).toBe(0);
+    expect(quoted).toHaveBeenCalledTimes(1);
+    expect(writes).toHaveBeenCalledTimes(1);
+    const rotated = parseShadowBook(await readShadowBookText());
+    expect((rotated.research ?? []).filter((item) => item.marks.length === 1)).toHaveLength(RESEARCH_QUOTES_PER_RUN + 1);
+    writes.mockClear();
+    quoted.mockClear();
+    const held = await runShadowPass(new Date(OPEN.getTime() + 6 * 60_000), []);
+    expect(held.researchQuoted).toBe(0);
     expect(writes).not.toHaveBeenCalled();
     expect(researchSessionOpen(EVENING)).toBe(false);
     expect(researchSessionOpen(new Date("2026-11-26T15:00:00Z"))).toBe(false);
