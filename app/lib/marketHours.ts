@@ -88,6 +88,29 @@ export function chicagoDate(now: Date = new Date()): string {
   return chicagoClock(now)?.date ?? "";
 }
 
+/**
+ * UTC millis for a wall-clock time in America/Chicago.
+ * Chicago is either UTC-5 or UTC-6. The candidate that formats back to
+ * this date and minute is the one that matches daylight or standard time.
+ */
+export function chicagoWallTimeMs(ymd: string, hour: number, minute: number): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
+  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null;
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  const parts = ymd.split("-");
+  const year = Number(parts[0]);
+  const month = Number(parts[1]);
+  const day = Number(parts[2]);
+  const want = hour * 60 + minute;
+  const offsets = [5, 6];
+  for (let i = 0; i < offsets.length; i++) {
+    const utc = Date.UTC(year, month - 1, day, hour + offsets[i], minute, 0, 0);
+    const clock = chicagoClock(new Date(utc));
+    if (clock && clock.date === ymd && clock.minutes === want) return utc;
+  }
+  return null;
+}
+
 export function isChicagoMarketHours(now: Date = new Date()): boolean {
   const clock = chicagoClock(now);
   if (!clock || !clock.weekdaySession) return false;

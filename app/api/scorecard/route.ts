@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { loadAlertBook } from "@/app/lib/alertStore";
 import { denyIfUnauthorized } from "@/app/lib/auth";
+import { readCandleCoverage } from "@/app/lib/candleStore";
 import { withOpeningLabels } from "@/app/lib/openingCheck";
 import { emptyScanHealth, scanFreshness } from "@/app/lib/scanHealth";
 import { readScanHealth } from "@/app/lib/schwabStore";
@@ -27,10 +28,15 @@ export async function GET(request: NextRequest) {
   }
 
   const now = new Date();
-  const [page, health, book] = await Promise.all([
+  const [page, health, book, candles] = await Promise.all([
     loadShadowPage(now),
     readScanHealth().catch(() => emptyScanHealth()),
     loadAlertBook(),
+    readCandleCoverage().catch(() => null),
   ]);
-  return NextResponse.json({ ...withOpeningLabels(page, book.records), freshness: scanFreshness(health) });
+  return NextResponse.json({
+    ...withOpeningLabels(page, book.records),
+    freshness: scanFreshness(health),
+    candles,
+  });
 }

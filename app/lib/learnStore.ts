@@ -1,7 +1,8 @@
 import { parseAlertBook } from "@/app/lib/alertBook";
+import { loadCandleSeries } from "@/app/lib/candleStore";
 import { analyzeLearning, learningCsv, readGradeChecks, type LearnReport } from "@/app/lib/learn";
 import { readAlertBookText, readShadowBookText, readTradeLogText, resolveStoreKind } from "@/app/lib/schwabStore";
-import { parseShadowBook } from "@/app/lib/shadow";
+import { contractKey, parseShadowBook } from "@/app/lib/shadow";
 import { parseTradeLog } from "@/app/lib/trades";
 
 /**
@@ -35,6 +36,11 @@ export async function loadLearnPage(now: Date, grades?: readonly string[]): Prom
     readTradeLogText(),
   ]);
   const book = parseShadowBook(shadowText);
+  const keys: string[] = [];
+  for (let i = 0; i < book.records.length; i++) keys.push(contractKey(book.records[i]));
+  const research = book.research ?? [];
+  for (let i = 0; i < research.length; i++) keys.push(research[i].contractKey);
+  const candles = await loadCandleSeries(keys).catch(() => undefined);
   const report = analyzeLearning({
     shadows: book.records,
     alerts: parseAlertBook(alertText).records,
@@ -43,6 +49,7 @@ export async function loadLearnPage(now: Date, grades?: readonly string[]): Prom
     now,
     grades,
     research: book.research,
+    candles,
   });
   return { ...report, stored: resolveStoreKind() !== "unconfigured" };
 }

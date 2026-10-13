@@ -31,7 +31,7 @@ Jena: add one GitHub Actions secret or that backup exits before it calls the sca
 
 Opening the Flow tab scans Schwab and shows grades on the screen. That used to be display-only: an A or a B on the page was not saved, so Scorecard and Learning mode stayed empty unless the scheduled scan also ran. During Central market hours (weekdays, 8:30–15:00) a Flow load saves a new A or B (same daily cap and one-setup-per-day rule), opens its shadow, marks that shadow from the chain it already read, stores the learning snapshot, and runs the next-day open-interest check. It does not add a Schwab request for the mark. Outside those hours, and on a full-day NYSE holiday, the page still shows the chain, and it does not save alerts, open or mark shadows, store a learning snapshot, or run that check. After-close quotes are often wide, so they are not used for stops or targets. The scheduled scan still runs on its own clock, except on a full-day holiday, when it does not run at all. A page load does not take the cron slot, so the two do not block each other. Each Flow request writes the same one-line scan log, with the reason `Flow page`, or `Flow page, market holiday` when the save is skipped for a holiday.
 
-`GET /api/health` is a read-only check for a monitor that calls it about once an hour during market hours. It reads the shared scan record, not a copy kept in the server process, so a scan that finished on the cron shows up on the next check. A failed write of that record logs `Scan health could not be written`. Send `Authorization: Bearer <HEALTH_TOKEN>`. If `HEALTH_TOKEN` is not set in Vercel, the same header may carry `CRON_SECRET` instead. A signed-in browser session is not enough. The JSON has the last scan time and outcome (the newer of the scheduled scan and a Flow page load), whether Schwab is connected, whether Tastytrade is enabled, alerts saved today, open shadows, the last shadow mark time, learning snapshots saved today, resolved shadows, and the rules version. It also has `marketDay`. On a full-day NYSE holiday that is `false` and `reason` is `"holiday"`, so a missing scan is expected. On any other day `reason` is null. It does not include tokens or account numbers, and it does not call Tastytrade.
+`GET /api/health` is a read-only check for a monitor that calls it about once an hour during market hours. It reads the shared scan record, not a copy kept in the server process, so a scan that finished on the cron shows up on the next check. A failed write of that record logs `Scan health could not be written`. Send `Authorization: Bearer <HEALTH_TOKEN>`. If `HEALTH_TOKEN` is not set in Vercel, the same header may carry `CRON_SECRET` instead. A signed-in browser session is not enough. The JSON has the last scan time and outcome (the newer of the scheduled scan and a Flow page load), whether Schwab is connected, whether Tastytrade is enabled, alerts saved today, open shadows, the last shadow mark time, learning snapshots saved today, resolved shadows, and the rules version. It also has `candlesLastRun`, `candleAlertsCovered`, and `candleErrors` from the after-close 1-minute candle job. It also has `marketDay`. On a full-day NYSE holiday that is `false` and `reason` is `"holiday"`, so a missing scan is expected. On any other day `reason` is null. It does not include tokens or account numbers, and it does not call Tastytrade.
 
 Jena: add `HEALTH_TOKEN` in Vercel if the monitor should not reuse the cron secret.
 
@@ -55,6 +55,10 @@ The cron handler then checks the New York calendar. On a weekend or a full-day N
 
 From **15:00 through 15:20 Central** the same route only re-quotes alerts already sent that day. It does not send new Telegram alerts in that window. That quote is the same-day close. 15-minute and 1-hour checks run on the regular in-session crons.
 
+A separate cron, `GET /api/cron/candles`, stores 1-minute option candles after the close. Vercel calls it at **20:30 UTC** and **21:30 UTC** on weekdays. The route keeps the call that is **3:30pm America/Chicago** (20:30 UTC during CDT, 21:30 UTC during CST) and returns before Tastytrade or Blob on the other one. Weekends are not scheduled. A full-day NYSE holiday returns `{skipped: "market holiday"}` before any fetch. `?manual=true` skips the clock check and still needs `Authorization: Bearer <CRON_SECRET>`. Each tracked alert, including every grade, the research tracks, and the scorecard shadows, is saved as one private blob per contract per Chicago day. The same day is not written again when the candle count is unchanged. Live scorecard exits are not recomputed.
+
+`POST /api/candles/backfill` (GET works too) pulls candles from **2026-09-01** for every past alert and shadow that has a contract symbol. It uses the same bearer as `/api/health`. Calling it again skips contracts that already finished, so it does not rewrite those blobs.
+
 Vercel sends `Authorization: Bearer <CRON_SECRET>`. The route accepts that header only. It does not accept `?secret=` or `x-cron-secret`, because secrets in URLs end up in logs.
 
 ## Sign-in
@@ -68,6 +72,8 @@ Middleware requires that cookie, or `Authorization: Bearer <CRON_SECRET>`, on ev
 - `/login` and `POST /api/auth/login`
 - `POST /api/auth/logout`
 - `GET /api/cron` (bearer check inside the route)
+- `GET /api/cron/candles` (same bearer as `/api/cron`)
+- `GET` or `POST /api/candles/backfill` (same bearer as `/api/health`)
 - `GET /api/health` (bearer `HEALTH_TOKEN`, or `CRON_SECRET` when `HEALTH_TOKEN` is unset)
 - `GET /api/brief` (same bearer as `/api/health`; a signed-in session is not enough)
 
@@ -89,9 +95,10 @@ Set every secret in Vercel as a **Sensitive** variable. Do not leave them readab
 | `HEALTH_TOKEN` | Yes | Optional bearer for `GET /api/health` and `GET /api/brief`. When set, those routes accept this token and do not accept `CRON_SECRET` |
 | `APP_PASSWORD` | Yes | Password for `/login` |
 | `SESSION_SECRET` | Yes | Signs the session cookie and the Schwab OAuth state cookie |
-| `TASTYTRADE_ENABLED` | No | Must be exactly `true`, and the three Tastytrade values below must be set, or Tastytrade stays off |
-| `TASTYTRADE_CLIENT_SECRET` | Yes | OAuth client secret. Unused while Tastytrade is off |
-| `TASTYTRADE_REFRESH_TOKEN` | Yes | OAuth refresh token |
+| `TASTYTRADE_ENABLED` | No | Must be exactly `true`, and the account values below must be set, or the account tab stays off. The candle job does not read this flag |
+| `TASTYTRADE_CLIENT_ID` | Yes | OAuth client id for 1-minute option candles. Required by the candle cron and the backfill |
+| `TASTYTRADE_CLIENT_SECRET` | Yes | OAuth client secret. The account tab leaves it unused while Tastytrade is off. The candle job reads it whenever it is set |
+| `TASTYTRADE_REFRESH_TOKEN` | Yes | OAuth refresh token. Shared by the account tab and the candle job |
 | `TASTYTRADE_ACCOUNT_NUMBER` | Yes | Account to read |
 | `TASTYTRADE_ENV` | No | `production` for the live account. `sandbox` is the cert API. |
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from @BotFather |

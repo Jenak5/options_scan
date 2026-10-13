@@ -64,9 +64,17 @@ interface Freshness {
   lastShadow: string;
 }
 
+interface CandleCoverage {
+  candlesLastRun: string | null;
+  candleAlertsCovered: number;
+  candleErrors: number;
+  note: string;
+}
+
 interface Scorecard {
   stored: boolean;
   freshness?: Freshness;
+  candles?: CandleCoverage | null;
   estimateNote: string;
   sampleNote: string;
   resolved: number;
@@ -129,6 +137,7 @@ export default function ScorecardPage() {
               </p>
             )}
             <Note color="#94a3b8">{page.estimateNote}</Note>
+            {page.candles?.note && <Note color="#94a3b8">{page.candles.note}</Note>}
             <Note color={page.tooFew ? "#fbbf24" : "#94a3b8"}>{page.sampleNote}</Note>
             {page.excludedPaper > 0 && (
               <Note color="#94a3b8">

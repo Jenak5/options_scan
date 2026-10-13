@@ -55,6 +55,9 @@ describe("health report", () => {
       trackedAlertsTotal: 0,
       trackedAlertsActive: 0,
       trackedAlertsComplete: 0,
+      candlesLastRun: null,
+      candleAlertsCovered: 0,
+      candleErrors: 0,
     });
     expect(JSON.stringify(report)).not.toContain("token");
     expect(JSON.stringify(report)).not.toContain("secret");
@@ -72,6 +75,28 @@ describe("health report", () => {
     });
     expect(report.marketDay).toBe(false);
     expect(report.reason).toBe("holiday");
+    expect(report.candlesLastRun).toBeNull();
+    expect(report.candleAlertsCovered).toBe(0);
+    expect(report.candleErrors).toBe(0);
+  });
+
+  it("reports the last candle run without treating it as a scorecard exit", () => {
+    const report = buildHealthReport({
+      health: emptyScanHealth(),
+      schwabConnected: true,
+      tastytradeEnabled: false,
+      alerts: [],
+      openShadows: 1,
+      resolvedShadows: 2,
+      candlesLastRun: "2026-10-13T20:30:00.000Z",
+      candleAlertsCovered: 4,
+      candleErrors: 1,
+      now: NOW,
+    });
+    expect(report.candlesLastRun).toBe("2026-10-13T20:30:00.000Z");
+    expect(report.candleAlertsCovered).toBe(4);
+    expect(report.candleErrors).toBe(1);
+    expect(report.resolvedShadows).toBe(2);
   });
 
   it("counts open and resolved A/B shadows and skips the test book", () => {
