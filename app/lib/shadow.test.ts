@@ -354,6 +354,10 @@ describe("shadow scorecard", () => {
 
     const resolved = appendShadowPathMark(stopped, { mid: 1.3, bid: 1.25 }, new Date(OPEN.getTime() + 15 * 60_000));
     expect(shadowPathStillNeeded(resolved, new Date(OPEN.getTime() + 15 * 60_000))).toBe(false);
+    const tracked = { ...resolved, quoteTrack: true as const };
+    expect(shadowPathStillNeeded(tracked, new Date(OPEN.getTime() + 15 * 60_000))).toBe(true);
+    expect(shadowPathStillNeeded(tracked, new Date("2026-10-12T15:00:00Z"))).toBe(false);
+    expect(summarizeShadows([tracked], new Set(), OPEN).totalPnl).toBeCloseTo(summarizeShadows([resolved], new Set(), OPEN).totalPnl, 6);
 
     expect(SHADOW_MARK_CAP).toBeGreaterThanOrEqual(8 * 27);
     let held = stopped;

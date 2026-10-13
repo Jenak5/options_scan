@@ -57,8 +57,9 @@ export async function GET(request: NextRequest) {
         const maxPerDay = alertsPerDayLimit(process.env.ALERT_MAX_PER_DAY);
         const sent = indexSentAlerts((await loadAlertBook()).records, tradingDay);
         const room = Math.max(0, maxPerDay - sent.count);
+        const graded = gradeAlertCandidates(rows, losses, now);
         const picks = chooseAlerts({
-          candidates: gradeAlertCandidates(rows, losses, now),
+          candidates: graded,
           alreadySentContractKeys: sent.contracts,
           alreadySentSetupKeys: sent.setups,
           limit: room,
@@ -98,7 +99,11 @@ export async function GET(request: NextRequest) {
 
         try {
           const opened = await openMissingShadows();
-          const marks = await markShadowsFromRows(scan.rows, now);
+          const marks = await markShadowsFromRows(
+            scan.rows,
+            now,
+            graded.map((item) => ({ row: item.row, grade: item.verdict.grade })),
+          );
           const touched = (opened.saved && opened.opened > 0) || (marks.saved && (marks.marked > 0 || marks.closed > 0));
           await noteBrowserScan(now, touched ? now.getTime() : null);
           log.push(`Shadows: ${opened.opened} opened, ${marks.marked} marked from this scan`);

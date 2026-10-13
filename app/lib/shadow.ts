@@ -7,6 +7,8 @@ import { EXPERIMENT_SECTION_NOTE, experimentTrustNote } from "@/app/lib/experime
 import { planExits } from "@/app/lib/exits";
 import { calendarDaysBetween, newYorkDate, SHADOW_QUOTES_PER_RUN } from "@/app/lib/flow";
 import { chicagoTradingDaysElapsed } from "@/app/lib/marketHours";
+import { parseSpyTrend, spyTrendFromDirection, type IndexDirection } from "@/app/lib/marketContext";
+import { mergeResearchTracks, parseResearchTracks, type ResearchTrack } from "@/app/lib/researchTrack";
 
 /**
  * Shadow outcome for an A or B alert.
@@ -79,11 +81,23 @@ export interface ShadowTrade {
   lastMark: number | null;
   lastMarkSource: ShadowQuoteSource | null;
   lastMarkedAt: number | null;
+  /**
+   * True only for an A or B saved after research tracking shipped.
+   * The live exit stays put. Quote marks continue for 7 trading days or until expiration.
+   * Missing means an older scorecard shadow. Those are not backfilled.
+   */
+  quoteTrack?: boolean;
+  /** Underlying price at entry. Present only when quoteTrack is set. Null when the scan had none. */
+  entryUnderlying?: number | null;
+  /** SPY versus its session VWAP at entry. See SPY_TREND_NOTE. Present only when quoteTrack is set. */
+  spyTrend?: IndexDirection | null;
 }
 
 export interface ShadowBook {
   version: 1;
   records: ShadowTrade[];
+  /** C and D quote paths. Omitted when empty so an unchanged scorecard is not rewritten. */
+  research?: ResearchTrack[];
 }
 
 export interface ShadowQuote {
@@ -185,6 +199,17 @@ export function emptyShadowBook(): ShadowBook {
   return { version: 1, records: [] };
 }
 
+/** Empty research is left off the JSON so a scorecard-only book is not rewritten for the new key. */
+export function serializeShadowBook(book: ShadowBook): string {
+  const payload: ShadowBook = { version: 1, records: book.records };
+  if (book.research && book.research.length > 0) payload.research = book.research;
+  return JSON.stringify(payload);
+}
+
+export function shadowBooksEqual(left: ShadowBook, right: ShadowBook): boolean {
+  return serializeShadowBook(left) === serializeShadowBook(right);
+}
+
 export function shadowSampleNote(resolved: number): string {
   if (resolved < SHADOW_MIN_TRUST) {
     return `${resolved} resolved alerts. Fewer than ${SHADOW_MIN_TRUST} is too few to trust.`;
@@ -206,7 +231,7 @@ export function shadowFromAlert(alert: StoredAlert): ShadowTrade | null {
   if (alert.grade !== "A" && alert.grade !== "B") return null;
   if (!Number.isFinite(alert.ask) || !(alert.ask > 0)) return null;
   if (!alert.id || !ID_PATTERN.test(alert.id)) return null;
-  return {
+  const row: ShadowTrade = {
     id: alert.id,
     alertId: alert.id,
     openedAt: alert.sentAt,
@@ -240,6 +265,12 @@ export function shadowFromAlert(alert: StoredAlert): ShadowTrade | null {
     lastMarkSource: null,
     lastMarkedAt: null,
   };
+  if (alert.trackQuotes === true) {
+    row.quoteTrack = true;
+    row.entryUnderlying = alert.underlyingPrice != null && alert.underlyingPrice > 0 ? alert.underlyingPrice : null;
+    row.spyTrend = spyTrendFromDirection(alert.features?.spyDirection);
+  }
+  return row;
 }
 
 export function isExperimentShadow(row: Pick<ShadowTrade, "cohort" | "grade">): boolean {
@@ -249,7 +280,7 @@ export function isExperimentShadow(row: Pick<ShadowTrade, "cohort" | "grade">): 
 /** Append rows and keep the same book cap the A/B shadows already use. */
 export function addShadowRecords(book: ShadowBook, added: readonly ShadowTrade[]): ShadowBook {
   if (added.length === 0) return book;
-  return { version: 1, records: trimShadows(book.records.concat(added)) };
+  return { version: 1, records: trimShadows(book.records.concat(added)), research: book.research };
 }
 
 /** Copy a stored snapshot, or an honest backfill, onto shadows that do not have one yet. */
@@ -278,7 +309,7 @@ export function addMissingShadows(book: ShadowBook, alerts: readonly StoredAlert
   }
   if (added.length === 0) return { book, opened: 0 };
   return {
-    book: { version: 1, records: trimShadows(book.records.concat(added)) },
+    book: { version: 1, records: trimShadows(book.records.concat(added)), research: book.research },
     opened: added.length,
   };
 }
@@ -402,7 +433,11 @@ export function mergeShadowBooks(latest: ShadowBook, edited: ShadowBook): Shadow
     }
     byId.set(row.id, row);
   }
-  return { version: 1, records: trimShadows(Array.from(byId.values())) };
+  return {
+    version: 1,
+    records: trimShadows(Array.from(byId.values())),
+    research: mergeResearchTracks(latest.research ?? [], edited.research ?? []),
+  };
 }
 
 /** A closed shadow keeps the exit already saved. A longer stored path may be added. */
@@ -559,14 +594,19 @@ export function parseShadowBook(text: string | null | undefined): ShadowBook {
   } catch {
     return emptyShadowBook();
   }
-  const row = parsed && typeof parsed === "object" ? parsed as { records?: unknown } : null;
+  const row = parsed && typeof parsed === "object" ? parsed as { records?: unknown; research?: unknown } : null;
   if (!row || !Array.isArray(row.records)) return emptyShadowBook();
   const records: ShadowTrade[] = [];
   for (let i = 0; i < row.records.length; i++) {
     const trade = parseShadow(row.records[i]);
     if (trade) records.push(trade);
   }
-  return { version: 1, records: trimShadows(records) };
+  const research = parseResearchTracks(row.research);
+  return {
+    version: 1,
+    records: trimShadows(records),
+    research: research.length > 0 ? research : undefined,
+  };
 }
 
 interface ExitDecision {
@@ -839,7 +879,7 @@ function parseShadow(value: unknown): ShadowTrade | null {
   const pnlDollars = row.pnlDollars == null ? null : asFinite(row.pnlDollars);
   const pnlFraction = row.pnlFraction == null ? null : asFinite(row.pnlFraction);
   const tradingDaysHeld = row.tradingDaysHeld == null ? null : asWhole(row.tradingDaysHeld);
-  return {
+  const trade: ShadowTrade = {
     id,
     alertId,
     openedAt,
@@ -873,6 +913,12 @@ function parseShadow(value: unknown): ShadowTrade | null {
     lastMarkSource,
     lastMarkedAt: row.lastMarkedAt == null ? null : asTime(row.lastMarkedAt),
   };
+  if (row.quoteTrack === true) {
+    trade.quoteTrack = true;
+    trade.entryUnderlying = row.entryUnderlying == null ? null : asPositive(row.entryUnderlying);
+    trade.spyTrend = parseSpyTrend(row.spyTrend);
+  }
+  return trade;
 }
 
 function experimentLabelOf(value: unknown, cohort: ShadowCohort): string | null {

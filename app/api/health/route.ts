@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { loadAlertBook } from "@/app/lib/alertStore";
 import { hasHealthBearer } from "@/app/lib/auth";
-import { buildHealthReport, countShadowTotals } from "@/app/lib/healthReport";
+import { buildHealthReport, countShadowTotals, trackedAlertCounts } from "@/app/lib/healthReport";
 import { emptyScanHealth } from "@/app/lib/scanHealth";
 import { getSchwabStatus } from "@/app/lib/schwab";
 import { readScanHealth, readShadowBookText } from "@/app/lib/schwabStore";
@@ -29,7 +29,9 @@ export async function GET(request: NextRequest) {
     loadAlertBook().catch(() => ({ records: [] })),
     readShadowBookText().catch(() => ""),
   ]);
-  const totals = countShadowTotals(parseShadowBook(shadowText).records);
+  const shadowBook = parseShadowBook(shadowText);
+  const totals = countShadowTotals(shadowBook.records);
+  const tracked = trackedAlertCounts(shadowBook.records, shadowBook.research ?? [], now);
   return NextResponse.json(buildHealthReport({
     health,
     schwabConnected: schwab,
@@ -37,6 +39,9 @@ export async function GET(request: NextRequest) {
     alerts: book.records,
     openShadows: totals.openShadows,
     resolvedShadows: totals.resolvedShadows,
+    trackedAlertsTotal: tracked.trackedAlertsTotal,
+    trackedAlertsActive: tracked.trackedAlertsActive,
+    trackedAlertsComplete: tracked.trackedAlertsComplete,
     now,
   }));
 }

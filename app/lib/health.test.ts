@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { StoredAlert } from "@/app/lib/alertBook";
 import { hasHealthBearer } from "@/app/lib/auth";
-import { buildHealthReport, countShadowTotals } from "@/app/lib/healthReport";
+import { buildHealthReport, countShadowTotals, trackedAlertCounts } from "@/app/lib/healthReport";
 import { emptyScanHealth } from "@/app/lib/scanHealth";
 import { shadowFromAlert, type ShadowTrade } from "@/app/lib/shadow";
 
@@ -52,6 +52,9 @@ describe("health report", () => {
       rulesVersion: 3,
       marketDay: true,
       reason: null,
+      trackedAlertsTotal: 0,
+      trackedAlertsActive: 0,
+      trackedAlertsComplete: 0,
     });
     expect(JSON.stringify(report)).not.toContain("token");
     expect(JSON.stringify(report)).not.toContain("secret");
@@ -84,6 +87,33 @@ describe("health report", () => {
     };
     const test: ShadowTrade = { ...open, id: "test", grade: "test", cohort: "experiment" };
     expect(countShadowTotals([open, resolved, test])).toEqual({ openShadows: 1, resolvedShadows: 1 });
+    const tracked = { ...open, quoteTrack: true as const };
+    const research = {
+      id: "1727790000000-IWM|2026-12-18|240|put",
+      contractKey: "IWM|2026-12-18|240|put",
+      alertId: null,
+      openedAt: Date.parse("2026-10-01T15:00:00Z"),
+      ticker: "IWM",
+      putCall: "put" as const,
+      strike: 240,
+      expiration: "2026-12-18",
+      grade: "C" as const,
+      entryPrice: 1.2,
+      entryUnderlying: 240,
+      spyTrend: "up" as const,
+      marks: [],
+    };
+    const during = trackedAlertCounts([tracked, resolved, test], [research], new Date("2026-10-06T15:00:00Z"));
+    expect(during).toEqual({ trackedAlertsTotal: 2, trackedAlertsActive: 2, trackedAlertsComplete: 0 });
+    const finished = trackedAlertCounts([tracked], [research], new Date("2026-10-12T15:00:00Z"));
+    expect(finished.trackedAlertsComplete).toBe(2);
+    expect(finished.trackedAlertsActive).toBe(0);
+    const expiredEarly = trackedAlertCounts(
+      [],
+      [{ ...research, expiration: "2026-10-02" }],
+      new Date("2026-10-06T15:00:00Z"),
+    );
+    expect(expiredEarly).toEqual({ trackedAlertsTotal: 1, trackedAlertsActive: 0, trackedAlertsComplete: 0 });
   });
 });
 

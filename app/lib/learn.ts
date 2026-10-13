@@ -12,6 +12,7 @@ import { MAX_BID_ASK_SPREAD_OF_MID, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import { chicagoClock } from "@/app/lib/marketHours";
 import { SHADOW_MIN_TRUST, isExperimentShadow, shadowExitLabel, type ShadowTrade } from "@/app/lib/shadow";
 import { whatIfFromShadows, type WhatIfReport } from "@/app/lib/exitWhatIf";
+import type { ResearchTrack } from "@/app/lib/researchTrack";
 import { tradeMetrics, type StoredTrade } from "@/app/lib/trades";
 
 /**
@@ -113,6 +114,12 @@ export interface LearnInput {
   trades: readonly StoredTrade[];
   checksByTradeId: ReadonlyMap<string, readonly LearnCheck[]>;
   now: Date;
+  /**
+   * When set, exit what-if also includes research tracks of these letters.
+   * Omitted leaves what-if on the scorecard paths only.
+   */
+  grades?: readonly string[];
+  research?: readonly ResearchTrack[];
 }
 
 const ESTIMATE_NOTE =
@@ -160,7 +167,12 @@ export function analyzeLearning(input: LearnInput): LearnReport {
     suggestions: [],
     suggestionNote: SUGGESTION_NOTE,
     checksNote: CHECKS_NOTE,
-    whatIf: whatIfFromShadows(input.shadows),
+    whatIf: whatIfFromShadows(
+      input.shadows,
+      input.grades && input.grades.length > 0
+        ? { grades: input.grades, research: input.research }
+        : undefined,
+    ),
     factors: ranked,
     unavailable,
     trades: built.trades,

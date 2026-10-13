@@ -120,6 +120,12 @@ export function isMarketDay(date: Date = new Date()): boolean {
 }
 
 /**
+ * Chicago trading days after entry before a quote path stops.
+ * Weekends and full-day NYSE holidays do not count. Scorecard path marks and research tracks share this cap.
+ */
+export const PATH_MARK_TRADING_DAY_CAP = 7;
+
+/**
  * Chicago dates after the open date, through `to`, not counting the open date.
  * Saturday, Sunday, and full-day NYSE holidays do not count.
  * Early closes still count. The 3-day flat time stop uses this count, so a holiday does not tick it.

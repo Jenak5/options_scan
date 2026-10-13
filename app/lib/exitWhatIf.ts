@@ -1,6 +1,6 @@
 import { TRADE_RULES } from "@/app/lib/alertConfig";
 import { calendarDaysBetween, newYorkDate, SHADOW_QUOTES_PER_RUN } from "@/app/lib/flow";
-import { chicagoTradingDaysElapsed } from "@/app/lib/marketHours";
+import { chicagoTradingDaysElapsed, PATH_MARK_TRADING_DAY_CAP } from "@/app/lib/marketHours";
 import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import { contractKey, isExperimentShadow, LAST_WEEK_CALENDAR_DAYS, SHADOW_MIN_TRUST, type ShadowTrade } from "@/app/lib/shadow";
 
@@ -54,6 +54,15 @@ export interface WhatIfReport {
   scenarios: WhatIfResult[];
 }
 
+/** A research track, or any row that can be replayed. Grades filter which ones join. */
+export interface WhatIfPath {
+  grade: string;
+  entryPrice: number;
+  openedAt: number;
+  expiration: string;
+  marks: readonly ShadowMark[];
+}
+
 interface ReplayExit {
   pnlDollars: number;
   pnlFraction: number;
@@ -61,12 +70,7 @@ interface ReplayExit {
 
 const PRICE_EPS = 1e-6;
 
-/**
- * Stop extending a resolved shadow's path after this many Chicago trading days
- * from entry. Weekends and full-day NYSE holidays do not count. The longest
- * replay waits 5 trading days; this cap is the backstop.
- */
-export const PATH_MARK_TRADING_DAY_CAP = 7;
+export { PATH_MARK_TRADING_DAY_CAP } from "@/app/lib/marketHours";
 
 /**
  * Resolved shadows quoted for a what-if path on one run, in the same batch as
@@ -135,18 +139,45 @@ export function replayExit(
   return null;
 }
 
-export function whatIfFromShadows(rows: readonly ShadowTrade[]): WhatIfReport {
-  const usable: ShadowTrade[] = [];
+/**
+ * Default leaves research tracks out, so the scorecard what-if stays on A and B.
+ * Pass grades to include those letters, including research tracks of that letter.
+ */
+export function whatIfFromShadows(
+  rows: readonly ShadowTrade[],
+  options?: { grades?: readonly string[]; research?: readonly WhatIfPath[] },
+): WhatIfReport {
+  const grades = options?.grades;
+  const usable: WhatIfPath[] = [];
   let skipped = 0;
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     if (row.cohort === "experiment" || row.grade === "test") continue;
+    if (grades && grades.indexOf(row.grade) === -1) continue;
     const marks = row.marks ?? [];
     if (marks.length === 0 || !(row.entryPrice > 0)) {
       skipped += 1;
       continue;
     }
-    usable.push(row);
+    usable.push({
+      grade: row.grade,
+      entryPrice: row.entryPrice,
+      openedAt: row.openedAt,
+      expiration: row.expiration,
+      marks,
+    });
+  }
+  if (grades && options?.research) {
+    for (let i = 0; i < options.research.length; i++) {
+      const row = options.research[i];
+      if (grades.indexOf(row.grade) === -1) continue;
+      const marks = row.marks ?? [];
+      if (marks.length === 0 || !(row.entryPrice > 0)) {
+        skipped += 1;
+        continue;
+      }
+      usable.push(row);
+    }
   }
   return {
     note: WHAT_IF_NOTE,
@@ -157,7 +188,7 @@ export function whatIfFromShadows(rows: readonly ShadowTrade[]): WhatIfReport {
   };
 }
 
-function summarize(rule: WhatIfScenario, rows: readonly ShadowTrade[]): WhatIfResult {
+function summarize(rule: WhatIfScenario, rows: readonly WhatIfPath[]): WhatIfResult {
   let wins = 0;
   let losses = 0;
   let flats = 0;
@@ -206,9 +237,12 @@ function summarize(rule: WhatIfScenario, rows: readonly ShadowTrade[]): WhatIfRe
 }
 
 /**
- * True when a resolved A/B shadow still needs real quotes for a replay.
+ * True when a resolved A/B shadow still needs real quotes.
  * A shadow with no stored path is left out. Missed quotes are not filled in.
- * Past expiration, or the trading-day cap, ends the path even if a replay is open.
+ * Past expiration, or the trading-day cap, ends the path.
+ * An older shadow stops once every replay has an exit.
+ * A quoteTrack shadow, saved after this tracking shipped, keeps going until the
+ * 7-day cap or expiration, including after the live scorecard exit.
  */
 export function shadowPathStillNeeded(row: ShadowTrade, now: Date): boolean {
   if (row.status !== "closed" || isExperimentShadow(row)) return false;
@@ -218,6 +252,7 @@ export function shadowPathStillNeeded(row: ShadowTrade, now: Date): boolean {
   if (chicagoTradingDaysElapsed(new Date(row.openedAt), now) >= PATH_MARK_TRADING_DAY_CAP) return false;
   const dte = calendarDaysBetween(newYorkDate(now), row.expiration);
   if (dte != null && dte < 0) return false;
+  if (row.quoteTrack === true) return true;
   return !pathScenariosResolved(row);
 }
 

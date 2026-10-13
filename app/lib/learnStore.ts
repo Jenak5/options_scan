@@ -13,23 +13,41 @@ export interface LearnPage extends LearnReport {
   stored: boolean;
 }
 
-export async function loadLearnPage(now: Date): Promise<LearnPage> {
+const LEARN_GRADES = ["A", "B", "C", "D"];
+
+/** Comma-separated letters. Missing or empty keeps the scorecard what-if. */
+export function parseLearnGrades(raw: string | null): string[] | undefined {
+  if (raw == null || raw.trim() === "") return undefined;
+  const out: string[] = [];
+  const parts = raw.split(",");
+  for (let i = 0; i < parts.length; i++) {
+    const grade = parts[i].trim().toUpperCase();
+    if (LEARN_GRADES.indexOf(grade) === -1 || out.indexOf(grade) !== -1) continue;
+    out.push(grade);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+export async function loadLearnPage(now: Date, grades?: readonly string[]): Promise<LearnPage> {
   const [shadowText, alertText, tradeText] = await Promise.all([
     readShadowBookText(),
     readAlertBookText(),
     readTradeLogText(),
   ]);
+  const book = parseShadowBook(shadowText);
   const report = analyzeLearning({
-    shadows: parseShadowBook(shadowText).records,
+    shadows: book.records,
     alerts: parseAlertBook(alertText).records,
     trades: parseTradeLog(tradeText).trades,
     checksByTradeId: readGradeChecks(tradeText),
     now,
+    grades,
+    research: book.research,
   });
   return { ...report, stored: resolveStoreKind() !== "unconfigured" };
 }
 
-export async function learnCsv(now: Date): Promise<string> {
-  const page = await loadLearnPage(now);
+export async function learnCsv(now: Date, grades?: readonly string[]): Promise<string> {
+  const page = await loadLearnPage(now, grades);
   return learningCsv(page);
 }

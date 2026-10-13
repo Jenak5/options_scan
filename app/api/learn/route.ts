@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { denyIfUnauthorized } from "@/app/lib/auth";
-import { learnCsv, loadLearnPage } from "@/app/lib/learnStore";
+import { learnCsv, loadLearnPage, parseLearnGrades } from "@/app/lib/learnStore";
 import { emptyScanHealth, scanFreshness } from "@/app/lib/scanHealth";
 import { readScanHealth } from "@/app/lib/schwabStore";
 
@@ -15,8 +15,9 @@ export async function GET(request: NextRequest) {
   if (denied) return denied;
 
   const now = new Date();
+  const grades = parseLearnGrades(request.nextUrl.searchParams.get("grades"));
   if (request.nextUrl.searchParams.get("format") === "csv") {
-    const csv = await learnCsv(now);
+    const csv = await learnCsv(now, grades);
     return new NextResponse(csv, {
       headers: {
         "Content-Type": "text/csv; charset=utf-8",
@@ -26,7 +27,7 @@ export async function GET(request: NextRequest) {
   }
 
   const [page, health] = await Promise.all([
-    loadLearnPage(now),
+    loadLearnPage(now, grades),
     readScanHealth().catch(() => emptyScanHealth()),
   ]);
   return NextResponse.json({ ...page, freshness: scanFreshness(health) });

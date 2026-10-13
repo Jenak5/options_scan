@@ -286,4 +286,23 @@ describe("exit what-ifs", () => {
     expect(trusted.scenarios.find((row) => row.id === "tp60")?.tooFew).toBe(true);
     expect(trusted.scenarios.find((row) => row.id === "tp60stop35")?.tooFew).toBe(true);
   });
+
+  it("leaves research tracks out until a grade filter names them", () => {
+    const priced = shadow({ marks: [{ at: OPEN + 60_000, price: 2.5 }] });
+    const research = {
+      grade: "C",
+      entryPrice: 2,
+      openedAt: OPEN,
+      expiration: EXPIRATION,
+      marks: [{ at: OPEN + 60_000, price: 1.5 }],
+    };
+    const untouched = whatIfFromShadows([priced], { research: [research] });
+    expect(untouched.included).toBe(1);
+    expect(untouched.scenarios.find((row) => row.id === "stop25")?.losses).toBe(0);
+    const filtered = whatIfFromShadows([priced], { grades: ["C"], research: [research] });
+    expect(filtered.included).toBe(1);
+    expect(filtered.scenarios.find((row) => row.id === "stop25")).toMatchObject({ resolved: 1, losses: 1 });
+    const both = whatIfFromShadows([priced], { grades: ["A", "C"], research: [research] });
+    expect(both.included).toBe(2);
+  });
 });
