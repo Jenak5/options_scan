@@ -39,6 +39,8 @@ export interface HealthReport {
   candleAlertsCovered: number;
   /** Symbols that failed on the last candle run. */
   candleErrors: number;
+  /** Tastytrade OAuth error and error_description from the last candle run. Null on success. */
+  candleErrorSample: string | null;
 }
 
 export function buildHealthReport(input: {
@@ -54,6 +56,7 @@ export function buildHealthReport(input: {
   candlesLastRun?: string | null;
   candleAlertsCovered?: number;
   candleErrors?: number;
+  candleErrorSample?: string | null;
   now: Date;
 }): HealthReport {
   const latest = latestScan(input.health);
@@ -88,6 +91,7 @@ export function buildHealthReport(input: {
     candlesLastRun: input.candlesLastRun ?? null,
     candleAlertsCovered: input.candleAlertsCovered ?? 0,
     candleErrors: input.candleErrors ?? 0,
+    candleErrorSample: input.candleErrorSample ?? null,
   };
 }
 

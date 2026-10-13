@@ -7,6 +7,9 @@ import {
   fetchOptionCandles,
   handleDxlinkMessage,
   parseCompactCandles,
+  tastytradeOAuthErrorSample,
+  tastytradeTokenRequest,
+  readTastytradeCredentials,
   type CandleSubscription,
   type DxlinkState,
 } from "@/app/lib/tastytradeCandles";
@@ -156,6 +159,119 @@ describe("tastytrade candle protocol", () => {
     ]);
     expect(result.completed).toEqual([".TLT261113P77.5"]);
     expect(result.errors).toEqual([]);
+    expect(result.errorSample).toBeNull();
+  });
+
+  it("posts the documented refresh form and trims whitespace and newlines from the env values", () => {
+    const creds = readTastytradeCredentials({
+      TASTYTRADE_CLIENT_ID: " client-id \n",
+      TASTYTRADE_CLIENT_SECRET: "\r\nclient-secret\n",
+      TASTYTRADE_REFRESH_TOKEN: " refresh-token\r\n",
+    });
+    expect(creds).toEqual({
+      clientId: "client-id",
+      clientSecret: "client-secret",
+      refreshToken: "refresh-token",
+    });
+    const request = tastytradeTokenRequest(creds!);
+    expect(request.url).toBe("https://api.tastyworks.com/oauth/token");
+    expect(request.method).toBe("POST");
+    expect(request.headers["Content-Type"]).toBe("application/x-www-form-urlencoded");
+    expect(request.headers["User-Agent"]).toBe("options-scan/1.0");
+    expect(typeof request.body).toBe("string");
+    const params = new URLSearchParams(request.body);
+    expect(params.get("grant_type")).toBe("refresh_token");
+    expect(params.get("refresh_token")).toBe("refresh-token");
+    expect(params.get("client_secret")).toBe("client-secret");
+    expect(params.get("client_id")).toBe("client-id");
+    expect(request.body).not.toMatch(/[\r\n]/);
+    expect(request.headers["Content-Type"]).not.toContain("charset");
+  });
+
+  it("keeps only error and error_description and drops secrets echoed in the body", () => {
+    const sample = tastytradeOAuthErrorSample(
+      400,
+      JSON.stringify({
+        error: "invalid_grant",
+        error_description: "refresh token refresh-token-value was rejected",
+        refresh_token: "refresh-token-value",
+        client_secret: "client-secret-value",
+      }),
+      ["client-secret-value", "refresh-token-value"],
+    );
+    expect(sample).toBe("invalid_grant: refresh token [redacted] was rejected");
+    expect(sample).not.toContain("refresh-token-value");
+    expect(sample).not.toContain("client-secret-value");
+    expect(tastytradeOAuthErrorSample(400, "not json", [])).toBe("Tastytrade OAuth failed (400)");
+  });
+
+  it("requests the token once and stops the run after the first OAuth failure", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const many = Array.from({ length: CANDLE_SUBSCRIPTION_LIMIT + 1 }, (_, index) => ({
+      streamer: `.SPY260918C${index}`,
+      fromTime: 1_757_000_000_000,
+    }));
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(String(url)).toBe("https://api.tastyworks.com/oauth/token");
+      expect(init?.method).toBe("POST");
+      expect((init?.headers as Record<string, string>)["Content-Type"]).toBe("application/x-www-form-urlencoded");
+      expect(typeof init?.body).toBe("string");
+      return new Response(JSON.stringify({
+        error: "invalid_client",
+        error_description: "client authentication failed",
+        refresh_token: "refresh-token",
+      }), { status: 400 });
+    });
+    const result = await fetchOptionCandles(many, {
+      env: ENV,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      connect: async () => {
+        throw new Error("websocket should not open");
+      },
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(result.completed).toEqual([]);
+    expect(result.candles.size).toBe(0);
+    expect(result.errorSample).toBe("invalid_client: client authentication failed");
+    expect(result.errors).toEqual(["invalid_client: client authentication failed"]);
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(String(errorSpy.mock.calls[0]?.[0])).toContain("invalid_client: client authentication failed");
+    expect(String(errorSpy.mock.calls[0]?.[0])).not.toContain("refresh-token");
+    expect(String(errorSpy.mock.calls[0]?.[0])).not.toContain("client-secret");
+  });
+
+  it("reuses one access token for every candle batch", async () => {
+    const many = Array.from({ length: CANDLE_SUBSCRIPTION_LIMIT + 1 }, (_, index) => ({
+      streamer: `.SPY260918C${index}`,
+      fromTime: 1_757_000_000_000,
+    }));
+    let oauthPosts = 0;
+    let quoteGets = 0;
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (String(url).endsWith("/oauth/token")) {
+        oauthPosts += 1;
+        return json({ access_token: "access-token" });
+      }
+      quoteGets += 1;
+      return json({ data: { "dxlink-url": "wss://dxlink.example/ws", token: "quote-token" } });
+    });
+    const result = await fetchOptionCandles(many, {
+      env: ENV,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      timeoutMs: 50,
+      quietMs: 0,
+      emptyWaitMs: 0,
+      connect: async () => ({
+        send() {},
+        close() {},
+        next() {
+          return Promise.resolve("timeout");
+        },
+      }),
+    });
+    expect(oauthPosts).toBe(1);
+    expect(quoteGets).toBe(2);
+    expect(result.errorSample).toBeNull();
   });
 });
 

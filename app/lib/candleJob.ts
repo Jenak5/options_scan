@@ -34,6 +34,8 @@ export interface CandleJobResult {
   daysSkipped: number;
   errors: number;
   errorNotes: string[];
+  /** Tastytrade OAuth error and error_description. Null when that request succeeded. */
+  errorSample: string | null;
   rateLimited: boolean;
 }
 
@@ -51,6 +53,7 @@ export async function runCandleJob(options: {
     daysSkipped: 0,
     errors: 0,
     errorNotes: [],
+    errorSample: null,
     rateLimited: false,
   };
   if (!process.env.BLOB_READ_WRITE_TOKEN?.trim()) {
@@ -58,7 +61,13 @@ export async function runCandleJob(options: {
   }
   if (!tastytradeCandleConfigured()) {
     const note = "Set TASTYTRADE_CLIENT_ID, TASTYTRADE_CLIENT_SECRET, and TASTYTRADE_REFRESH_TOKEN.";
-    await commitCandleRun({ now: now.getTime(), errors: 1, errorNotes: [note], writes: [] }).catch(() => undefined);
+    await commitCandleRun({
+      now: now.getTime(),
+      errors: 1,
+      errorNotes: [note],
+      errorSample: null,
+      writes: [],
+    }).catch(() => undefined);
     return { ...empty, errors: 1, errorNotes: [note], reason: note };
   }
   const fromTime = candleFromTime(options.mode, now);
@@ -80,7 +89,13 @@ export async function runCandleJob(options: {
     return options.mode === "backfill" ? needsBackfillFetch(meta) : needsDailyFetch(meta, today);
   });
   if (pending.length === 0) {
-    const saved = await commitCandleRun({ now: now.getTime(), errors: 0, errorNotes: [], writes: [] });
+    const saved = await commitCandleRun({
+      now: now.getTime(),
+      errors: 0,
+      errorNotes: [],
+      errorSample: null,
+      writes: [],
+    });
     return {
       ok: !saved.rateLimited,
       alerts: targets.length,
@@ -89,6 +104,7 @@ export async function runCandleJob(options: {
       daysSkipped: saved.daysSkipped,
       errors: 0,
       errorNotes: [],
+      errorSample: null,
       rateLimited: saved.rateLimited,
     };
   }
@@ -96,6 +112,28 @@ export async function runCandleJob(options: {
   const subs: CandleSubscription[] = pending.map((target) => ({ streamer: target.streamer, fromTime }));
   const fetchCandles = options.fetchCandles ?? fetchOptionCandles;
   const fetched = await fetchCandles(subs);
+  if (fetched.errorSample) {
+    const note = fetched.errorSample;
+    const saved = await commitCandleRun({
+      now: now.getTime(),
+      errors: 1,
+      errorNotes: [note],
+      errorSample: note,
+      writes: [],
+    });
+    return {
+      ok: false,
+      alerts: targets.length,
+      fetched: 0,
+      daysWritten: saved.daysWritten,
+      daysSkipped: saved.daysSkipped,
+      errors: 1,
+      errorNotes: [note],
+      errorSample: note,
+      rateLimited: saved.rateLimited,
+      reason: note,
+    };
+  }
   const completed = new Set(fetched.completed);
   const writes: CandleWrite[] = [];
   for (let i = 0; i < pending.length; i++) {
@@ -112,6 +150,7 @@ export async function runCandleJob(options: {
     now: now.getTime(),
     errors,
     errorNotes: notes,
+    errorSample: null,
     writes,
   });
   return {
@@ -122,6 +161,7 @@ export async function runCandleJob(options: {
     daysSkipped: saved.daysSkipped,
     errors: saved.rateLimited ? errors + 1 : errors,
     errorNotes: saved.rateLimited ? notes.concat("Vercel Blob returned 429 Too Many Requests").slice(0, 8) : notes,
+    errorSample: null,
     rateLimited: saved.rateLimited,
   };
 }
