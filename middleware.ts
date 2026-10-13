@@ -19,12 +19,13 @@ export async function middleware(request: NextRequest) {
   // on Schwab's cross-site GET, and the route also checks that session.
   // Cron, the candle cron, the candle backfill, the health check, and the market brief
   // authenticate with Authorization: Bearer.
-  // Health, the brief, and the candle backfill accept HEALTH_TOKEN, or CRON_SECRET when that token is unset.
+  // Health, the brief, the candle backfill, and the candle summaries accept HEALTH_TOKEN, or CRON_SECRET when that token is unset.
   // A session cookie is not enough for those routes. The candle cron uses CRON_SECRET.
   if (
     pathname === "/api/cron"
     || pathname === "/api/cron/candles"
     || pathname === "/api/candles/backfill"
+    || pathname === "/api/candles/summaries"
     || pathname === "/api/health"
     || pathname === "/api/brief"
     || PUBLIC_PATHS.has(pathname)

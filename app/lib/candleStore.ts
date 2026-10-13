@@ -12,6 +12,15 @@ import { SCHWAB_BLOB_CACHE_CONTROL_MAX_AGE, SCHWAB_BLOB_TOKEN_ENV } from "@/app/
 
 export const CANDLE_INDEX_PATH = "candles/index.json";
 
+/** Stop the learn page before it can sit on Blob reads until the route limit. */
+export const LEARN_CANDLE_BUDGET_MS = 20_000;
+
+/** Day-file rebuilds per summaries call. Each contract is one series write. */
+export const SUMMARY_CONTRACTS_PER_CALL = 40;
+
+/** Stay under the 300s route limit while rebuilding series files. */
+export const SUMMARY_TIME_BUDGET_MS = 240_000;
+
 export interface CandleDayMeta {
   n: number;
   last: number;
@@ -24,6 +33,11 @@ export interface CandleContractMeta {
   backfillFrom: string | null;
   ids: string[];
   days: Record<string, CandleDayMeta>;
+  /**
+   * seriesStamp of the compact series file. Null until that one file matches the day blobs.
+   * The learn page reads the series file only when this matches.
+   */
+  summary: string | null;
 }
 
 export interface CandleIndex {
@@ -89,6 +103,11 @@ export function setCandleBlobForTests(next: CandleBlob | null): void {
 
 export function candleDayPath(contractKey: string, day: string): string {
   return `candles/days/${safeKey(contractKey)}/${day}.json`;
+}
+
+/** One compact file for every stored day of a contract. The learn page reads this, not the day files. */
+export function candleSeriesPath(contractKey: string): string {
+  return `candles/series/${safeKey(contractKey)}.json`;
 }
 
 export function coveredAlertCount(index: CandleIndex): number {
@@ -216,6 +235,15 @@ export async function commitCandleRun(input: {
         throw err;
       }
     }
+    if (!rateLimited) {
+      try {
+        await syncContractSummary(contract, write.contractKey, write.bars);
+      } catch (err) {
+        if (!isRateLimit(err)) throw err;
+        rateLimited = true;
+        rateLimitedUntil = Date.now() + 20_000;
+      }
+    }
     if (rateLimited) break;
   }
   index.lastRunAt = input.now;
@@ -237,6 +265,98 @@ export async function commitCandleRun(input: {
   return { daysWritten, daysSkipped, rateLimited };
 }
 
+/**
+ * Read compact series files only. One index read, then at most one read per contract.
+ * Stops at the budget and returns whatever finished. Missing or stale series are left out
+ * so the caller keeps the 15-minute marks. This does not read per-day blobs.
+ */
+export async function loadCandleSummaries(
+  keys: readonly string[],
+  options?: { budgetMs?: number; nowMs?: () => number },
+): Promise<Map<string, CandleBar[]>> {
+  const budgetMs = options?.budgetMs ?? LEARN_CANDLE_BUDGET_MS;
+  const nowMs = options?.nowMs ?? Date.now;
+  const started = nowMs();
+  const out = new Map<string, CandleBar[]>();
+  let index: CandleIndex;
+  try {
+    index = await readCandleIndex();
+  } catch {
+    return out;
+  }
+  const pending: string[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const contract = index.contracts[key];
+    if (!contract || !hasCandles(contract) || contract.summary !== seriesStamp(contract)) continue;
+    pending.push(key);
+  }
+  await mapPool(pending, 8, async (key) => {
+    if (nowMs() - started >= budgetMs) return [] as CandleBar[];
+    const text = await readText(candleSeriesPath(key));
+    if (!text) return [] as CandleBar[];
+    const bars = parseBars(text).sort((a, b) => a.t - b.t);
+    if (bars.length > 0) out.set(key, bars);
+    return bars;
+  });
+  return out;
+}
+
+export interface CandleSummaryResult {
+  processed: number;
+  remaining: number;
+  rateLimited: boolean;
+}
+
+/**
+ * Build compact series files from day blobs that were stored before summaries existed.
+ * Safe to call again. A contract whose summary stamp already matches is not read.
+ */
+export async function buildCandleSummaries(options?: {
+  cap?: number;
+  budgetMs?: number;
+  nowMs?: () => number;
+}): Promise<CandleSummaryResult> {
+  const cap = Math.max(1, options?.cap ?? SUMMARY_CONTRACTS_PER_CALL);
+  const budgetMs = options?.budgetMs ?? SUMMARY_TIME_BUDGET_MS;
+  const nowMs = options?.nowMs ?? Date.now;
+  const started = nowMs();
+  const index = await readCandleIndex();
+  const pending = Object.keys(index.contracts).filter((key) => {
+    const contract = index.contracts[key];
+    return hasCandles(contract) && contract.summary !== seriesStamp(contract);
+  });
+  const slice = pending.slice(0, cap);
+  let processed = 0;
+  let rateLimited = false;
+  for (let i = 0; i < slice.length; i++) {
+    if (i > 0 && nowMs() - started >= budgetMs) break;
+    if (rateLimited) break;
+    const key = slice[i];
+    const contract = index.contracts[key];
+    try {
+      const built = await seriesFromDayFiles(key, contract);
+      if (!built) continue;
+      contract.summary = seriesStamp(contract);
+      await writeText(CANDLE_INDEX_PATH, JSON.stringify(index));
+      processed += 1;
+    } catch (err) {
+      if (!isRateLimit(err)) throw err;
+      rateLimited = true;
+      rateLimitedUntil = Date.now() + 20_000;
+      break;
+    }
+  }
+  return { processed, remaining: pending.length - processed, rateLimited };
+}
+
+/**
+ * Reads every day blob. The learn page must not call this: hundreds of contracts
+ * time out the route and can 429 Blob. Use loadCandleSummaries.
+ */
 export async function loadCandleSeries(keys: readonly string[]): Promise<Map<string, CandleBar[]>> {
   const index = await readCandleIndex();
   const out = new Map<string, CandleBar[]>();
@@ -287,6 +407,7 @@ export function parseCandleIndex(text: string): CandleIndex {
           backfillFrom: typeof row.backfillFrom === "string" ? row.backfillFrom : null,
           ids: Array.isArray(row.ids) ? row.ids.filter((id): id is string => typeof id === "string").slice(0, 50) : [],
           days: parseDays(row.days),
+          summary: typeof row.summary === "string" && row.summary.length > 0 ? row.summary : null,
         };
       }
     }
@@ -343,7 +464,7 @@ function parseDays(value: unknown): Record<string, CandleDayMeta> {
 function ensureContract(index: CandleIndex, contractKey: string, ids: readonly string[]): CandleContractMeta {
   let contract = index.contracts[contractKey];
   if (!contract) {
-    contract = { backfillFrom: null, ids: [], days: {} };
+    contract = { backfillFrom: null, ids: [], days: {}, summary: null };
     index.contracts[contractKey] = contract;
   }
   for (let i = 0; i < ids.length; i++) {
@@ -375,6 +496,8 @@ function mergeIndex(fresh: CandleIndex, local: CandleIndex): CandleIndex {
     if (prior.backfillFrom && (!next.backfillFrom || prior.backfillFrom < next.backfillFrom)) {
       next.backfillFrom = prior.backfillFrom;
     }
+    if (next.summary && next.summary !== seriesStamp(next)) next.summary = null;
+    if (!next.summary && prior.summary === seriesStamp(next)) next.summary = prior.summary;
   }
   return local;
 }
@@ -392,6 +515,68 @@ function seriesStamp(contract: CandleContractMeta): string {
     const meta = contract.days[day];
     return `${day}:${meta.n}:${meta.last}`;
   }).join("|");
+}
+
+async function syncContractSummary(
+  contract: CandleContractMeta,
+  contractKey: string,
+  incomingBars: readonly CandleBar[],
+): Promise<void> {
+  const stamp = seriesStamp(contract);
+  if (contract.summary === stamp || !hasCandles(contract)) return;
+  const needed = candleDays(contract);
+  const incoming = groupBarsByChicagoDay(incomingBars);
+  if (needed.every((day) => dayMatches(contract, day, incoming.get(day)))) {
+    await writeText(candleSeriesPath(contractKey), serializeBars(flattenDays(needed, incoming)));
+    contract.summary = stamp;
+    return;
+  }
+  if (!contract.summary) return;
+  const text = await readText(candleSeriesPath(contractKey));
+  const prior = text ? groupBarsByChicagoDay(parseBars(text)) : new Map<string, CandleBar[]>();
+  const merged = new Map<string, CandleBar[]>();
+  for (let i = 0; i < needed.length; i++) {
+    const day = needed[i];
+    const fresh = incoming.get(day);
+    const older = prior.get(day);
+    if (dayMatches(contract, day, fresh)) merged.set(day, fresh ?? []);
+    else if (dayMatches(contract, day, older)) merged.set(day, older ?? []);
+    else return;
+  }
+  await writeText(candleSeriesPath(contractKey), serializeBars(flattenDays(needed, merged)));
+  contract.summary = stamp;
+}
+
+async function seriesFromDayFiles(contractKey: string, contract: CandleContractMeta): Promise<boolean> {
+  const needed = candleDays(contract);
+  const grouped = new Map<string, CandleBar[]>();
+  for (let i = 0; i < needed.length; i++) {
+    const day = needed[i];
+    const text = await readText(candleDayPath(contractKey, day));
+    const bars = text ? parseBars(text) : [];
+    if (!dayMatches(contract, day, bars)) return false;
+    grouped.set(day, bars);
+  }
+  await writeText(candleSeriesPath(contractKey), serializeBars(flattenDays(needed, grouped)));
+  return true;
+}
+
+function candleDays(contract: CandleContractMeta): string[] {
+  return Object.keys(contract.days).filter((day) => contract.days[day].n > 0).sort();
+}
+
+function dayMatches(contract: CandleContractMeta, day: string, bars: readonly CandleBar[] | undefined): boolean {
+  return !!bars && bars.length === contract.days[day].n;
+}
+
+function flattenDays(days: readonly string[], grouped: ReadonlyMap<string, readonly CandleBar[]>): CandleBar[] {
+  const bars: CandleBar[] = [];
+  for (let i = 0; i < days.length; i++) {
+    const list = grouped.get(days[i]);
+    if (list) bars.push(...list);
+  }
+  bars.sort((a, b) => a.t - b.t);
+  return bars;
 }
 
 function serializeBars(bars: readonly CandleBar[]): string {

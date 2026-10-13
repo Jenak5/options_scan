@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { GET as backfillGet, POST as backfillPost } from "@/app/api/candles/backfill/route";
+import { POST as summaryPost } from "@/app/api/candles/summaries/route";
 import { GET as candleCron } from "@/app/api/cron/candles/route";
 import { middleware } from "@/middleware";
 
@@ -15,8 +16,10 @@ describe("candle routes", () => {
   it("lets the candle cron and the backfill through middleware", async () => {
     const cron = await middleware(new NextRequest("https://options-scan.vercel.app/api/cron/candles"));
     const backfill = await middleware(new NextRequest("https://options-scan.vercel.app/api/candles/backfill"));
+    const summaries = await middleware(new NextRequest("https://options-scan.vercel.app/api/candles/summaries"));
     expect(cron.status).not.toBe(401);
     expect(backfill.status).not.toBe(401);
+    expect(summaries.status).not.toBe(401);
     expect(cron.headers.get("location")).toBeNull();
   });
 
@@ -65,6 +68,12 @@ describe("candle routes", () => {
     const accepted = await backfillGet(authed("https://options-scan.vercel.app/api/candles/backfill", "health-token"));
     expect(accepted.status).toBe(500);
     expect((await accepted.json()).reason).toMatch(/Blob/);
+
+    const summaryDenied = await summaryPost(new NextRequest("https://options-scan.vercel.app/api/candles/summaries", { method: "POST" }));
+    expect(summaryDenied.status).toBe(401);
+    const summary = await summaryPost(authed("https://options-scan.vercel.app/api/candles/summaries", "health-token"));
+    expect(summary.status).toBe(500);
+    expect((await summary.json()).reason).toMatch(/Blob/);
   });
 });
 
