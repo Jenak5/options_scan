@@ -1,8 +1,9 @@
 import { parseAlertBook } from "@/app/lib/alertBook";
-import { loadCandleSeries } from "@/app/lib/candleStore";
+import { LEARN_CANDLE_BUDGET_MS, loadCandleSummaries } from "@/app/lib/candleStore";
 import { analyzeLearning, learningCsv, readGradeChecks, type LearnReport } from "@/app/lib/learn";
+import type { ResearchTrack } from "@/app/lib/researchTrack";
 import { readAlertBookText, readShadowBookText, readTradeLogText, resolveStoreKind } from "@/app/lib/schwabStore";
-import { contractKey, parseShadowBook } from "@/app/lib/shadow";
+import { contractKey, isExperimentShadow, parseShadowBook, type ShadowTrade } from "@/app/lib/shadow";
 import { parseTradeLog } from "@/app/lib/trades";
 
 /**
@@ -29,6 +30,40 @@ export function parseLearnGrades(raw: string | null): string[] | undefined {
   return out.length > 0 ? out : undefined;
 }
 
+/**
+ * Contracts the exit what-if can use. Experiment and test rows are left out.
+ * Research tracks are included only when a grade filter asks for them.
+ */
+export function learnCandleKeys(
+  shadows: readonly ShadowTrade[],
+  research: readonly ResearchTrack[] | undefined,
+  grades?: readonly string[],
+): string[] {
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  const add = (key: string) => {
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    keys.push(key);
+  };
+  for (let i = 0; i < shadows.length; i++) {
+    const row = shadows[i];
+    if (isExperimentShadow(row) || row.grade === "test") continue;
+    if (!(row.entryPrice > 0)) continue;
+    if (grades && grades.indexOf(row.grade) === -1) continue;
+    add(contractKey(row));
+  }
+  if (grades && research) {
+    for (let i = 0; i < research.length; i++) {
+      const row = research[i];
+      if (grades.indexOf(row.grade) === -1) continue;
+      if (!(row.entryPrice > 0)) continue;
+      add(row.contractKey);
+    }
+  }
+  return keys;
+}
+
 export async function loadLearnPage(now: Date, grades?: readonly string[]): Promise<LearnPage> {
   const [shadowText, alertText, tradeText] = await Promise.all([
     readShadowBookText(),
@@ -36,11 +71,8 @@ export async function loadLearnPage(now: Date, grades?: readonly string[]): Prom
     readTradeLogText(),
   ]);
   const book = parseShadowBook(shadowText);
-  const keys: string[] = [];
-  for (let i = 0; i < book.records.length; i++) keys.push(contractKey(book.records[i]));
-  const research = book.research ?? [];
-  for (let i = 0; i < research.length; i++) keys.push(research[i].contractKey);
-  const candles = await loadCandleSeries(keys).catch(() => undefined);
+  const keys = learnCandleKeys(book.records, book.research, grades);
+  const candles = await loadCandleSummaries(keys, { budgetMs: LEARN_CANDLE_BUDGET_MS }).catch(() => undefined);
   const report = analyzeLearning({
     shadows: book.records,
     alerts: parseAlertBook(alertText).records,
