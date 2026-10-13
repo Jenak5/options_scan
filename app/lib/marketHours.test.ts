@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { OUTCOME_RULES } from "@/app/lib/alertConfig";
-import { chicagoDate, chicagoTradingDaysElapsed, isChicagoMarketHours, isChicagoMinuteWindow, isMarketDay, isNyseHoliday, nextChicagoTradingDay, previousChicagoTradingDay } from "@/app/lib/marketHours";
+import { newYorkDate } from "@/app/lib/flow";
+import { chicagoDate, chicagoTradingDayCutoffMs, chicagoTradingDaysElapsed, isChicagoMarketHours, isChicagoMinuteWindow, isMarketDay, isNyseHoliday, nextChicagoTradingDay, previousChicagoTradingDay } from "@/app/lib/marketHours";
 
 describe("Chicago session clock", () => {
   it("treats 8:30 as open and 15:00 as closed, and opens a short close window", () => {
@@ -122,5 +123,58 @@ describe("NYSE holidays", () => {
     expect(nextChicagoTradingDay("2026-11-26")).toBe("2026-11-27");
     expect(previousChicagoTradingDay("2026-11-30")).toBe("2026-11-27");
     expect(nextChicagoTradingDay("2026-12-24")).toBe("2026-12-28");
+  });
+
+  it("matches Chicago and New York calendar dates through the daylight change", () => {
+    const chicago = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Chicago",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    const ny = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/New_York",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    const samples: number[] = [];
+    const start = Date.parse("2026-01-01T00:30:00Z");
+    const end = Date.parse("2027-12-31T23:30:00Z");
+    for (let t = start; t <= end; t += 6 * 3_600_000) samples.push(t);
+    const dense = [
+      Date.parse("2026-03-08T06:00:00Z"),
+      Date.parse("2026-03-08T07:30:00Z"),
+      Date.parse("2026-03-08T12:30:00Z"),
+      Date.parse("2026-11-01T04:30:00Z"),
+      Date.parse("2026-11-01T05:30:00Z"),
+      Date.parse("2026-11-01T06:30:00Z"),
+      Date.parse("2027-03-14T06:30:00Z"),
+      Date.parse("2027-03-14T08:30:00Z"),
+      Date.parse("2027-11-07T05:30:00Z"),
+      Date.parse("2027-11-07T07:30:00Z"),
+    ];
+    for (let i = 0; i < dense.length; i++) {
+      for (let minute = -90; minute <= 90; minute += 15) samples.push(dense[i] + minute * 60_000);
+    }
+    for (let i = 0; i < samples.length; i++) {
+      const date = new Date(samples[i]);
+      expect(chicagoDate(date)).toBe(chicago.format(date));
+      expect(newYorkDate(date)).toBe(ny.format(date));
+    }
+  });
+
+  it("puts the flat-day cutoff at Chicago midnight, and skips Thanksgiving", () => {
+    const open = new Date("2026-10-01T15:00:00Z");
+    const cutoff = chicagoTradingDayCutoffMs(open, 2);
+    expect(cutoff).toBe(Date.parse("2026-10-05T05:00:00Z"));
+    expect(chicagoTradingDaysElapsed(open, new Date(cutoff! - 60_000))).toBe(1);
+    expect(chicagoTradingDaysElapsed(open, new Date(cutoff!))).toBe(2);
+
+    const tuesday = new Date("2026-11-24T15:00:00Z");
+    const afterHoliday = chicagoTradingDayCutoffMs(tuesday, 2);
+    expect(afterHoliday).toBe(Date.parse("2026-11-27T06:00:00Z"));
+    expect(chicagoTradingDaysElapsed(tuesday, new Date("2026-11-26T15:00:00Z"))).toBe(1);
+    expect(chicagoTradingDaysElapsed(tuesday, new Date(afterHoliday!))).toBe(2);
   });
 });

@@ -1,3 +1,5 @@
+import { chicagoMidnightMs, chicagoYmd } from "@/app/lib/zonedDay";
+
 /**
  * US equity regular session in Central Time, including both CST and CDT.
  * Weekdays, 8:30 inclusive through 15:00 exclusive.
@@ -55,17 +57,19 @@ export interface ChicagoClock {
   weekdaySession: boolean;
 }
 
+const chicagoClockFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Chicago",
+  weekday: "short",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
 export function chicagoClock(now: Date = new Date()): ChicagoClock | null {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Chicago",
-    weekday: "short",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(now);
+  const parts = chicagoClockFormatter.formatToParts(now);
 
   const weekday = parts.find((part) => part.type === "weekday")?.value ?? "";
   const year = parts.find((part) => part.type === "year")?.value ?? "";
@@ -85,7 +89,9 @@ export function chicagoClock(now: Date = new Date()): ChicagoClock | null {
 }
 
 export function chicagoDate(now: Date = new Date()): string {
-  return chicagoClock(now)?.date ?? "";
+  const ms = now.getTime();
+  if (!Number.isFinite(ms)) return chicagoClock(now)?.date ?? "";
+  return chicagoYmd(ms);
 }
 
 /**
@@ -153,10 +159,17 @@ export const PATH_MARK_TRADING_DAY_CAP = 7;
  * Saturday, Sunday, and full-day NYSE holidays do not count.
  * Early closes still count. The 3-day flat time stop uses this count, so a holiday does not tick it.
  */
+const elapsedMemo = new Map<string, number>();
+const flatCutoffMemo = new Map<string, number | null>();
+const DATE_MEMO_CAP = 8_000;
+
 export function chicagoTradingDaysElapsed(from: Date, to: Date): number {
   const start = chicagoDate(from);
   const end = chicagoDate(to);
   if (!start || !end || end <= start) return 0;
+  const key = `${start}|${end}`;
+  const hit = elapsedMemo.get(key);
+  if (hit !== undefined) return hit;
   let count = 0;
   let cursor = nextYmd(start);
   while (cursor <= end) {
@@ -165,7 +178,36 @@ export function chicagoTradingDaysElapsed(from: Date, to: Date): number {
     if (next <= cursor) break;
     cursor = next;
   }
+  if (elapsedMemo.size >= DATE_MEMO_CAP) elapsedMemo.clear();
+  elapsedMemo.set(key, count);
   return count;
+}
+
+/**
+ * UTC millis of America/Chicago midnight on the date when `tradingDays`
+ * Chicago trading days have elapsed after `from`. The open date does not count.
+ * Null when the count cannot be placed.
+ */
+export function chicagoTradingDayCutoffMs(from: Date, tradingDays: number): number | null {
+  if (!Number.isFinite(tradingDays) || tradingDays < 1) return null;
+  const start = chicagoDate(from);
+  if (!start) return null;
+  const days = Math.floor(tradingDays);
+  const key = `${start}|${days}`;
+  if (flatCutoffMemo.has(key)) return flatCutoffMemo.get(key) ?? null;
+  let cursor = start;
+  let seen = 0;
+  const limit = days * 3 + 21;
+  for (let i = 0; i < limit && seen < days; i++) {
+    const next = nextYmd(cursor);
+    if (next <= cursor) break;
+    cursor = next;
+    if (isTradingDayYmd(cursor)) seen += 1;
+  }
+  const ms = seen >= days ? chicagoMidnightMs(cursor) : null;
+  if (flatCutoffMemo.size >= DATE_MEMO_CAP) flatCutoffMemo.clear();
+  flatCutoffMemo.set(key, ms);
+  return ms;
 }
 
 /**
@@ -235,15 +277,17 @@ interface NewYorkClock {
   weekdaySession: boolean;
 }
 
+const newYorkClockFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  weekday: "short",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
 function newYorkClock(now: Date): NewYorkClock | null {
   if (Number.isNaN(now.getTime())) return null;
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    weekday: "short",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(now);
+  const parts = newYorkClockFormatter.formatToParts(now);
   const weekday = parts.find((part) => part.type === "weekday")?.value ?? "";
   const year = parts.find((part) => part.type === "year")?.value ?? "";
   const month = parts.find((part) => part.type === "month")?.value ?? "";
