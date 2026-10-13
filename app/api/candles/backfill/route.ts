@@ -9,7 +9,9 @@ export const maxDuration = 300;
 /**
  * One-time candle backfill from 2026-09-01.
  * Same bearer as /api/health: HEALTH_TOKEN, or CRON_SECRET when that is unset.
- * Safe to call again. A contract already backfilled is not fetched or rewritten.
+ * One call stores at most 50 contracts, or stops after about 240 seconds.
+ * The JSON processed and remaining say how far this call got. Call again until remaining is 0.
+ * A contract already backfilled is not fetched or rewritten.
  * Live scorecard exits are not recomputed.
  */
 export async function GET(request: NextRequest) {

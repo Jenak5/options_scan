@@ -91,6 +91,8 @@ export const SHADOW_QUOTES_PER_RUN = 16;
  * Research-track option quotes on one cron run.
  * These use the quotes endpoint, chunked, not one chain per contract.
  * Oldest mark first. Contracts past the cap wait for a later run.
+ * The cap does not delete a track. Exit what-ifs use stored 1-minute candles
+ * when a contract has them. These quotes are the 15-minute fallback.
  */
 export const RESEARCH_QUOTES_PER_RUN = 40;
 

@@ -16,13 +16,26 @@ import {
 import { chicagoClock, chicagoDate } from "@/app/lib/marketHours";
 import { parseShadowBook } from "@/app/lib/shadow";
 import { readAlertBookText, readShadowBookText } from "@/app/lib/schwabStore";
-import { fetchOptionCandles, tastytradeCandleConfigured, type CandleSubscription } from "@/app/lib/tastytradeCandles";
+import {
+  fetchOptionCandles,
+  openCandleAccess,
+  tastytradeCandleConfigured,
+  type CandleAccess,
+  type CandleSubscription,
+} from "@/app/lib/tastytradeCandles";
 import type { CandleBar } from "@/app/lib/candleTypes";
 
 /**
  * Fetch 1-minute option candles and store one blob per contract per day.
- * This does not recompute live scorecard exits.
+ * One call handles a slice, saves each contract before the next, and returns
+ * how many are still waiting. This does not recompute live scorecard exits.
  */
+
+/** Contracts started on one cron or backfill call. DXLink allows 100; this stays under the route limit. */
+export const CANDLE_CONTRACTS_PER_CALL = 50;
+
+/** Stop before Vercel's 300s limit so the response, and the last save, still finish. */
+export const CANDLE_TIME_BUDGET_MS = 240_000;
 
 export interface CandleJobResult {
   ok: boolean;
@@ -30,6 +43,10 @@ export interface CandleJobResult {
   reason?: string;
   alerts: number;
   fetched: number;
+  /** Contracts saved with a done marker on this call. */
+  processed: number;
+  /** Contracts still waiting after this call. */
+  remaining: number;
   daysWritten: number;
   daysSkipped: number;
   errors: number;
@@ -43,12 +60,19 @@ export async function runCandleJob(options: {
   mode: "daily" | "backfill";
   now?: Date;
   fetchCandles?: typeof fetchOptionCandles;
+  /** Injected in tests. Production opens one token for the whole call. */
+  access?: CandleAccess | null;
+  cap?: number;
+  budgetMs?: number;
+  nowMs?: () => number;
 }): Promise<CandleJobResult> {
   const now = options.now ?? new Date();
   const empty: CandleJobResult = {
     ok: false,
     alerts: 0,
     fetched: 0,
+    processed: 0,
+    remaining: 0,
     daysWritten: 0,
     daysSkipped: 0,
     errors: 0,
@@ -100,6 +124,8 @@ export async function runCandleJob(options: {
       ok: !saved.rateLimited,
       alerts: targets.length,
       fetched: 0,
+      processed: 0,
+      remaining: 0,
       daysWritten: saved.daysWritten,
       daysSkipped: saved.daysSkipped,
       errors: 0,
@@ -109,60 +135,117 @@ export async function runCandleJob(options: {
     };
   }
 
-  const subs: CandleSubscription[] = pending.map((target) => ({ streamer: target.streamer, fromTime }));
-  const fetchCandles = options.fetchCandles ?? fetchOptionCandles;
-  const fetched = await fetchCandles(subs);
-  if (fetched.errorSample) {
-    const note = fetched.errorSample;
+  const cap = Math.max(1, options.cap ?? CANDLE_CONTRACTS_PER_CALL);
+  const budgetMs = options.budgetMs ?? CANDLE_TIME_BUDGET_MS;
+  const nowMs = options.nowMs ?? Date.now;
+  const started = nowMs();
+  const slice = pending.slice(0, cap);
+  let access = options.access ?? null;
+  if (!options.fetchCandles && !access) {
+    const opened = await openCandleAccess();
+    if (!opened.access) {
+      const note = opened.errorSample;
+      const saved = await commitCandleRun({
+        now: now.getTime(),
+        errors: 1,
+        errorNotes: [note],
+        errorSample: note,
+        writes: [],
+      });
+      return {
+        ok: false,
+        alerts: targets.length,
+        fetched: 0,
+        processed: 0,
+        remaining: pending.length,
+        daysWritten: saved.daysWritten,
+        daysSkipped: saved.daysSkipped,
+        errors: 1,
+        errorNotes: [note],
+        errorSample: note,
+        rateLimited: saved.rateLimited,
+        reason: note,
+      };
+    }
+    access = opened.access;
+  }
+  const fetchCandles = options.fetchCandles ?? ((subs: readonly CandleSubscription[]) => fetchOptionCandles(subs, { access }));
+  let processed = 0;
+  let daysWritten = 0;
+  let daysSkipped = 0;
+  let errors = 0;
+  const notes: string[] = [];
+  let errorSample: string | null = null;
+  let rateLimited = false;
+  for (let i = 0; i < slice.length; i++) {
+    if (i > 0 && nowMs() - started >= budgetMs) break;
+    if (rateLimited) break;
+    const target = slice[i];
+    const fetched = await fetchCandles([{ streamer: target.streamer, fromTime }]);
+    if (fetched.errorSample) {
+      errorSample = fetched.errorSample;
+      notes.push(errorSample);
+      errors += 1;
+      const saved = await commitCandleRun({
+        now: now.getTime(),
+        errors,
+        errorNotes: notes.slice(0, 8),
+        errorSample,
+        writes: [],
+      });
+      rateLimited = saved.rateLimited;
+      daysWritten += saved.daysWritten;
+      daysSkipped += saved.daysSkipped;
+      break;
+    }
+    const bars = fetched.candles.get(target.streamer) ?? [];
+    const done = fetched.completed.indexOf(target.streamer) !== -1;
+    if (!done && bars.length === 0) {
+      errors += 1;
+      const note = fetched.errors[0] ?? `${target.streamer} did not finish`;
+      if (notes.length < 8) notes.push(note);
+      const saved = await commitCandleRun({
+        now: now.getTime(),
+        errors,
+        errorNotes: notes.slice(0, 8),
+        errorSample: null,
+        writes: [],
+      });
+      daysWritten += saved.daysWritten;
+      daysSkipped += saved.daysSkipped;
+      rateLimited = saved.rateLimited;
+      continue;
+    }
     const saved = await commitCandleRun({
       now: now.getTime(),
-      errors: 1,
-      errorNotes: [note],
-      errorSample: note,
-      writes: [],
+      errors,
+      errorNotes: notes.slice(0, 8),
+      errorSample: null,
+      writes: [writeFor(target, bars, options.mode, now, done)],
     });
-    return {
-      ok: false,
-      alerts: targets.length,
-      fetched: 0,
-      daysWritten: saved.daysWritten,
-      daysSkipped: saved.daysSkipped,
-      errors: 1,
-      errorNotes: [note],
-      errorSample: note,
-      rateLimited: saved.rateLimited,
-      reason: note,
-    };
+    daysWritten += saved.daysWritten;
+    daysSkipped += saved.daysSkipped;
+    if (saved.rateLimited) {
+      rateLimited = true;
+      notes.push("Vercel Blob returned 429 Too Many Requests");
+      break;
+    }
+    processed += 1;
   }
-  const completed = new Set(fetched.completed);
-  const writes: CandleWrite[] = [];
-  for (let i = 0; i < pending.length; i++) {
-    const target = pending[i];
-    const bars = fetched.candles.get(target.streamer) ?? [];
-    const done = completed.has(target.streamer);
-    if (!done && bars.length === 0) continue;
-    writes.push(writeFor(target, bars, options.mode, now, done));
-  }
-  const notes = fetched.errors.slice(0, 8);
-  const missed = pending.filter((target) => !completed.has(target.streamer) && !(fetched.candles.get(target.streamer)?.length)).length;
-  const errors = notes.length > 0 ? Math.max(notes.length, missed) : 0;
-  const saved = await commitCandleRun({
-    now: now.getTime(),
-    errors,
-    errorNotes: notes,
-    errorSample: null,
-    writes,
-  });
+  const remaining = pending.length - processed;
   return {
-    ok: errors === 0 && !saved.rateLimited,
+    ok: errors === 0 && !rateLimited && errorSample == null,
     alerts: targets.length,
-    fetched: pending.length,
-    daysWritten: saved.daysWritten,
-    daysSkipped: saved.daysSkipped,
-    errors: saved.rateLimited ? errors + 1 : errors,
-    errorNotes: saved.rateLimited ? notes.concat("Vercel Blob returned 429 Too Many Requests").slice(0, 8) : notes,
-    errorSample: null,
-    rateLimited: saved.rateLimited,
+    fetched: processed,
+    processed,
+    remaining,
+    daysWritten,
+    daysSkipped,
+    errors: rateLimited ? errors + 1 : errors,
+    errorNotes: notes.slice(0, 8),
+    errorSample,
+    rateLimited,
+    reason: errorSample ?? undefined,
   };
 }
 
