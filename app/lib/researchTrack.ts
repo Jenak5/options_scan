@@ -35,8 +35,9 @@ export interface TrackedShadow {
 
 /**
  * Quote paths for alerts saved after this tracking shipped.
- * A and B stay on the scorecard. C and D are research tracks only.
- * Marks are real quotes. A missed 15-minute slot is left blank.
+ * A and B stay on the scorecard. C and D rows already stored stay on that
+ * document and stay readable. New C and D tracks are not opened, and the
+ * scan does not add marks to the ones already there.
  */
 
 /**
@@ -174,37 +175,16 @@ export function researchFromAlert(alert: StoredAlert): ResearchTrack | null {
 }
 
 /**
- * Open a research track for each new C or D.
- * An alert saved before trackQuotes existed is left out. Prices are not filled in later.
- * A contract that already has an open window is not opened again.
+ * New C and D tracks are not opened. Rows already stored are returned as they
+ * are, including marks, and this pass does not drop finished rows.
  */
 export function addResearchTracks(
   existing: readonly ResearchTrack[],
-  candidates: readonly ResearchCandidate[],
-  alerts: readonly StoredAlert[],
-  now: Date,
+  _candidates: readonly ResearchCandidate[],
+  _alerts: readonly StoredAlert[],
+  _now: Date,
 ): { tracks: ResearchTrack[]; opened: number } {
-  const tracks = existing.slice();
-  const active = new Set<string>();
-  for (let i = 0; i < tracks.length; i++) {
-    const row = tracks[i];
-    if (trackWindowOpen(row.openedAt, row.expiration, now)) active.add(row.contractKey);
-  }
-  let opened = 0;
-  const consider = (track: ResearchTrack | null) => {
-    if (!track) return;
-    if (active.has(track.contractKey)) return;
-    active.add(track.contractKey);
-    tracks.push(track);
-    opened += 1;
-  };
-  for (let i = 0; i < alerts.length; i++) consider(researchFromAlert(alerts[i]));
-  for (let i = 0; i < candidates.length; i++) {
-    const item = candidates[i];
-    if (item.grade !== "C" && item.grade !== "D") continue;
-    consider(researchFromRow(item.row, item.grade, now));
-  }
-  return { tracks: trimResearchTracks(tracks, now), opened };
+  return { tracks: existing.slice(), opened: 0 };
 }
 
 /**

@@ -7,9 +7,11 @@ import type { ShadowTrade } from "@/app/lib/shadow";
 
 /**
  * Who gets a 1-minute candle fetch.
- * Daily: open scorecard shadows, research tracks, and alerts still inside the
- * 7-trading-day window. Every grade. Backfill: every alert, shadow, and
- * research track that has a contract symbol, including ones whose window has ended.
+ * Daily (the 3:30pm Chicago cron): open scorecard shadows and A/B alerts still
+ * inside the 7-trading-day window. C and D research tracks, and any C or D
+ * alert still on file, are left out of that fetch. Backfill still lists every
+ * alert, shadow, and research track that has a contract symbol, including ones
+ * whose window has ended, so stored history can be filled without the cron.
  */
 
 export const CANDLE_BACKFILL_FROM = "2026-09-01";
@@ -46,18 +48,15 @@ export function dailyCandleTargets(input: {
   now: Date;
 }): CandleTarget[] {
   const out = new Map<string, CandleTarget>();
+  // input.research stays in Blob. The 3:30 cron does not fetch those C and D tracks.
   for (let i = 0; i < input.shadows.length; i++) {
     const row = input.shadows[i];
     if (row.status !== "open" && !trackWindowOpen(row.openedAt, row.expiration, input.now)) continue;
     addTarget(out, targetFromParts(row.id, row.ticker, row.expiration, row.strike, row.putCall, row.openedAt));
   }
-  for (let i = 0; i < input.research.length; i++) {
-    const row = input.research[i];
-    if (!trackWindowOpen(row.openedAt, row.expiration, input.now)) continue;
-    addTarget(out, targetFromParts(row.id, row.ticker, row.expiration, row.strike, row.putCall, row.openedAt));
-  }
   for (let i = 0; i < input.alerts.length; i++) {
     const row = input.alerts[i];
+    if (row.grade === "C" || row.grade === "D") continue;
     if (!trackWindowOpen(row.sentAt, row.expiration, input.now)) continue;
     addTarget(out, targetFromParts(row.id, row.ticker, row.expiration, row.strike, row.putCall, row.sentAt));
   }
