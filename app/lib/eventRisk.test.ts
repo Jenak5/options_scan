@@ -6,6 +6,8 @@ import {
   NO_EARNINGS_LISTED,
   UNKNOWN_EARNINGS,
   assessEventRisk,
+  addTradingDays,
+  imminentMacroReleases,
   macroReleasesThrough,
 } from "@/app/lib/eventRisk";
 
@@ -97,5 +99,19 @@ describe("event risk", () => {
     expect(result.capGrade).toBe(EVENT_RULES.maxGradeUntilEarnings);
     expect(result.eventLine.startsWith(EARNINGS_UNKNOWN_PHRASE)).toBe(true);
     expect(UNKNOWN_EARNINGS.status).toBe("unknown");
+  });
+});
+
+describe("imminent macro window", () => {
+  it("skips weekends when counting trading days", () => {
+    expect(addTradingDays("2026-10-14", 2)).toBe("2026-10-16");
+    expect(addTradingDays("2026-10-15", 2)).toBe("2026-10-19");
+    expect(addTradingDays("2026-10-17", 1)).toBe("2026-10-19");
+  });
+
+  it("covers today and the next 2 trading days only, never after expiration", () => {
+    expect(imminentMacroReleases("2026-10-13", "2026-11-20").map((r) => r.name)).toEqual(["CPI", "PPI"]);
+    expect(imminentMacroReleases("2026-10-16", "2026-11-20")).toEqual([]);
+    expect(imminentMacroReleases("2026-10-13", "2026-10-14").map((r) => r.name)).toEqual(["CPI"]);
   });
 });
