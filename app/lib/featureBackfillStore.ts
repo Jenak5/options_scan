@@ -43,7 +43,7 @@ export interface FeatureBackfillResult {
   errors: string[];
 }
 
-export async function runFeatureBackfill(input: { apply: boolean; now: Date }): Promise<FeatureBackfillResult> {
+export async function runFeatureBackfill(input: { apply: boolean; now: Date; tickers?: readonly string[] | null }): Promise<FeatureBackfillResult> {
   const now = input.now;
   const result: FeatureBackfillResult = {
     dryRun: !input.apply,
@@ -59,11 +59,15 @@ export async function runFeatureBackfill(input: { apply: boolean; now: Date }): 
   };
   const book = parseAlertBook(await readAlertBookText());
   const shadows = parseShadowBook(await readShadowBookText());
-  const alerts = book.records;
+  const only = input.tickers && input.tickers.length > 0 ? new Set(input.tickers) : null;
+  const alerts = only ? book.records.filter((alert) => only.has(alert.ticker)) : book.records;
+  const latest = new Map<string, number>();
   const earliest = new Map<string, number>();
   const note = (ticker: string, at: number) => {
     const prior = earliest.get(ticker);
     if (prior == null || at < prior) earliest.set(ticker, at);
+    const last = latest.get(ticker);
+    if (last == null || at > last) latest.set(ticker, at);
   };
   for (let i = 0; i < alerts.length; i++) note(alerts[i].ticker, alerts[i].sentAt);
   let first = Infinity;
@@ -71,9 +75,15 @@ export async function runFeatureBackfill(input: { apply: boolean; now: Date }): 
   for (let i = 0; i < shadows.records.length; i++) first = Math.min(first, shadows.records[i].openedAt);
   const research = shadows.research ?? [];
   for (let i = 0; i < research.length; i++) first = Math.min(first, research[i].openedAt);
+  let last = -Infinity;
+  for (let i = 0; i < alerts.length; i++) last = Math.max(last, alerts[i].sentAt);
+  for (let i = 0; i < shadows.records.length; i++) last = Math.max(last, shadows.records[i].openedAt);
+  for (let i = 0; i < research.length; i++) last = Math.max(last, research[i].openedAt);
   if (Number.isFinite(first)) {
-    note("SPY", first);
-    note("QQQ", first);
+    for (const index of ["SPY", "QQQ"]) {
+      note(index, first);
+      note(index, last);
+    }
   }
   result.tickers = Array.from(earliest.keys()).sort();
   if (result.tickers.length === 0) return result;
@@ -84,7 +94,7 @@ export async function runFeatureBackfill(input: { apply: boolean; now: Date }): 
     return result;
   }
   const access = opened.access;
-  const history = await fetchHistory(access, earliest, result.errors);
+  const history = await fetchHistory(access, earliest, latest, result.errors);
   for (let i = 0; i < result.tickers.length; i++) {
     const ticker = result.tickers[i];
     const row = history.get(ticker);
@@ -170,18 +180,20 @@ function planShadowFills(
 async function fetchHistory(
   access: CandleAccess,
   earliest: ReadonlyMap<string, number>,
+  latest: ReadonlyMap<string, number>,
   errors: string[],
 ): Promise<Map<string, UnderlyingHistory>> {
   const intradaySubs: CandleSubscription[] = [];
   const dailySubs: CandleSubscription[] = [];
   earliest.forEach((at, ticker) => {
     const day = Math.floor(at / DAY_MS) * DAY_MS;
-    intradaySubs.push({ streamer: ticker, fromTime: day - DAY_MS, period: "5m" });
-    dailySubs.push({ streamer: ticker, fromTime: day - DAILY_LOOKBACK_DAYS * DAY_MS, period: "1d" });
+    const end = latest.get(ticker) ?? at;
+    intradaySubs.push({ streamer: ticker, fromTime: day - DAY_MS, period: "5m", ...intradayCover(at, end) });
+    dailySubs.push({ streamer: ticker, fromTime: day - DAILY_LOOKBACK_DAYS * DAY_MS, period: "1d", ...dailyCover(at, end) });
   });
   const [intraday, daily] = await Promise.all([
-    fetchOptionCandles(intradaySubs, { access, timeoutMs: 90_000, quietMs: 4000 }),
-    fetchOptionCandles(dailySubs, { access, timeoutMs: 60_000, quietMs: 4000 }),
+    fetchOptionCandles(intradaySubs, { access, timeoutMs: 45_000, quietMs: 3000 }),
+    fetchOptionCandles(dailySubs, { access, timeoutMs: 30_000, quietMs: 3000 }),
   ]);
   for (let i = 0; i < intraday.errors.length; i++) errors.push(`5m: ${intraday.errors[i]}`);
   for (let i = 0; i < daily.errors.length; i++) errors.push(`daily: ${daily.errors[i]}`);
@@ -212,4 +224,26 @@ async function fetchEarnings(access: CandleAccess, tickers: readonly string[]): 
     out.set(ticker, { reported: parseEarningsReports(payload), nextExpected: expected.get(ticker) ?? null });
   }));
   return out;
+}
+
+/** The 5-minute range the alerts need: a closed bar before the first send and one before the last. */
+export function intradayCover(first: number, last: number): { coverFrom: number; coverUntil: number } {
+  return { coverFrom: first - 5 * 60_000, coverUntil: last - 15 * 60_000 };
+}
+
+/** The daily range: 30 calendar days before the first alert, and a bar within 4 days of the last. */
+export function dailyCover(first: number, last: number): { coverFrom: number; coverUntil: number } {
+  return { coverFrom: first - 30 * DAY_MS, coverUntil: last - 4 * DAY_MS };
+}
+
+/** ?tickers=AAPL,NVDA to upper-case symbols. Empty or invalid means every ticker. */
+export function parseTickerParam(value: string | null): string[] | null {
+  if (!value) return null;
+  const out: string[] = [];
+  const parts = value.split(",");
+  for (let i = 0; i < parts.length && out.length < 40; i++) {
+    const ticker = parts[i].trim().toUpperCase();
+    if (/^[A-Z][A-Z0-9.\-]{0,9}$/.test(ticker) && out.indexOf(ticker) === -1) out.push(ticker);
+  }
+  return out.length > 0 ? out : null;
 }
