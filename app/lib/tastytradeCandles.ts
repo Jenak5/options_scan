@@ -102,6 +102,8 @@ type Connect = (url: string) => Promise<CandleTransport>;
 /** One OAuth access token, reused for every quote session in a run. */
 export interface CandleAccess {
   access: string;
+  /** From the OAuth expires_in, when present. */
+  expiresInMs?: number | null;
 }
 
 export function tastytradeCandleConfigured(
@@ -251,8 +253,8 @@ export async function openCandleAccess(deps?: {
   const creds = readTastytradeCredentials(env);
   if (!creds) return { access: null, errorSample: "Tastytrade candles are not configured." };
   try {
-    const access = await requestAccessToken(fetchImpl, creds);
-    return { access: { access }, errorSample: null };
+    const minted = await requestAccessToken(fetchImpl, creds);
+    return { access: { access: minted.access, expiresInMs: minted.expiresInMs }, errorSample: null };
   } catch (err) {
     const sample = err instanceof TastytradeOAuthError
       ? err.sample
@@ -341,7 +343,10 @@ class TastytradeOAuthError extends Error {
   }
 }
 
-async function requestAccessToken(fetchImpl: typeof fetch, creds: TastytradeCredentials): Promise<string> {
+async function requestAccessToken(
+  fetchImpl: typeof fetch,
+  creds: TastytradeCredentials,
+): Promise<{ access: string; expiresInMs: number | null }> {
   const request = tastytradeTokenRequest(creds);
   const oauth = await fetchImpl(request.url, {
     method: request.method,
@@ -358,7 +363,8 @@ async function requestAccessToken(fetchImpl: typeof fetch, creds: TastytradeCred
   const oauthJson = await oauth.json() as Record<string, unknown>;
   const access = typeof oauthJson.access_token === "string" ? oauthJson.access_token : "";
   if (!access) throw new TastytradeOAuthError("Tastytrade OAuth did not return an access token");
-  return access;
+  const expiresIn = Number(oauthJson.expires_in);
+  return { access, expiresInMs: Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn * 1000 : null };
 }
 
 export function feedMessages(subs: readonly CandleSubscription[]): object[] {

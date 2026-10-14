@@ -41,9 +41,21 @@ export const TASTYTRADE_LIVE_ORIGIN = "https://api.tastyworks.com";
 const USER_AGENT = "options-scan/1.0";
 /** /market-data/by-type takes up to 100 symbols per request. */
 export const QUOTE_BATCH = 100;
-const TOKEN_TTL_MS = 10 * 60 * 1000;
+/** Tastytrade access tokens last 15 minutes. Refresh a minute early. */
+const TOKEN_FALLBACK_TTL_MS = 15 * 60 * 1000;
+const TOKEN_EXPIRY_BUFFER_MS = 60 * 1000;
+/** Waits before retry 1 and 2 after a 401. */
+const AUTH_RETRY_DELAYS_MS = [250, 750];
 
-let cachedToken: { access: string; at: number } | null = null;
+interface CachedToken {
+  access: string;
+  mintedAt: number;
+  expiresAt: number;
+}
+
+let cachedToken: CachedToken | null = null;
+let refreshing: Promise<CachedToken> | null = null;
+let sleepImpl: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class TastytradeDataError extends Error {
   constructor(message: string) {
@@ -52,29 +64,87 @@ export class TastytradeDataError extends Error {
   }
 }
 
-async function accessToken(fetchImpl: typeof fetch, force = false): Promise<string> {
-  if (!force && cachedToken && Date.now() - cachedToken.at < TOKEN_TTL_MS) return cachedToken.access;
-  const opened = await openCandleAccess({ fetchImpl });
-  if (!opened.access) throw new TastytradeDataError(opened.errorSample);
-  cachedToken = { access: opened.access.access, at: Date.now() };
-  return cachedToken.access;
+function tokenUsable(token: CachedToken | null, now: number): token is CachedToken {
+  return token != null && now < token.expiresAt - TOKEN_EXPIRY_BUFFER_MS;
+}
+
+/**
+ * One refresh at a time per instance. Concurrent callers share the same
+ * in-flight refresh instead of each minting a token.
+ */
+async function currentToken(fetchImpl: typeof fetch): Promise<CachedToken> {
+  if (tokenUsable(cachedToken, Date.now())) return cachedToken;
+  if (!refreshing) {
+    refreshing = (async () => {
+      try {
+        const opened = await openCandleAccess({ fetchImpl });
+        if (!opened.access) throw new TastytradeDataError(opened.errorSample);
+        const now = Date.now();
+        const ttl = opened.access.expiresInMs ?? TOKEN_FALLBACK_TTL_MS;
+        cachedToken = { access: opened.access.access, mintedAt: now, expiresAt: now + ttl };
+        return cachedToken;
+      } finally {
+        refreshing = null;
+      }
+    })();
+  }
+  return refreshing;
+}
+
+/** Drop the cached token only if it is still the one that got the 401. */
+function invalidateToken(access: string): void {
+  if (cachedToken?.access === access) cachedToken = null;
+}
+
+/**
+ * Run an authorized call. On a 401, drop that token, wait briefly, and try
+ * again with a fresh one, up to two retries. The token age is logged (never
+ * the token) so repeated 401s on new tokens can be told apart from expiry.
+ */
+export async function withTastytradeAuth<T>(
+  label: string,
+  fetchImpl: typeof fetch,
+  call: (access: string) => Promise<{ status: number; value?: T }>,
+): Promise<T> {
+  let lastStatus = 0;
+  for (let attempt = 0; attempt <= AUTH_RETRY_DELAYS_MS.length; attempt++) {
+    const token = await currentToken(fetchImpl);
+    const result = await call(token.access);
+    if (result.status !== 401) {
+      if (attempt > 0) console.info(`[tastytrade-auth] ${label} ok after ${attempt} retr${attempt === 1 ? "y" : "ies"}`);
+      return result.value as T;
+    }
+    lastStatus = 401;
+    const age = Math.round((Date.now() - token.mintedAt) / 1000);
+    console.warn(`[tastytrade-auth] ${label} 401 on attempt ${attempt + 1} (token age ${age}s)`);
+    invalidateToken(token.access);
+    if (attempt < AUTH_RETRY_DELAYS_MS.length) await sleepImpl(AUTH_RETRY_DELAYS_MS[attempt]);
+  }
+  throw new TastytradeDataError(label === "quote token" ? `Tastytrade quote token failed (${lastStatus})` : `Tastytrade ${label} failed (${lastStatus})`);
 }
 
 async function ttGet(path: string, fetchImpl: typeof fetch = fetch, signal?: AbortSignal): Promise<unknown> {
-  let token = await accessToken(fetchImpl);
-  for (let attempt = 0; attempt < 2; attempt++) {
+  return withTastytradeAuth("market data request", fetchImpl, async (token) => {
     const res = await fetchImpl(`${TASTYTRADE_LIVE_ORIGIN}${path}`, {
       headers: { "User-Agent": USER_AGENT, Authorization: `Bearer ${token}`, Accept: "application/json" },
       signal,
     });
-    if (res.status === 401 && attempt === 0) {
-      token = await accessToken(fetchImpl, true);
-      continue;
-    }
+    if (res.status === 401) return { status: 401 };
     if (!res.ok) throw new TastytradeDataError(`Tastytrade market data request failed (${res.status})`);
-    return res.json();
-  }
-  throw new TastytradeDataError("Tastytrade market data request failed (401)");
+    return { status: res.status, value: await res.json() };
+  });
+}
+
+/** DXLink quote token with the same 401 retry as REST. */
+async function quoteSession(fetchImpl: typeof fetch): Promise<{ url: string; token: string }> {
+  return withTastytradeAuth("quote token", fetchImpl, async (access) => {
+    try {
+      return { status: 200, value: await openQuoteSession(fetchImpl, access) };
+    } catch (err) {
+      if (err instanceof Error && /\(401\)/.test(err.message)) return { status: 401 };
+      throw err;
+    }
+  });
 }
 
 export async function ttQuotes(
@@ -140,8 +210,7 @@ export async function ttLastTrades(
   const fetchImpl = deps?.fetchImpl ?? fetch;
   const timeoutMs = deps?.timeoutMs ?? 6000;
   const quietMs = deps?.quietMs ?? 800;
-  const access = await accessToken(fetchImpl);
-  const session = await openQuoteSession(fetchImpl, access);
+  const session = await quoteSession(fetchImpl);
   const transport = await connectNodeWebSocket(session.url);
   const deadline = Date.now() + timeoutMs;
   let streaming = false;
@@ -225,8 +294,7 @@ export async function ttPriceHistory(input: {
   // dxFeed "tho=true" keeps regular trading hours only, matching Schwab's needExtendedHoursData=false.
   const attrs = input.frequencyType === "daily" || input.needExtendedHoursData ? `=${period}` : `=${period},tho=true`;
   const subSymbol = `${symbol}{${attrs}}`;
-  const access = await accessToken(fetchImpl);
-  const session = await openQuoteSession(fetchImpl, access);
+  const session = await quoteSession(fetchImpl);
   const rows = await streamCandles(session, subSymbol, fromTime, deps?.timeoutMs ?? 15_000, deps?.quietMs ?? 1200);
   const candles = toPriceCandles(rows.filter((r) => r.t >= fromTime - 864e5), input.endDate, input.frequencyType === "daily");
   if (candles.length === 0) throw new TastytradeDataError("Tastytrade returned no candles");
@@ -300,6 +368,8 @@ async function streamCandles(
   return rows;
 }
 
-export function resetTastytradeMarketForTests(): void {
+export function resetTastytradeMarketForTests(options?: { sleep?: (ms: number) => Promise<void> }): void {
   cachedToken = null;
+  refreshing = null;
+  sleepImpl = options?.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 }
