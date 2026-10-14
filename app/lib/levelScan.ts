@@ -27,7 +27,14 @@ export interface PriceHistoryRequest {
   frequencyType: "minute" | "daily";
   frequency: number;
   needExtendedHoursData: boolean;
+  /** Epoch ms. Schwab defaults endDate to the prior business day's close when it is omitted. */
+  startDate?: number;
+  /** Epoch ms. Set on intraday reads so today's bars are included. */
+  endDate?: number;
 }
+
+/** Covers today's pre-market from 4:00 ET on any intraday scan. */
+const INTRADAY_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
 type HistoryFetcher = (input: PriceHistoryRequest) => Promise<PriceCandle[]>;
 
@@ -91,6 +98,10 @@ export async function keyLevelsForTicker(input: {
       frequencyType: "minute",
       frequency: 5,
       needExtendedHoursData: true,
+      // Without an endDate Schwab stops at the prior business day's close,
+      // so today's bars were missing and VWAP stayed empty.
+      startDate: now - INTRADAY_LOOKBACK_MS,
+      endDate: now,
     };
     await paceHistory(Date.now());
     const daily = await fetcher(dailyReq);

@@ -149,6 +149,8 @@ export async function getPriceHistory(input: {
   frequencyType: "minute" | "daily";
   frequency: number;
   needExtendedHoursData?: boolean;
+  startDate?: number;
+  endDate?: number;
 }): Promise<PriceCandle[]> {
   const symbol = input.symbol.trim().toUpperCase();
   if (!PRICE_HISTORY_SYMBOL.test(symbol)) throw new Error("Schwab market data request failed");
@@ -165,6 +167,9 @@ export async function getPriceHistory(input: {
   query.set("frequencyType", input.frequencyType);
   query.set("frequency", String(input.frequency));
   query.set("needExtendedHoursData", input.needExtendedHoursData ? "true" : "false");
+  // Schwab defaults endDate to the prior business day's close, which drops today's bars.
+  if (validEpochMs(input.startDate)) query.set("startDate", String(Math.floor(input.startDate as number)));
+  if (validEpochMs(input.endDate)) query.set("endDate", String(Math.floor(input.endDate as number)));
   const payload = await marketDataGet("pricehistory", query);
   return parsePriceHistory(payload);
 }
@@ -372,4 +377,8 @@ function utf8Base64(value: string): string {
   let binary = "";
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
   return btoa(binary);
+}
+
+function validEpochMs(value: number | undefined): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
