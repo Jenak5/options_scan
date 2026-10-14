@@ -71,12 +71,12 @@ export interface TastytradeTokenRequest {
   body: string;
 }
 
-interface QuoteSession {
+export interface QuoteSession {
   url: string;
   token: string;
 }
 
-interface CandleTransport {
+export interface CandleTransport {
   send(data: string): void;
   close(): void;
   next(waitMs: number): Promise<string | null | "timeout">;
@@ -354,7 +354,7 @@ export function feedMessages(subs: readonly CandleSubscription[]): object[] {
   ];
 }
 
-async function openQuoteSession(fetchImpl: typeof fetch, access: string): Promise<QuoteSession> {
+export async function openQuoteSession(fetchImpl: typeof fetch, access: string): Promise<QuoteSession> {
   const quote = await fetchImpl(QUOTE_URL, {
     headers: {
       "User-Agent": USER_AGENT,
@@ -514,7 +514,7 @@ function clip(value: string): string {
   return value.replace(/bearer\s+\S+/gi, "bearer [redacted]").replace(/\s+/g, " ").slice(0, 180);
 }
 
-function connectNodeWebSocket(url: string): Promise<CandleTransport> {
+export function connectNodeWebSocket(url: string): Promise<CandleTransport> {
   if (typeof globalThis.WebSocket === "function") {
     return openDomSocket(url, globalThis.WebSocket);
   }
