@@ -319,7 +319,7 @@ function FlowCard({ row }: { row: ScoredFlow }) {
           )}
           {verdict?.levelsNote && <p style={{ margin: "0 0 8px" }}>{verdict.levelsNote}</p>}
           <p style={{ margin: "0 0 8px" }}>{LIKELY_SIDE_NOTE}</p>
-          <p style={{ margin: "0 0 8px" }}>{row.prints?.summary ?? "No print was detected from Schwab quotes on this contract."}</p>
+          <p style={{ margin: "0 0 8px" }}>{row.prints?.summary ?? "No print was detected from option quotes on this contract."}</p>
           <p style={{ margin: "0 0 8px" }}>
             IV {row.iv != null && row.iv > 0 ? `${(row.iv * 100).toFixed(0)}%` : "—"}
             {" · "}Vol jump {row.volumeJump == null ? "—" : signed(row.volumeJump)}
@@ -501,9 +501,9 @@ function sizeText(verdict: AlertVerdict | undefined): string {
 function printText(row: ScoredFlow): string {
   const prints = row.prints;
   if (!prints?.summary) return "None detected";
-  if (prints.sweepLike) return "Sweep-like, from Schwab quotes";
-  if (prints.block) return "Block, from Schwab quotes";
-  return "Print, from Schwab quotes";
+  if (prints.sweepLike) return "Sweep-like, from option quotes";
+  if (prints.block) return "Block, from option quotes";
+  return "Print, from option quotes";
 }
 
 function spreadDollars(row: ScoredFlow): number | null {

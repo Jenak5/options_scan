@@ -27,7 +27,7 @@ import {
  */
 
 export const FLOW_DISCLAIMER =
-  "Estimated flow from Schwab volume/open interest, not true sweeps.";
+  "Estimated flow from option volume/open interest, not true sweeps.";
 
 /** Scanned on every cron run. Alert latency for these names stays on the 15-minute cadence. */
 export const CORE_FLOW_WATCHLIST = [
