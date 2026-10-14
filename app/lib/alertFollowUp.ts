@@ -5,7 +5,8 @@ import {
 } from "@/app/lib/alertStore";
 import type { QuoteObservation, StoredAlert } from "@/app/lib/alertBook";
 import { checkBidAskSpread, findContract } from "@/app/lib/gate";
-import { getOptionChain, SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
+import { getOptionChain } from "@/app/lib/marketData";
+import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 
 /**
  * Re-quotes open alerts from the Schwab chains endpoint.

@@ -3,14 +3,8 @@ import type { StoredTrade } from "@/app/lib/trades";
 import { FLOW_BATCH_SIZE } from "@/app/lib/flow";
 import { findContract, checkBidAskSpread } from "@/app/lib/gate";
 import { normalizeOptionSymbol, schwabOptionSymbol } from "@/app/lib/optionSymbol";
-import {
-  getOptionChain,
-  getQuoteEntries,
-  schwabConfigured,
-  SchwabConfigError,
-  SchwabNotConnectedError,
-  type QuoteEntriesResult,
-} from "@/app/lib/schwab";
+import { getOptionChain, getQuoteEntries, marketDataConfigured } from "@/app/lib/marketData";
+import { SchwabConfigError, SchwabNotConnectedError, type QuoteEntriesResult } from "@/app/lib/schwab";
 
 /**
  * Marks for open paper trades and shadow alerts, from the same Schwab chain the scanner uses.
@@ -38,7 +32,7 @@ export async function quoteTradeMarks(trades: readonly Quotable[]): Promise<Reco
 
 export async function quoteContractMarks(trades: readonly Quotable[]): Promise<Record<string, ContractMark>> {
   const marks: Record<string, ContractMark> = {};
-  if (!schwabConfigured()) return marks;
+  if (!marketDataConfigured()) return marks;
   const open = trades.filter((trade) => trade.closedAt == null);
   const unique: Quotable[] = [];
   const seen = new Set<string>();
@@ -160,7 +154,7 @@ export async function quoteOpenPaperTrades(
 ): Promise<PaperQuoteBatch> {
   const open = trades.filter((trade) => trade.closedAt == null);
   if (open.length === 0) return { quotes: {}, misses: {} };
-  if (!schwabConfigured()) return { quotes: {}, misses: missAll(open, QUOTE_NOT_CONFIGURED) };
+  if (!marketDataConfigured()) return { quotes: {}, misses: missAll(open, QUOTE_NOT_CONFIGURED) };
   try {
     return await withDeadline((signal) => fetchPaperQuotes(open, signal), timeoutMs);
   } catch (err) {

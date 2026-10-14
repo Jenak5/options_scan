@@ -4,13 +4,8 @@ import {
   compareVolReadings,
   type VolArbReading,
 } from "@/app/lib/volArb";
-import {
-  getOptionChain,
-  getPriceHistory,
-  getSchwabStatus,
-  SchwabConfigError,
-  SchwabNotConnectedError,
-} from "@/app/lib/schwab";
+import { requireMarketData, getOptionChain, getPriceHistory } from "@/app/lib/marketData";
+import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 
 /**
  * Reads Schwab chains and Schwab daily prices for the vol view.
@@ -84,9 +79,7 @@ export async function scanVolArb(options: {
     }
   }
 
-  const status = await getSchwabStatus(nowMs);
-  if (!status.configured) throw new SchwabConfigError();
-  if (!status.connected) throw new SchwabNotConnectedError();
+  await requireMarketData(nowMs);
 
   const asOf = new Date(nowMs);
   const rows: VolArbReading[] = [];

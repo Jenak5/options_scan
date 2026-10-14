@@ -4,6 +4,7 @@ import { hasHealthBearer } from "@/app/lib/auth";
 import { emptyCandleHealth, readCandleHealth } from "@/app/lib/candleStore";
 import { buildHealthReport, countShadowTotals, trackedAlertCounts } from "@/app/lib/healthReport";
 import { emptyScanHealth } from "@/app/lib/scanHealth";
+import { dataSourceStatus } from "@/app/lib/marketData";
 import { getSchwabStatus } from "@/app/lib/schwab";
 import { readScanHealth, readShadowBookText } from "@/app/lib/schwabStore";
 import { parseShadowBook } from "@/app/lib/shadow";
@@ -34,7 +35,7 @@ export async function GET(request: NextRequest) {
   const shadowBook = parseShadowBook(shadowText);
   const totals = countShadowTotals(shadowBook.records);
   const tracked = trackedAlertCounts(shadowBook.records, shadowBook.research ?? [], now);
-  return NextResponse.json(buildHealthReport({
+  const report = buildHealthReport({
     health,
     schwabConnected: schwab,
     tastytradeEnabled: tastytradeEnabled(),
@@ -49,5 +50,6 @@ export async function GET(request: NextRequest) {
     candleErrors: candles.candleErrors,
     candleErrorSample: candles.candleErrorSample,
     now,
-  }));
+  });
+  return NextResponse.json({ ...report, dataSource: dataSourceStatus() });
 }

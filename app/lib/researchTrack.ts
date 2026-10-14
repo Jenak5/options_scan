@@ -18,12 +18,8 @@ import {
 } from "@/app/lib/marketHours";
 import { parseSpyTrend, spyTrendFromDirection, type IndexDirection } from "@/app/lib/marketContext";
 import { normalizeOptionSymbol, schwabOptionSymbol } from "@/app/lib/optionSymbol";
-import {
-  getQuoteEntries,
-  schwabConfigured,
-  SchwabConfigError,
-  SchwabNotConnectedError,
-} from "@/app/lib/schwab";
+import { getQuoteEntries, marketDataConfigured } from "@/app/lib/marketData";
+import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 /** Same length as SHADOW_MARK_CAP. Kept here so this file does not import the scorecard module. */
 export const RESEARCH_MARK_CAP = 220;
 
@@ -269,7 +265,7 @@ export async function quoteResearchSymbols(
   tracks: readonly ResearchTrack[],
 ): Promise<Map<string, { mid: number | null; bid: number | null }>> {
   const quotes = new Map<string, { mid: number | null; bid: number | null }>();
-  if (!schwabConfigured() || tracks.length === 0) return quotes;
+  if (!marketDataConfigured() || tracks.length === 0) return quotes;
   const groups: Array<{ symbol: string; ids: string[] }> = [];
   const index = new Map<string, { symbol: string; ids: string[] }>();
   for (let i = 0; i < tracks.length; i++) {
