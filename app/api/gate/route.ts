@@ -6,7 +6,8 @@ import { denyIfUnauthorized } from "@/app/lib/auth";
 import { evaluateGate, findContract } from "@/app/lib/gate";
 import { earningsForTicker } from "@/app/lib/earnings";
 import { keyLevelsForTicker } from "@/app/lib/levelScan";
-import { getOptionChain, SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
+import { getOptionChain } from "@/app/lib/marketData";
+import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { gradeContract } from "@/app/lib/verdict";
 
 export const dynamic = "force-dynamic";

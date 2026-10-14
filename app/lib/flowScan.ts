@@ -21,7 +21,8 @@ import { keyLevelsForTicker } from "@/app/lib/levelScan";
 import { annotateFlowRows, carryPriorSession } from "@/app/lib/marketContext";
 import { chainInterestFromContracts, type ChainInterest } from "@/app/lib/openingCheck";
 import { quotePointFromContract, type FlowQuotePoint } from "@/app/lib/prints";
-import { getOptionChain, getSchwabStatus, SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
+import { requireMarketData, getOptionChain } from "@/app/lib/marketData";
+import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { readFlowSnapshots, writeFlowSnapshots } from "@/app/lib/schwabStore";
 
 /**
@@ -79,9 +80,7 @@ export async function scanEstimatedFlow(options?: {
     }
   }
 
-  const status = await getSchwabStatus(now);
-  if (!status.configured) throw new SchwabConfigError();
-  if (!status.connected) throw new SchwabNotConnectedError();
+  await requireMarketData(now);
 
   const previous = await readFlowSnapshots();
   const errors: FlowScanError[] = [];
