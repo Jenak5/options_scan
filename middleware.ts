@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAuthorized } from "@/app/lib/auth";
 import { safeNextPath } from "@/app/lib/safeNext";
+import { isBearerPath } from "@/app/lib/bearerPaths";
 
 const PUBLIC_PATHS = new Set(["/login", "/api/auth/login", "/api/auth/logout"]);
 
@@ -21,15 +22,7 @@ export async function middleware(request: NextRequest) {
   // authenticate with Authorization: Bearer.
   // Health, the brief, the candle backfill, and the candle summaries accept HEALTH_TOKEN, or CRON_SECRET when that token is unset.
   // A session cookie is not enough for those routes. The candle cron uses CRON_SECRET.
-  if (
-    pathname === "/api/cron"
-    || pathname === "/api/cron/candles"
-    || pathname === "/api/candles/backfill"
-    || pathname === "/api/candles/summaries"
-    || pathname === "/api/health"
-    || pathname === "/api/brief"
-    || PUBLIC_PATHS.has(pathname)
-  ) {
+  if (isBearerPath(pathname) || PUBLIC_PATHS.has(pathname)) {
     return NextResponse.next();
   }
 
