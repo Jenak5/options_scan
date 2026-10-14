@@ -124,7 +124,7 @@ interface ShadowRule {
   included: number;
   skippedNoCandles: number;
   skippedOpen: number;
-  comparisons: Array<{ id: string; label: string; live: SideStats; shadow: SideStats; tooFew: boolean }>;
+  comparisons: Array<{ id: string; label: string; live: SideStats; shadow: SideStats; tracked?: SideStats; tooFew: boolean }>;
   trades: Array<{
     id: string;
     flags: { bigFlow: boolean | null; smallWithMarket: boolean | null; firstOfDay: boolean; breakevenArmed: boolean | null; againstAt60: boolean | null };
@@ -361,12 +361,13 @@ function ShadowRuleSection({ report }: { report: ShadowRule }) {
           <thead>
             <tr>
               <th style={thStyle}>Rule</th>
-              <th style={thStyle}>Live trades</th>
+              <th style={thStyle}>Live (replayed) trades</th>
               <th style={thStyle}>Live win %</th>
               <th style={thStyle}>Live $/contract</th>
               <th style={thStyle}>Shadow trades</th>
               <th style={thStyle}>Shadow win %</th>
               <th style={thStyle}>Shadow $/contract</th>
+              <th style={thStyle}>Tracked live $/contract (reference)</th>
             </tr>
           </thead>
           <tbody>
@@ -375,6 +376,9 @@ function ShadowRuleSection({ report }: { report: ShadowRule }) {
                 <td style={tdStyle}>{row.label}{row.tooFew ? " (under 30 trades, too few to trust)" : ""}</td>
                 {statCells(row.live)}
                 {statCells(row.shadow)}
+                <td style={{ ...tdStyle, color: pnlColor(row.tracked?.avgPnl ?? null) }}>
+                  {row.tracked?.avgPnl == null ? "n/a" : signed(row.tracked.avgPnl)}
+                </td>
               </tr>
             ))}
           </tbody>
