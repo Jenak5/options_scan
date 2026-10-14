@@ -6,11 +6,8 @@ import {
   type KeyLevels,
   type WallContract,
 } from "@/app/lib/levels";
-import {
-  getPriceHistory,
-  SchwabConfigError,
-  SchwabNotConnectedError,
-} from "@/app/lib/schwab";
+import { getPriceHistory } from "@/app/lib/marketData";
+import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import type { PriceCandle } from "@/app/lib/schwabParse";
 
 /**
