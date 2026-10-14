@@ -10,7 +10,7 @@ import type { OptionContract } from "@/app/lib/contract";
  * exchange-reported sweep.
  */
 
-export const PRINT_SOURCE = "detected from Schwab quotes";
+export const PRINT_SOURCE = "detected from option quotes";
 
 export const NOT_EXCHANGE_SWEEP = "Not an exchange-reported sweep.";
 

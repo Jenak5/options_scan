@@ -138,7 +138,7 @@ export function formatFlowAlert(flow: {
 
   return [
     `${emoji} <b>${escapeHtml(flow.ticker)}</b> ${type}`,
-    `<b>Estimated flow</b> from Schwab volume/open interest, not a sweep.`,
+    `<b>Estimated flow</b> from option volume/open interest, not a sweep.`,
     flow.verdict ? formatVerdictHtml(flow.verdict) : "",
     ``,
     `💰 <b>${premiumStr}</b> flow premium (volume × mid × 100)`,
