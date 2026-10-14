@@ -10,4 +10,6 @@ export interface CandleBar {
   h: number;
   l: number;
   c: number;
+  /** Traded volume. Present on underlying bars used by the feature backfill. */
+  v?: number;
 }

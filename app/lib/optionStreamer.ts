@@ -27,10 +27,13 @@ export function tastytradeStreamerSymbol(input: {
 }
 
 /** Candle subscription symbol. The streamer symbol is unchanged aside from the suffix. */
-export function candleSubscriptionSymbol(streamer: string): string {
+export function candleSubscriptionSymbol(streamer: string, period: CandlePeriod = "1m"): string {
   const base = streamerSymbolKey(streamer);
-  return `${base}{=1m}`;
+  return `${base}{=${period}}`;
 }
+
+/** DXLink candle periods this app requests. Option paths use 1m; the feature backfill uses 5m and 1d on the underlying. */
+export type CandlePeriod = "1m" | "5m" | "1d";
 
 /** Drop a "{=1m}" suffix so compact events match the streamer symbol. */
 export function streamerSymbolKey(symbol: string): string {

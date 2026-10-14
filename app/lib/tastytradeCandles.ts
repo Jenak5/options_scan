@@ -1,5 +1,5 @@
 import type { CandleBar } from "@/app/lib/candleTypes";
-import { candleSubscriptionSymbol, streamerSymbolKey } from "@/app/lib/optionStreamer";
+import { candleSubscriptionSymbol, streamerSymbolKey, type CandlePeriod } from "@/app/lib/optionStreamer";
 
 /**
  * Server-only DXLink candle client.
@@ -26,6 +26,8 @@ export interface CandleSubscription {
   streamer: string;
   /** Epoch milliseconds. DXLink fromTime. */
   fromTime: number;
+  /** Defaults to 1m. Underlying (non-option) symbols must set a period. */
+  period?: CandlePeriod;
 }
 
 export interface DxlinkState {
@@ -262,7 +264,7 @@ export async function fetchOptionCandles(
   const candles = new Map<string, CandleBar[]>();
   const completed: string[] = [];
   const errors: string[] = [];
-  const usable = subs.filter((sub) => sub.streamer.startsWith(".") && Number.isFinite(sub.fromTime));
+  const usable = subs.filter((sub) => (sub.streamer.startsWith(".") || sub.period != null) && Number.isFinite(sub.fromTime));
   const batches = chunkCandleSubs(usable, CANDLE_SUBSCRIPTION_LIMIT);
   const fetchImpl = deps?.fetchImpl ?? fetch;
   const connect = deps?.connect ?? connectNodeWebSocket;
@@ -296,6 +298,23 @@ export async function fetchOptionCandles(
     }
   }
   return { candles, completed, errors: errors.slice(0, 8), errorSample: null };
+}
+
+/** Read-only GET against the Tastytrade REST API with an OAuth access token. Null on any failure. */
+export async function tastytradeGetJson(
+  access: CandleAccess,
+  path: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<unknown | null> {
+  try {
+    const res = await fetchImpl(`https://api.tastyworks.com${path}`, {
+      headers: { "User-Agent": USER_AGENT, Authorization: `Bearer ${access.access}`, Accept: "application/json" },
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
 }
 
 class TastytradeOAuthError extends Error {
@@ -347,7 +366,7 @@ export function feedMessages(subs: readonly CandleSubscription[]): object[] {
       channel: 1,
       add: subs.map((sub) => ({
         type: "Candle",
-        symbol: candleSubscriptionSymbol(sub.streamer),
+        symbol: candleSubscriptionSymbol(sub.streamer, sub.period ?? "1m"),
         fromTime: Math.floor(sub.fromTime),
       })),
     },
@@ -458,7 +477,9 @@ function absorb(into: Map<string, Map<number, CandleBar>>, candles: readonly Par
       times = new Map();
       into.set(candle.symbol, times);
     }
-    times.set(candle.t, { t: candle.t, o: candle.o, h: candle.h, l: candle.l, c: candle.c });
+    const bar: CandleBar = { t: candle.t, o: candle.o, h: candle.h, l: candle.l, c: candle.c };
+    if (candle.v != null) bar.v = candle.v;
+    times.set(candle.t, bar);
   }
 }
 
@@ -469,9 +490,12 @@ function parseCompactRow(values: unknown[], offset: number): ParsedCandle | null
   const h = positive(values[offset + 3]);
   const l = positive(values[offset + 4]);
   const c = positive(values[offset + 5]);
-  if (!symbol.startsWith(".") || t == null || o == null || h == null || l == null || c == null) return null;
+  if (!symbol || t == null || o == null || h == null || l == null || c == null) return null;
   if (h + 1e-9 < l) return null;
-  return { symbol, t, o, h, l, c };
+  const rawVolume = values[offset + 6];
+  const out: ParsedCandle = { symbol, t, o, h, l, c };
+  if (!symbol.startsWith(".") && typeof rawVolume === "number" && Number.isFinite(rawVolume) && rawVolume >= 0) out.v = rawVolume;
+  return out;
 }
 
 function epochMs(value: unknown): number | null {
