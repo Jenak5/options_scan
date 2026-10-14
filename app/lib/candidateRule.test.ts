@@ -116,7 +116,9 @@ describe("shadow rule report", () => {
     expect(t1.flags).toMatchObject({ bigFlow: true, smallWithMarket: false, firstOfDay: true, breakevenArmed: true });
     expect(t2.flags).toMatchObject({ bigFlow: false, smallWithMarket: true, firstOfDay: false });
     const big = report.comparisons.find((c) => c.id === "candidate1m")!;
-    expect(big.live).toMatchObject({ trades: 1, wins: 1, avgPnl: 80 });
+    expect(big.live).toMatchObject({ trades: 1, wins: 1 });
+    expect(big.live.avgPnl).toBeCloseTo(80);
+    expect(big.tracked.avgPnl).toBe(80);
     expect(big.shadow.trades).toBe(1);
     expect(big.shadow.avgPnl).toBeCloseTo(55);
     expect(big.tooFew).toBe(true);
@@ -134,5 +136,28 @@ describe("shadow rule report", () => {
     });
     expect(report.included).toBe(0);
     expect(report.skippedNoCandles).toBe(1);
+  });
+
+  it("compares both columns on the same candles, with tracked as reference", () => {
+    // Tracked result says -60, but the candles hit the live +40% target: live replay is +80.
+    const s1 = shadow("a1", { pnlDollars: -60 });
+    const s2 = shadow("a3", { ticker: "QQQ", strike: 600 });
+    const candles = new Map<string, CandleBar[]>([
+      [contractKey(s1), bars([[1, 2.0, 2.9]])],
+      // never exits under live exits: still open on the replay, so left out of exit rows
+      [contractKey(s2), bars([[1, 1.95, 2.05]])],
+    ]);
+    const report = analyzeShadowRule({ shadows: [s1, s2], alerts, candles });
+    const t1 = report.trades.find((t) => t.id === "a1")!;
+    expect(t1.liveReplayPnl).toBeCloseTo(80);
+    expect(t1.livePnl).toBe(-60);
+    const be = report.comparisons.find((c) => c.id === "exitBreakeven")!;
+    expect(be.live.trades).toBe(1);
+    expect(be.live.avgPnl).toBeCloseTo(80);
+    expect(be.shadow.avgPnl).toBeCloseTo(80);
+    expect(be.tracked.avgPnl).toBe(-60);
+    const big = report.comparisons.find((c) => c.id === "filterBig")!;
+    expect(big.live.trades).toBe(1);
+    expect(big.live.avgPnl).toBeCloseTo(80);
   });
 });

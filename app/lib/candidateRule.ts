@@ -79,7 +79,10 @@ export interface ShadowRuleTrade {
   expiration: string;
   openedAt: number;
   flowPremium: number | null;
+  /** Tracked scorecard result (reference only). */
   livePnl: number;
+  /** Live exits replayed on the same 1-minute candles. Null when still open under live exits. */
+  liveReplayPnl: number | null;
   candidatePnl: number | null;
   breakevenPnl: number | null;
   cut60Pnl: number | null;
@@ -97,8 +100,11 @@ export interface SideStats {
 export interface ShadowComparison {
   id: string;
   label: string;
+  /** Live exits replayed on the same 1-minute candles. */
   live: SideStats;
   shadow: SideStats;
+  /** Tracked scorecard result for the live set. Reference only. */
+  tracked: SideStats;
   tooFew: boolean;
 }
 
@@ -114,7 +120,7 @@ export interface ShadowRuleReport {
 }
 
 export const SHADOW_RULE_NOTE =
-  "What-if only. These rows track a candidate rule. They do not change live exits, grades, the Scorecard, or Telegram. Live is the tracked scorecard result. Shadow replays the same alert on the stored 1-minute candles (high and low of each traded minute; gaps are not filled). $ is per contract.";
+  "What-if only. These rows track a candidate rule. They do not change live exits, grades, the Scorecard, or Telegram. Live replays the live exits and shadow replays the alternative, both on the same stored 1-minute candles, so the two columns compare like for like. The tracked scorecard result is shown as a reference (high and low of each traded minute; gaps are not filled). $ is per contract.";
 
 export const SHADOW_RULE_LABEL =
   "Candidate exit for $1M+ flow: stop at -40% (loss still capped at $875), no fixed target, and once the trade is up 20%, sell if it falls 15% below its best price. Time stop and last-week exit stay as live.";
@@ -217,6 +223,7 @@ export function analyzeShadowRule(input: {
     const premium = features?.flowPremium ?? null;
     const underlying = row.entryUnderlying ?? alert?.underlyingPrice ?? null;
     const base = { entryPrice: row.entryPrice, openedAt: row.openedAt, expiration: row.expiration, candles, delta: features?.delta ?? null, underlying };
+    const liveReplay = replayRule(base, LIVE_RULE);
     const candidate = replayRule(base, CANDIDATE_RULE);
     const breakeven = replayRule(base, BREAKEVEN_RULE);
     const cut60 = replayRule(base, CUT60_RULE);
@@ -230,6 +237,7 @@ export function analyzeShadowRule(input: {
       openedAt: row.openedAt,
       flowPremium: premium,
       livePnl: row.pnlDollars,
+      liveReplayPnl: liveReplay?.pnlDollars ?? null,
       candidatePnl: candidate?.pnlDollars ?? null,
       breakevenPnl: breakeven?.pnlDollars ?? null,
       cut60Pnl: cut60?.pnlDollars ?? null,
@@ -248,15 +256,15 @@ export function analyzeShadowRule(input: {
   const comparisons: ShadowComparison[] = [];
   const big = trades.filter((t) => t.flags.bigFlow === true);
   comparisons.push(compare("candidate1m", "$1M+ flow: candidate exit vs live exit", big, big, (t) => t.candidatePnl));
-  comparisons.push(compare("filterBig", "Entry filter: $1M+ flow only (live exits)", trades, big, (t) => t.livePnl));
+  comparisons.push(compare("filterBig", "Entry filter: $1M+ flow only (live exits)", trades, big, (t) => t.liveReplayPnl));
   comparisons.push(compare(
     "filterSmallWithMarket",
     "Entry filter: skip under $1M with the SPY/QQQ direction (live exits)",
     trades,
     trades.filter((t) => t.flags.smallWithMarket === false),
-    (t) => t.livePnl,
+    (t) => t.liveReplayPnl,
   ));
-  comparisons.push(compare("filterFirst", "Entry filter: first alert per ticker per day (live exits)", trades, trades.filter((t) => t.flags.firstOfDay), (t) => t.livePnl));
+  comparisons.push(compare("filterFirst", "Entry filter: first alert per ticker per day (live exits)", trades, trades.filter((t) => t.flags.firstOfDay), (t) => t.liveReplayPnl));
   comparisons.push(compare("exitBreakeven", "Exit: move the stop to breakeven after +15% (all alerts)", trades, trades, (t) => t.breakevenPnl));
   comparisons.push(compare("exitCut60", "Exit: cut if the stock is 0.3% against after 60 minutes (all alerts)", trades, trades, (t) => t.cut60Pnl));
   const smallest = comparisons.reduce((m, c) => Math.min(m, c.shadow.trades, c.live.trades), Number.POSITIVE_INFINITY);
@@ -273,9 +281,10 @@ export function analyzeShadowRule(input: {
 }
 
 /**
- * Exit rows: live and shadow are the same alerts; shadow uses the alternative exit.
- * Entry-filter rows: live is every alert with live exits; shadow is only the
- * alerts the filter keeps, also with live exits.
+ * Both columns use replays on the same candles. Exit rows: the same alerts,
+ * live exits vs the alternative; an alert counts only when both replays closed.
+ * Entry-filter rows: every alert vs the alerts the filter keeps, both with
+ * live exits replayed. Tracked is the scorecard result for the live set.
  */
 function compare(
   id: string,
@@ -286,19 +295,32 @@ function compare(
 ): ShadowComparison {
   const shadowVals: number[] = [];
   const liveVals: number[] = [];
-  const sameSet = liveRows === shadowRows;
-  for (const row of shadowRows) {
-    const value = pick(row);
-    if (value == null) continue;
-    shadowVals.push(value);
-    if (sameSet) liveVals.push(row.livePnl);
+  const trackedVals: number[] = [];
+  if (liveRows === shadowRows) {
+    for (const row of shadowRows) {
+      const value = pick(row);
+      if (value == null || row.liveReplayPnl == null) continue;
+      shadowVals.push(value);
+      liveVals.push(row.liveReplayPnl);
+      trackedVals.push(row.livePnl);
+    }
+  } else {
+    for (const row of shadowRows) {
+      const value = pick(row);
+      if (value != null) shadowVals.push(value);
+    }
+    for (const row of liveRows) {
+      if (row.liveReplayPnl == null) continue;
+      liveVals.push(row.liveReplayPnl);
+      trackedVals.push(row.livePnl);
+    }
   }
-  if (!sameSet) for (const row of liveRows) liveVals.push(row.livePnl);
   return {
     id,
     label,
     live: stats(liveVals),
     shadow: stats(shadowVals),
+    tracked: stats(trackedVals),
     tooFew: Math.min(liveVals.length, shadowVals.length) < SHADOW_MIN_TRUST,
   };
 }
