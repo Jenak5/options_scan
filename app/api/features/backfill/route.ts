@@ -25,6 +25,9 @@ async function handle(request: NextRequest, apply: boolean) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   const tickers = parseTickerParam(request.nextUrl.searchParams.get("tickers"));
+  const started = Date.now();
+  console.log(`[feature-backfill] request apply=${apply} tickers=${tickers ? tickers.join(",") : "all"}`);
   const result = await runFeatureBackfill({ apply, now: new Date(), tickers });
+  console.log(`[feature-backfill] response after ${Date.now() - started} ms partial=${result.partial} stoppedAt=${result.stoppedAt ?? "-"} saved=${result.saved}`);
   return NextResponse.json(result);
 }

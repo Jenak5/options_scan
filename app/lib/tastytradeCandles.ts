@@ -19,6 +19,12 @@ const USER_AGENT = "options-scan/1.0";
 /** DXLink allows 100 Candle subscriptions on one session. Further symbols use another session. */
 export const CANDLE_SUBSCRIPTION_LIMIT = 100;
 
+/** A DXLink socket that has not opened by then is closed and reported as failed. */
+export const DXLINK_OPEN_TIMEOUT_MS = 10_000;
+
+/** Every REST call to Tastytrade gives up after this. */
+export const TASTYTRADE_REST_TIMEOUT_MS = 15_000;
+
 const CANDLE_FIELDS = ["eventSymbol", "time", "open", "high", "low", "close", "volume"] as const;
 
 export interface CandleSubscription {
@@ -316,6 +322,7 @@ export async function tastytradeGetJson(
   try {
     const res = await fetchImpl(`https://api.tastyworks.com${path}`, {
       headers: { "User-Agent": USER_AGENT, Authorization: `Bearer ${access.access}`, Accept: "application/json" },
+      signal: AbortSignal.timeout(TASTYTRADE_REST_TIMEOUT_MS),
     });
     if (!res.ok) return null;
     return await res.json();
@@ -340,6 +347,7 @@ async function requestAccessToken(fetchImpl: typeof fetch, creds: TastytradeCred
     method: request.method,
     headers: request.headers,
     body: request.body,
+    signal: AbortSignal.timeout(TASTYTRADE_REST_TIMEOUT_MS),
   });
   if (!oauth.ok) {
     const body = await oauth.text().catch(() => "");
@@ -382,6 +390,7 @@ export function feedMessages(subs: readonly CandleSubscription[]): object[] {
 
 export async function openQuoteSession(fetchImpl: typeof fetch, access: string): Promise<QuoteSession> {
   const quote = await fetchImpl(QUOTE_URL, {
+    signal: AbortSignal.timeout(TASTYTRADE_REST_TIMEOUT_MS),
     headers: {
       "User-Agent": USER_AGENT,
       Authorization: `Bearer ${access}`,
@@ -448,7 +457,11 @@ async function runDxlinkBatch(
       }
     }
   } finally {
-    transport.close();
+    try {
+      transport.close();
+    } catch {
+      // Already closed.
+    }
   }
   const candles = new Map<string, CandleBar[]>();
   byTime.forEach((times, symbol) => {
@@ -638,24 +651,64 @@ function openQueuedSocket(
     const queue: string[] = [];
     let waiter: ((value: string | null) => void) | null = null;
     let settled = false;
+    let closed = false;
+    let socketRef: { close(): void } | null = null;
+    // The open handshake can stall without an error or close event. Never wait on it forever.
+    const openTimer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try {
+        socketRef?.close();
+      } catch {
+        // Already closed.
+      }
+      reject(new Error(`DXLink connection did not open within ${DXLINK_OPEN_TIMEOUT_MS / 1000} s`));
+    }, DXLINK_OPEN_TIMEOUT_MS);
     const fail = () => {
+      clearTimeout(openTimer);
+      closed = true;
+      if (waiter) {
+        const pending = waiter;
+        waiter = null;
+        pending(null);
+      }
       if (settled) return;
       settled = true;
       reject(new Error("DXLink connection failed"));
     };
     const socket = attach(
       () => {
-        if (settled) return;
+        clearTimeout(openTimer);
+        if (settled) {
+          // The open timer already gave up. Do not leave this socket running.
+          try {
+            socket.close();
+          } catch {
+            // Already closed.
+          }
+          return;
+        }
         settled = true;
         resolve({
           send(data: string) {
-            socket.send(data);
+            if (closed) return;
+            try {
+              socket.send(data);
+            } catch {
+              closed = true;
+            }
           },
           close() {
-            socket.close();
+            closed = true;
+            try {
+              socket.close();
+            } catch {
+              // Already closed.
+            }
           },
           next(waitMs: number) {
             if (queue.length > 0) return Promise.resolve(queue.shift() ?? null);
+            if (closed) return Promise.resolve(null);
             return new Promise((done) => {
               const timer = setTimeout(() => {
                 if (waiter) waiter = null;
@@ -681,6 +734,7 @@ function openQueuedSocket(
         }
       },
       () => {
+        closed = true;
         if (!settled) {
           fail();
           return;
@@ -692,6 +746,7 @@ function openQueuedSocket(
         }
       },
     );
+    socketRef = socket;
   });
 }
 
