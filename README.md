@@ -9,10 +9,7 @@ Read-only scan-and-alert tool for a small personal options account ($5,000, max 
 | Tab | Source | What it does |
 |-----|--------|--------------|
 | Flow | Schwab | Estimated flow from volume and open interest. Not sweeps. |
-| Vol Arb | Schwab | ATM implied vol versus 20-day realized vol, plus term structure and skew |
-| Account | Tastytrade, off unless enabled | Positions, P&L, balances, buying power (read-only). Hidden until `TASTYTRADE_ENABLED=true` and the Tastytrade values are set. |
 | Gate | Schwab | Live chain check. Overall PASS only if every rule passes. |
-| Kelly Lab | Local | Retired sizing illustration. Not the account model. |
 | Research | Grok (xAI) | Chat grounded in the scanner's current data |
 | Alerts | Telegram | Test a Telegram alert; scheduled scans run from cron |
 | Alert Report | Saved alerts | Checklist grade at send time, then midpoint checks |
@@ -141,7 +138,9 @@ curl -H "Authorization: Bearer $CRON_SECRET" "https://<your-deployment>/api/cron
 
 The account is **$5,000**. The most one trade can lose is **$875**, which is 17.5% of that account. Both numbers live in `app/lib/risk.ts`. Set `ACCOUNT_SIZE_DOLLARS` to change the account size and `MAX_LOSS_DOLLARS` to change the cap. An empty or invalid value keeps 5000 and 875. The weekly drawdown flag is 25% of the account (**$1,250** at the default). The Gate, the checklist, the alerts, Grade my trade, and the paper trade log all use the cap.
 
-The old Kelly Lab assumed a **55%** win rate. That model is retired. The Kelly tab is only an illustration, and it is not used to size a trade. The account size shown there is the same $5,000.
+The old Kelly Lab assumed a **55%** win rate. That model and its tab are retired.
+
+The Vol Arb, Account, and Kelly tabs were removed from the page. The `/api/vol` and `/api/tastytrade` routes stay: the cron Vol Arb line in Telegram alerts and the Research tab still use them.
 
 ## Schwab market data
 
