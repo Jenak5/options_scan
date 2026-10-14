@@ -41,10 +41,75 @@ export interface FeatureBackfillResult {
   earningsUnavailable: string[];
   notRecoverable: Readonly<Record<string, string>>;
   errors: string[];
+  /** True when the run hit the time cap and returned what it had. Nothing is written after a cap hit. */
+  partial: boolean;
+  /** The step that was still running when the cap hit. Null when the run finished. */
+  stoppedAt: string | null;
+  /** Each step with its duration, in order. Also written to the function log. */
+  trace: BackfillStep[];
 }
 
-export async function runFeatureBackfill(input: { apply: boolean; now: Date; tickers?: readonly string[] | null }): Promise<FeatureBackfillResult> {
+export interface BackfillStep {
+  step: string;
+  ms: number;
+  ok: boolean;
+  note?: string;
+}
+
+/** Leave headroom under the route's 300 s maxDuration so the JSON always goes out. */
+export const BACKFILL_TIME_CAP_MS = 200_000;
+
+class BackfillDeadline extends Error {
+  readonly step: string;
+
+  constructor(step: string) {
+    super(`Stopped at ${step}: the ${BACKFILL_TIME_CAP_MS / 1000} s cap was reached`);
+    this.step = step;
+  }
+}
+
+/** Runs each awaited step against one deadline, and logs how long it took. */
+export function makeStepper(trace: BackfillStep[], deadline: number, log: (line: string) => void = console.log) {
+  return async function step<T>(name: string, work: () => Promise<T>): Promise<T> {
+    const started = Date.now();
+    const remaining = deadline - started;
+    if (remaining <= 0) {
+      trace.push({ step: name, ms: 0, ok: false, note: "not started: time cap reached" });
+      log(`[feature-backfill] ${name} skipped: time cap reached`);
+      throw new BackfillDeadline(name);
+    }
+    log(`[feature-backfill] ${name} start (${Math.round(remaining / 1000)} s left)`);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const cap = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new BackfillDeadline(name)), remaining);
+    });
+    try {
+      const value = await Promise.race([work(), cap]);
+      const ms = Date.now() - started;
+      trace.push({ step: name, ms, ok: true });
+      log(`[feature-backfill] ${name} done in ${ms} ms`);
+      return value;
+    } catch (err) {
+      const ms = Date.now() - started;
+      const note = err instanceof Error ? err.message.slice(0, 160) : "failed";
+      trace.push({ step: name, ms, ok: false, note });
+      log(`[feature-backfill] ${name} failed after ${ms} ms: ${note}`);
+      throw err;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+}
+
+export async function runFeatureBackfill(input: {
+  apply: boolean;
+  now: Date;
+  tickers?: readonly string[] | null;
+  capMs?: number;
+}): Promise<FeatureBackfillResult> {
   const now = input.now;
+  const trace: BackfillStep[] = [];
+  const step = makeStepper(trace, Date.now() + (input.capMs ?? BACKFILL_TIME_CAP_MS));
   const result: FeatureBackfillResult = {
     dryRun: !input.apply,
     saved: false,
@@ -56,9 +121,33 @@ export async function runFeatureBackfill(input: { apply: boolean; now: Date; tic
     earningsUnavailable: [],
     notRecoverable: NOT_RECOVERABLE,
     errors: [],
+    partial: false,
+    stoppedAt: null,
+    trace,
   };
-  const book = parseAlertBook(await readAlertBookText());
-  const shadows = parseShadowBook(await readShadowBookText());
+  try {
+    return await runSteps(input, now, result, step);
+  } catch (err) {
+    if (err instanceof BackfillDeadline) {
+      result.partial = true;
+      result.stoppedAt = err.step;
+      result.saved = false;
+      result.errors.push(err.message);
+      return result;
+    }
+    result.errors.push(err instanceof Error ? err.message.slice(0, 200) : "Backfill failed");
+    return result;
+  }
+}
+
+async function runSteps(
+  input: { apply: boolean; tickers?: readonly string[] | null },
+  now: Date,
+  result: FeatureBackfillResult,
+  step: ReturnType<typeof makeStepper>,
+): Promise<FeatureBackfillResult> {
+  const book = parseAlertBook(await step("read alert book", () => readAlertBookText()));
+  const shadows = parseShadowBook(await step("read shadow book", () => readShadowBookText()));
   const only = input.tickers && input.tickers.length > 0 ? new Set(input.tickers) : null;
   const alerts = only ? book.records.filter((alert) => only.has(alert.ticker)) : book.records;
   const latest = new Map<string, number>();
@@ -88,20 +177,20 @@ export async function runFeatureBackfill(input: { apply: boolean; now: Date; tic
   result.tickers = Array.from(earliest.keys()).sort();
   if (result.tickers.length === 0) return result;
 
-  const opened = await openCandleAccess();
+  const opened = await step("tastytrade oauth", () => openCandleAccess());
   if (!opened.access) {
     result.errors.push(opened.errorSample);
     return result;
   }
   const access = opened.access;
-  const history = await fetchHistory(access, earliest, latest, result.errors);
+  const history = await step("dxlink candles", () => fetchHistory(access, earliest, latest, result.errors));
   for (let i = 0; i < result.tickers.length; i++) {
     const ticker = result.tickers[i];
     const row = history.get(ticker);
     if (!row || row.intraday.length === 0 || row.daily.length === 0) result.tickersWithoutHistory.push(ticker);
   }
   const alertTickers = Array.from(new Set(alerts.map((alert) => alert.ticker))).sort();
-  const earnings = await fetchEarnings(access, alertTickers);
+  const earnings = await step("earnings", () => fetchEarnings(access, alertTickers));
   earnings.forEach((value, ticker) => {
     if (value == null) result.earningsUnavailable.push(ticker);
   });
@@ -119,17 +208,17 @@ export async function runFeatureBackfill(input: { apply: boolean; now: Date; tic
   result.researchSpyTrendFilled = shadowPlan.researchSpy;
   if (!input.apply) return result;
 
-  const alertSaved = changedById.size === 0 ? true : await updateAlertBook((current) => {
+  const alertSaved = changedById.size === 0 ? true : await step("write alert book", () => updateAlertBook((current) => {
     const latest = parseAlertBook(current);
     return JSON.stringify({
       ...latest,
       records: latest.records.map((alert) => mergeFilled(alert, changedById.get(alert.id))),
     });
-  });
-  const shadowSaved = await updateShadowBook((current) => {
+  }));
+  const shadowSaved = await step("write shadow book", () => updateShadowBook((current) => {
     const latest = parseShadowBook(current);
     return serializeShadowBook(planShadowFills(latest, changedById, spy, now).book);
-  });
+  }));
   result.saved = alertSaved && shadowSaved;
   if (!alertSaved) result.errors.push("The alert book write failed.");
   if (!shadowSaved) result.errors.push("The shadow book write failed.");
