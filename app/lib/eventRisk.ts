@@ -5,7 +5,8 @@ import { calendarDaysBetween, newYorkDate } from "@/app/lib/flow";
  * Pure event-risk check. No network.
  * Earnings on or before expiration lowers the grade and names IV crush.
  * Earnings today or tomorrow on a short-dated single is a SKIP.
- * A macro release on or before expiration adds a caution and one downgrade.
+ * A macro release today or in the next couple of trading days (and not
+ * after expiration) adds a caution and one downgrade.
  * An unknown earnings date is not treated as safe.
  */
 
@@ -94,7 +95,7 @@ export function assessEventRisk(input: {
     }
   }
 
-  const macros = macroReleasesThrough(today, input.expiration);
+  const macros = imminentMacroReleases(today, input.expiration);
   if (macros.length > 0) {
     steps += EVENT_RULES.macroDowngradeSteps;
     parts.push(`Macro: ${formatMacroList(macros)}. ${MACRO_CAUTION}`);
@@ -119,6 +120,28 @@ export function macroReleasesThrough(today: string, expiration: string): MacroRe
     if (row.date >= today && row.date <= expiration) hit.push(row);
   }
   return hit;
+}
+
+/** Date `n` weekdays after `ymd` (exchange holidays not skipped). */
+export function addTradingDays(ymd: string, n: number): string {
+  const d = new Date(`${ymd}T12:00:00Z`);
+  let left = n;
+  while (left > 0) {
+    d.setUTCDate(d.getUTCDate() + 1);
+    const wd = d.getUTCDay();
+    if (wd !== 0 && wd !== 6) left--;
+  }
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Macro releases that move the grade: from today through the next
+ * macroWindowTradingDays trading days, and never after expiration.
+ */
+export function imminentMacroReleases(today: string, expiration: string): MacroRelease[] {
+  if (!isYmd(today) || !isYmd(expiration)) return [];
+  const windowEnd = addTradingDays(today, EVENT_RULES.macroWindowTradingDays);
+  return macroReleasesThrough(today, expiration < windowEnd ? expiration : windowEnd);
 }
 
 function normalizeEarnings(earnings: EarningsFact | null, today: string): EarningsFact {
