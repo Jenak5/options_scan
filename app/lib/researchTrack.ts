@@ -67,6 +67,8 @@ export interface ResearchTrack {
   entryUnderlying: number | null;
   /** SPY versus its session VWAP at entry. See SPY_TREND_NOTE. */
   spyTrend: IndexDirection;
+  /** "backfill" when spyTrend was filled later from Tastytrade SPY candles. Missing when saved at entry. */
+  spyTrendSource?: "backfill";
   marks: ShadowMark[];
 }
 
@@ -455,6 +457,7 @@ function parseResearchTrack(value: unknown): ResearchTrack | null {
     entryPrice,
     entryUnderlying: row.entryUnderlying == null ? null : positiveOrNull(typeof row.entryUnderlying === "number" ? row.entryUnderlying : null),
     spyTrend,
+    ...(row.spyTrendSource === "backfill" ? { spyTrendSource: "backfill" as const } : {}),
     marks: parseMarks(row.marks),
   };
 }

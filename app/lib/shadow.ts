@@ -91,6 +91,8 @@ export interface ShadowTrade {
   entryUnderlying?: number | null;
   /** SPY versus its session VWAP at entry. See SPY_TREND_NOTE. Present only when quoteTrack is set. */
   spyTrend?: IndexDirection | null;
+  /** "backfill" when spyTrend was filled later from Tastytrade SPY candles. */
+  spyTrendSource?: "backfill";
 }
 
 export interface ShadowBook {
@@ -917,6 +919,7 @@ function parseShadow(value: unknown): ShadowTrade | null {
     trade.quoteTrack = true;
     trade.entryUnderlying = row.entryUnderlying == null ? null : asPositive(row.entryUnderlying);
     trade.spyTrend = parseSpyTrend(row.spyTrend);
+    if (row.spyTrendSource === "backfill") trade.spyTrendSource = "backfill";
   }
   return trade;
 }
