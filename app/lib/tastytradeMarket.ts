@@ -44,8 +44,19 @@ export const QUOTE_BATCH = 100;
 /** Tastytrade access tokens last 15 minutes. Refresh a minute early. */
 const TOKEN_FALLBACK_TTL_MS = 15 * 60 * 1000;
 const TOKEN_EXPIRY_BUFFER_MS = 60 * 1000;
-/** Waits before retry 1 and 2 after a 401. */
-const AUTH_RETRY_DELAYS_MS = [250, 750];
+/** Wait before the first retry after a 401 (fresh token). */
+const AUTH_RETRY_DELAY_MS = 250;
+/**
+ * A 401 that survives a fresh-token retry is treated as a rate limit:
+ * back off longer, with jitter, before trying again. After these, give up
+ * so the caller can fall back to Schwab.
+ */
+const RATE_LIMIT_BACKOFF_MS = [1500, 3000];
+const RATE_LIMIT_JITTER = 0.5;
+/** Tastytrade requests in flight at once per instance (one scan). */
+export const TT_MAX_CONCURRENT = 4;
+/** Tastytrade requests in flight at once for one ticker's chain. */
+export const TT_MAX_PER_TICKER = 2;
 
 interface CachedToken {
   access: string;
@@ -55,6 +66,7 @@ interface CachedToken {
 
 let cachedToken: CachedToken | null = null;
 let refreshing: Promise<CachedToken> | null = null;
+let randomImpl: () => number = Math.random;
 let sleepImpl: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class TastytradeDataError extends Error {
@@ -62,6 +74,33 @@ export class TastytradeDataError extends Error {
     super(message);
     this.name = "TastytradeDataError";
   }
+}
+
+/** Small counting semaphore. */
+export class Limiter {
+  private active = 0;
+  private queue: Array<() => void> = [];
+  peak = 0;
+  constructor(readonly max: number) {}
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.active >= this.max) await new Promise<void>((resolve) => this.queue.push(resolve));
+    this.active++;
+    this.peak = Math.max(this.peak, this.active);
+    try {
+      return await fn();
+    } finally {
+      this.active--;
+      this.queue.shift()?.();
+    }
+  }
+}
+
+let globalLimiter = new Limiter(TT_MAX_CONCURRENT);
+
+/** Run tasks with at most `limit` at once, keeping result order. */
+export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const lim = new Limiter(limit);
+  return Promise.all(items.map((item) => lim.run(() => fn(item))));
 }
 
 function tokenUsable(token: CachedToken | null, now: number): token is CachedToken {
@@ -106,21 +145,31 @@ export async function withTastytradeAuth<T>(
   fetchImpl: typeof fetch,
   call: (access: string) => Promise<{ status: number; value?: T }>,
 ): Promise<T> {
-  let lastStatus = 0;
-  for (let attempt = 0; attempt <= AUTH_RETRY_DELAYS_MS.length; attempt++) {
+  const maxAttempts = 2 + RATE_LIMIT_BACKOFF_MS.length;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const token = await currentToken(fetchImpl);
-    const result = await call(token.access);
+    const result = await globalLimiter.run(() => call(token.access));
     if (result.status !== 401) {
       if (attempt > 0) console.info(`[tastytrade-auth] ${label} ok after ${attempt} retr${attempt === 1 ? "y" : "ies"}`);
       return result.value as T;
     }
-    lastStatus = 401;
     const age = Math.round((Date.now() - token.mintedAt) / 1000);
     console.warn(`[tastytrade-auth] ${label} 401 on attempt ${attempt + 1} (token age ${age}s)`);
-    invalidateToken(token.access);
-    if (attempt < AUTH_RETRY_DELAYS_MS.length) await sleepImpl(AUTH_RETRY_DELAYS_MS[attempt]);
+    if (attempt === 0) {
+      // First 401: maybe a stale token. Drop it and retry with a fresh one.
+      invalidateToken(token.access);
+      await sleepImpl(AUTH_RETRY_DELAY_MS);
+      continue;
+    }
+    // 401 survived a fresh-token retry: treat it as a rate limit.
+    const base = RATE_LIMIT_BACKOFF_MS[attempt - 1];
+    if (base == null) break;
+    const wait = Math.round(base * (1 + RATE_LIMIT_JITTER * randomImpl()));
+    console.warn(`[tastytrade-auth] ${label} treating 401 as rate limit, backing off ${wait}ms`);
+    await sleepImpl(wait);
   }
-  throw new TastytradeDataError(label === "quote token" ? `Tastytrade quote token failed (${lastStatus})` : `Tastytrade ${label} failed (${lastStatus})`);
+  console.warn(`[tastytrade-auth] ${label} still 401 after ${maxAttempts} attempts, giving up`);
+  throw new TastytradeDataError(label === "quote token" ? "Tastytrade quote token failed (401)" : `Tastytrade ${label} failed (401)`);
 }
 
 async function ttGet(path: string, fetchImpl: typeof fetch = fetch, signal?: AbortSignal): Promise<unknown> {
@@ -160,7 +209,7 @@ export async function ttQuotes(
   for (let i = 0; i < options.length; i += QUOTE_BATCH) {
     batches.push(`equity-option=${options.slice(i, i + QUOTE_BATCH).map(encodeURIComponent).join(",")}`);
   }
-  const results = await Promise.all(batches.map((q) => ttGet(`/market-data/by-type?${q}`, fetchImpl, signal)));
+  const results = await mapLimit(batches, TT_MAX_PER_TICKER, (q) => ttGet(`/market-data/by-type?${q}`, fetchImpl, signal));
   for (let i = 0; i < results.length; i++) out.push(...parseMarketDataItems(results[i]));
   return out;
 }
@@ -368,8 +417,19 @@ async function streamCandles(
   return rows;
 }
 
-export function resetTastytradeMarketForTests(options?: { sleep?: (ms: number) => Promise<void> }): void {
+export function resetTastytradeMarketForTests(options?: {
+  sleep?: (ms: number) => Promise<void>;
+  random?: () => number;
+  maxConcurrent?: number;
+}): void {
   cachedToken = null;
+  randomImpl = options?.random ?? Math.random;
+  globalLimiter = new Limiter(options?.maxConcurrent ?? TT_MAX_CONCURRENT);
   refreshing = null;
   sleepImpl = options?.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+}
+
+/** Highest number of Tastytrade requests seen in flight at once (tests/diagnostics). */
+export function tastytradePeakConcurrency(): number {
+  return globalLimiter.peak;
 }
