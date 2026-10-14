@@ -329,13 +329,31 @@ describe("alert checklist", () => {
     expect(result.eventLine.includes(EARNINGS_UNKNOWN_PHRASE)).toBe(false);
   });
 
-  it("downgrades one step for a macro release on or before expiration", () => {
-    const jobs = EVENT_RULES.macroDates.find((row) => row.date === "2026-10-02" && row.name === "Jobs report");
-    expect(jobs).toBeTruthy();
+  it("keeps an A for a 21-day contract when the next macro release is weeks away", () => {
+    // Jobs report 2026-06-05 and CPI 2026-06-10 fall before this expiration but not in the next 2 trading days.
     const result = gradeSetup(excellent({
       now: new Date("2026-05-20T15:00:00Z"),
       dte: 21,
       expiration: "2026-06-10",
+      earnings: farEarnings(),
+    }));
+    expect(result.verdict).toBe("TAKE");
+    expect(result.grade).toBe("A");
+    expect(result.eventLine.includes(MACRO_CAUTION)).toBe(false);
+  });
+
+  it("keeps an A on a 14-day and a 42-day contract with no release in the next 2 trading days", () => {
+    for (const [dte, expiration] of [[14, "2026-06-03"], [42, "2026-07-01"]] as const) {
+      const result = gradeSetup(excellent({ now: new Date("2026-05-20T15:00:00Z"), dte, expiration, earnings: farEarnings() }));
+      expect(result.grade).toBe("A");
+    }
+  });
+
+  it("downgrades one step when a macro release is within the next 2 trading days", () => {
+    const result = gradeSetup(excellent({
+      now: new Date("2026-06-03T15:00:00Z"),
+      dte: 21,
+      expiration: "2026-06-24",
       earnings: farEarnings(),
     }));
     expect(result.verdict).toBe("TAKE");
@@ -344,12 +362,23 @@ describe("alert checklist", () => {
     expect(result.eventLine).toContain(MACRO_CAUTION);
   });
 
+  it("counts trading days across a weekend", () => {
+    // Thursday 2026-06-11 + 2 trading days = Monday 2026-06-15; FOMC 06-17 is outside.
+    const thu = gradeSetup(excellent({ now: new Date("2026-06-11T20:00:00Z"), dte: 21, expiration: "2026-07-02", earnings: farEarnings() }));
+    expect(thu.eventLine).toContain("PPI on 2026-06-11");
+    expect(thu.eventLine.includes("FOMC")).toBe(false);
+    // Monday 2026-06-15 + 2 trading days = Wednesday 2026-06-17 (FOMC).
+    const mon = gradeSetup(excellent({ now: new Date("2026-06-15T15:00:00Z"), dte: 21, expiration: "2026-07-06", earnings: farEarnings() }));
+    expect(mon.grade).toBe("B");
+    expect(mon.eventLine).toContain("FOMC on 2026-06-17");
+  });
+
   it("stacks the earnings downgrade and the macro downgrade", () => {
     const result = gradeSetup(excellent({
-      now: new Date("2026-05-20T15:00:00Z"),
+      now: new Date("2026-06-03T15:00:00Z"),
       dte: 21,
-      expiration: "2026-06-10",
-      earnings: { status: "known", date: "2026-05-28", timing: "after-market", estimated: false },
+      expiration: "2026-06-24",
+      earnings: { status: "known", date: "2026-06-10", timing: "after-market", estimated: false },
     }));
     expect(result.verdict).toBe("TAKE");
     expect(result.grade).toBe("C");

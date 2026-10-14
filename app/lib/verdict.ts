@@ -45,8 +45,8 @@ import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
  * Liquidity failures stay SKIP and D. They are never an A or a B.
  * Two losing closes in a row today turn TAKE into STOP for today.
  * A TAKE with exceptional flow, a close strike, room to the next level,
- * a known earnings date after expiration, and no macro release in the
- * contract is an A. An ordinary TAKE is a B.
+ * a known earnings date after expiration, and no macro release today or in the next 2 trading days
+ * is an A. An ordinary TAKE is a B.
  * A and B require about 2 to 6 weeks to expiration. Shorter or longer stays at C or below.
  * A and B also require an ask of at least the minimum premium, and one long
  * contract at the ask (ask × 100) at or under the grade cost ceiling.
@@ -58,7 +58,7 @@ import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
  * The scanner grades single long options. A debit spread's max loss is its width.
  * Missing price history keeps the grade at B.
  * An unknown earnings date also keeps the grade at B.
- * Earnings on or before expiration, and a macro release in that window, each lower the grade.
+ * Earnings on or before expiration, and a macro release today or in the next 2 trading days, each lower the grade.
  */
 
 export type VerdictName = "TAKE" | "WATCH" | "SKIP" | "STOP";
