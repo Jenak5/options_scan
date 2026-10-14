@@ -1,3 +1,4 @@
+import { tastytradeStreamerSymbol } from "@/app/lib/optionStreamer";
 import type { OptionContract, PutCall } from "@/app/lib/contract";
 import type { ChainParseResult, ParsedQuote, PriceCandle } from "@/app/lib/schwabParse";
 
@@ -157,6 +158,66 @@ export function parseOccSymbol(symbol: string): { root: string; expiration: stri
   };
 }
 
+/** Last trade from a DXLink Trade event: price, contracts, exchange time (ms), day volume. */
+export interface TtLastTrade {
+  price: number | null;
+  size: number | null;
+  time: number | null;
+  dayVolume: number | null;
+}
+
+/** Field order the Trade FEED_SETUP asks for. */
+export const TRADE_FIELDS = ["eventSymbol", "price", "size", "time", "dayVolume"] as const;
+
+function finitePositive(value: unknown): number | null {
+  const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** COMPACT FEED_DATA ["Trade", [sym, price, size, time, dayVolume, sym, ...]] → map by streamer symbol. */
+export function parseCompactTrades(data: unknown, into: Map<string, TtLastTrade> = new Map()): Map<string, TtLastTrade> {
+  if (!Array.isArray(data)) return into;
+  for (let i = 0; i + 1 < data.length; i += 2) {
+    if (data[i] !== "Trade" || !Array.isArray(data[i + 1])) continue;
+    const values = data[i + 1] as unknown[];
+    const width = TRADE_FIELDS.length;
+    for (let j = 0; j + width <= values.length; j += width) {
+      const symbol = typeof values[j] === "string" ? (values[j] as string).trim() : "";
+      if (!symbol) continue;
+      into.set(symbol, {
+        price: finitePositive(values[j + 1]),
+        size: finitePositive(values[j + 2]),
+        time: finitePositive(values[j + 3]),
+        dayVolume: finitePositive(values[j + 4]),
+      });
+    }
+  }
+  return into;
+}
+
+/** DXLink streamer symbol for an OCC chain symbol: "SPY   261030C00670000" → ".SPY261030C670". */
+export function streamerFromOcc(symbol: string): string | null {
+  const occ = parseOccSymbol(symbol);
+  if (!occ) return null;
+  return tastytradeStreamerSymbol({ ticker: occ.root, expiration: occ.expiration, strike: occ.strike, putCall: occ.putCall });
+}
+
+/**
+ * Fill last-trade size and time from a DXLink Trade event. The REST snapshot has
+ * neither. The trade price replaces the snapshot last only when the trade has a time;
+ * day volume never lowers the snapshot volume.
+ */
+export function applyLastTrade(contract: OptionContract, trade: TtLastTrade | undefined): OptionContract {
+  if (!trade || trade.time == null) return contract;
+  return {
+    ...contract,
+    last: trade.price ?? contract.last,
+    lastSize: trade.size,
+    tradeTime: trade.time,
+    volume: trade.dayVolume != null && trade.dayVolume > contract.volume ? trade.dayVolume : contract.volume,
+  };
+}
+
 export function contractFromQuote(item: TtQuoteItem, meta?: { expiration: string; strike: number; putCall: PutCall }): OptionContract | null {
   const occ = meta ?? parseOccSymbol(item.symbol);
   if (!occ) return null;
@@ -184,6 +245,7 @@ export function buildChainResult(
   selected: readonly SelectedSymbol[],
   quotes: readonly TtQuoteItem[],
   underlyingPrice: number | null,
+  trades?: ReadonlyMap<string, TtLastTrade>,
 ): ChainParseResult {
   const byKey = new Map<string, TtQuoteItem>();
   for (let i = 0; i < quotes.length; i++) byKey.set(squash(quotes[i].symbol), quotes[i]);
@@ -193,7 +255,9 @@ export function buildChainResult(
     const item = byKey.get(squash(sel.symbol));
     if (!item) continue;
     const contract = contractFromQuote(item, sel);
-    if (contract) contracts.push(contract);
+    if (!contract) continue;
+    const streamer = trades && trades.size > 0 ? streamerFromOcc(sel.symbol) : null;
+    contracts.push(streamer ? applyLastTrade(contract, trades?.get(streamer)) : contract);
   }
   return { contracts, delayed: false, underlyingPrice };
 }

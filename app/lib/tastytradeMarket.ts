@@ -12,7 +12,11 @@ import {
   historyFromTime,
   parseEquityCandles,
   parseMarketDataItems,
+  parseCompactTrades,
   parseNestedChain,
+  streamerFromOcc,
+  TRADE_FIELDS,
+  type TtLastTrade,
   quoteEntriesFromItems,
   selectChainSymbols,
   toPriceCandles,
@@ -103,8 +107,90 @@ export async function ttOptionChain(
   const spot = underlyingFromItems(underlyingItems, symbol);
   const selected = selectChainSymbols(parseNestedChain(nested), input, spot);
   if (selected.length === 0) return { contracts: [], delayed: false, underlyingPrice: spot };
-  const quotes = await ttQuotes({ options: selected.map((s) => s.symbol) }, fetchImpl);
-  return buildChainResult(selected, quotes, spot);
+  const symbols = selected.map((s) => s.symbol);
+  const [quotes, trades] = await Promise.all([
+    ttQuotes({ options: symbols }, fetchImpl),
+    ttLastTradesSafe(symbols, fetchImpl),
+  ]);
+  return buildChainResult(selected, quotes, spot, trades);
+}
+
+/** Last trades never block a chain. Any DXLink problem leaves size and time empty, as before. */
+async function ttLastTradesSafe(occSymbols: string[], fetchImpl: typeof fetch): Promise<Map<string, TtLastTrade>> {
+  try {
+    return await ttLastTrades(occSymbols, { fetchImpl });
+  } catch (err) {
+    console.warn(`[market-data] last trades unavailable: ${err instanceof Error ? err.message : "unknown"}`);
+    return new Map();
+  }
+}
+
+/**
+ * Last trade per option from DXLink Trade events. DXLink answers a Trade
+ * subscription with the latest trade right away, so this waits until every
+ * symbol answered, the feed goes quiet, or the timeout.
+ */
+export async function ttLastTrades(
+  occSymbols: string[],
+  deps?: { fetchImpl?: typeof fetch; timeoutMs?: number; quietMs?: number },
+): Promise<Map<string, TtLastTrade>> {
+  const streamers = Array.from(new Set(occSymbols.map(streamerFromOcc).filter((s): s is string => s != null)));
+  const out = new Map<string, TtLastTrade>();
+  if (streamers.length === 0) return out;
+  const fetchImpl = deps?.fetchImpl ?? fetch;
+  const timeoutMs = deps?.timeoutMs ?? 6000;
+  const quietMs = deps?.quietMs ?? 800;
+  const access = await accessToken(fetchImpl);
+  const session = await openQuoteSession(fetchImpl, access);
+  const transport = await connectNodeWebSocket(session.url);
+  const deadline = Date.now() + timeoutMs;
+  let streaming = false;
+  let lastDataAt = 0;
+  try {
+    const opening = dxlinkOpening(session.token);
+    for (let i = 0; i < opening.length; i++) transport.send(JSON.stringify(opening[i]));
+    while (Date.now() < deadline && out.size < streamers.length) {
+      if (lastDataAt > 0 && Date.now() - lastDataAt >= quietMs) break;
+      const incoming = await transport.next(Math.max(1, Math.min(lastDataAt > 0 ? quietMs : 3000, deadline - Date.now())));
+      if (incoming === "timeout") continue;
+      if (incoming == null) break;
+      let msg: Record<string, unknown>;
+      try {
+        msg = JSON.parse(incoming) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      if (msg.type === "KEEPALIVE") {
+        transport.send(JSON.stringify({ type: "KEEPALIVE", channel: 0 }));
+      } else if (msg.type === "ERROR") {
+        throw new TastytradeDataError("DXLink error");
+      } else if (msg.type === "AUTH_STATE" && msg.state === "AUTHORIZED" && !streaming) {
+        streaming = true;
+        transport.send(JSON.stringify({ type: "CHANNEL_REQUEST", channel: 1, service: "FEED", parameters: { contract: "AUTO" } }));
+        transport.send(JSON.stringify({
+          type: "FEED_SETUP",
+          channel: 1,
+          acceptAggregationPeriod: 0.1,
+          acceptDataFormat: "COMPACT",
+          acceptEventFields: { Trade: [...TRADE_FIELDS] },
+        }));
+        for (let i = 0; i < streamers.length; i += QUOTE_BATCH) {
+          transport.send(JSON.stringify({
+            type: "FEED_SUBSCRIPTION",
+            channel: 1,
+            add: streamers.slice(i, i + QUOTE_BATCH).map((symbol) => ({ type: "Trade", symbol })),
+          }));
+        }
+      } else if (msg.type === "FEED_DATA") {
+        const before = out.size;
+        parseCompactTrades(msg.data, out);
+        if (out.size > before || lastDataAt === 0) lastDataAt = Date.now();
+      }
+    }
+  } finally {
+    transport.close();
+  }
+  return out;
 }
 
 export async function ttQuoteEntries(
