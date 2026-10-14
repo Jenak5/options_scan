@@ -103,9 +103,32 @@ interface Page {
       ambiguous?: number;
     }>;
   };
+  shadowRule?: ShadowRule;
   factors: Factor[];
   unavailable: Array<{ id: string; label: string; excludedUnknown: number }>;
   trades: Trade[];
+}
+
+interface SideStats {
+  trades: number;
+  wins: number;
+  winRate: number | null;
+  avgPnl: number | null;
+  totalPnl: number;
+}
+
+interface ShadowRule {
+  note: string;
+  sampleNote: string;
+  ruleLabel: string;
+  included: number;
+  skippedNoCandles: number;
+  skippedOpen: number;
+  comparisons: Array<{ id: string; label: string; live: SideStats; shadow: SideStats; tooFew: boolean }>;
+  trades: Array<{
+    id: string;
+    flags: { bigFlow: boolean | null; smallWithMarket: boolean | null; firstOfDay: boolean; breakevenArmed: boolean | null; againstAt60: boolean | null };
+  }>;
 }
 
 export default function LearnPage() {
@@ -192,6 +215,8 @@ export default function LearnPage() {
                 ))}
               </section>
             )}
+
+            {page.shadowRule && <ShadowRuleSection report={page.shadowRule} />}
 
             <section style={{ ...cardStyle, borderColor: "rgba(251,191,36,0.35)" }}>
               <h2 style={{ ...heading, color: "#fbbf24" }}>Rules to consider</h2>
@@ -294,6 +319,73 @@ export default function LearnPage() {
         )}
       </div>
     </main>
+  );
+}
+
+function statCells(side: SideStats): ReactNode {
+  return (
+    <>
+      <td style={tdStyle}>{side.trades}</td>
+      <td style={tdStyle}>{side.winRate == null ? "n/a" : rate(side.winRate)}</td>
+      <td style={{ ...tdStyle, color: pnlColor(side.avgPnl) }}>{side.avgPnl == null ? "n/a" : signed(side.avgPnl)}</td>
+    </>
+  );
+}
+
+function countFlag(report: ShadowRule, key: keyof ShadowRule["trades"][number]["flags"]): string {
+  let yes = 0;
+  let known = 0;
+  for (const row of report.trades) {
+    const value = row.flags[key];
+    if (value == null) continue;
+    known += 1;
+    if (value) yes += 1;
+  }
+  return `${yes} of ${known}`;
+}
+
+function ShadowRuleSection({ report }: { report: ShadowRule }) {
+  return (
+    <section style={cardStyle}>
+      <h2 style={heading}>Shadow rule (what-if, not live)</h2>
+      <Note color="#94a3b8">{report.note}</Note>
+      <p style={prose}>{report.ruleLabel}</p>
+      <p style={prose}>
+        {report.included} closed A/B alert{report.included === 1 ? "" : "s"} with stored 1-minute candles.
+        {report.skippedNoCandles > 0 ? ` ${report.skippedNoCandles} left out because no candles are stored.` : ""}
+        {report.skippedOpen > 0 ? ` ${report.skippedOpen} still open, so not compared yet.` : ""}
+        {" "}{report.sampleNote}
+      </p>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ borderCollapse: "collapse", width: "100%" }}>
+          <thead>
+            <tr>
+              <th style={thStyle}>Rule</th>
+              <th style={thStyle}>Live trades</th>
+              <th style={thStyle}>Live win %</th>
+              <th style={thStyle}>Live $/contract</th>
+              <th style={thStyle}>Shadow trades</th>
+              <th style={thStyle}>Shadow win %</th>
+              <th style={thStyle}>Shadow $/contract</th>
+            </tr>
+          </thead>
+          <tbody>
+            {report.comparisons.map((row) => (
+              <tr key={row.id}>
+                <td style={tdStyle}>{row.label}{row.tooFew ? " (under 30 trades, too few to trust)" : ""}</td>
+                {statCells(row.live)}
+                {statCells(row.shadow)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p style={{ ...prose, marginTop: 10 }}>
+        Flags per alert: $1M+ flow {countFlag(report, "bigFlow")}; under $1M with the market {countFlag(report, "smallWithMarket")};
+        {" "}first alert of the day for its ticker {countFlag(report, "firstOfDay")}; reached +15% {countFlag(report, "breakevenArmed")};
+        {" "}stock 0.3% against after 60 minutes {countFlag(report, "againstAt60")} (estimated from the option price and delta).
+      </p>
+    </section>
   );
 }
 
