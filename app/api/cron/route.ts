@@ -137,7 +137,7 @@ function formatAlert(
 ${formatVerdictHtml(verdict)}
 
 ${conviction.emoji} <b>${conviction.tier}</b>
-Estimated flow from Schwab volume/open interest, not a sweep.
+Estimated flow from option volume/open interest, not a sweep.
 
 💰 <b>${premStr}</b> flow premium (volume × mid × 100)
 💵 ${escapeHtml(formatContractPriceLine(row.ask))}
