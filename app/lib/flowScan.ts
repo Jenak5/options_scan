@@ -21,7 +21,7 @@ import { keyLevelsForTicker } from "@/app/lib/levelScan";
 import { annotateFlowRows, carryPriorSession } from "@/app/lib/marketContext";
 import { chainInterestFromContracts, type ChainInterest } from "@/app/lib/openingCheck";
 import { quotePointFromContract, type FlowQuotePoint } from "@/app/lib/prints";
-import { requireMarketData, getOptionChain } from "@/app/lib/marketData";
+import { requireMarketData, getFlowOptionChain } from "@/app/lib/marketData";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { readFlowSnapshots, writeFlowSnapshots } from "@/app/lib/schwabStore";
 
@@ -92,7 +92,7 @@ export async function scanEstimatedFlow(options?: {
     await Promise.all(batch.map(async (ticker) => {
       await pace(Date.now());
       try {
-        const chain = await getOptionChain(flowChainRequest(ticker, asOf));
+        const chain = await getFlowOptionChain(flowChainRequest(ticker, asOf));
         const levels = await keyLevelsForTicker({
           ticker,
           spot: chain.underlyingPrice,
@@ -132,7 +132,7 @@ export async function scanEstimatedFlow(options?: {
         if (!pass) return;
         await pace(Date.now());
         try {
-          const chain = await getOptionChain(flowChainRequest(ticker, asOf));
+          const chain = await getFlowOptionChain(flowChainRequest(ticker, asOf));
           const sampledAt = Date.now();
           pass.contracts = chain.contracts;
           pass.delayed = pass.delayed || chain.delayed;
