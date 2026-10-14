@@ -13,6 +13,7 @@ import { chicagoClock } from "@/app/lib/marketHours";
 import { SHADOW_MIN_TRUST, isExperimentShadow, shadowExitLabel, type ShadowTrade } from "@/app/lib/shadow";
 import type { CandleBar } from "@/app/lib/candleTypes";
 import { whatIfFromShadows, type WhatIfReport } from "@/app/lib/exitWhatIf";
+import { analyzeShadowRule, type ShadowRuleReport } from "@/app/lib/candidateRule";
 import type { ResearchTrack } from "@/app/lib/researchTrack";
 import { tradeMetrics, type StoredTrade } from "@/app/lib/trades";
 
@@ -104,6 +105,8 @@ export interface LearnReport {
   suggestionNote: string;
   checksNote: string;
   whatIf: WhatIfReport;
+  /** Candidate exit rule and entry filters, tracked as what-if only. */
+  shadowRule: ShadowRuleReport;
   factors: LearnFactor[];
   unavailable: Array<{ id: string; label: string; excludedUnknown: number }>;
   trades: LearnTrade[];
@@ -178,6 +181,7 @@ export function analyzeLearning(input: LearnInput): LearnReport {
         candles: input.candles,
       },
     ),
+    shadowRule: analyzeShadowRule({ shadows: input.shadows, alerts: input.alerts, candles: input.candles }),
     factors: ranked,
     unavailable,
     trades: built.trades,
