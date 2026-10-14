@@ -87,6 +87,19 @@ export interface AlertFeatureSnapshot {
    * Pending until the next trading day's chain is read. The grade does not use this field.
    */
   openingCheck: OpeningStatus | null;
+  /**
+   * Set only when fields were filled in later from Tastytrade history, not saved at send time.
+   * Lists exactly which fields were filled. Missing on snapshots nothing was backfilled into.
+   */
+  backfilled?: FeatureBackfillMark | null;
+}
+
+export interface FeatureBackfillMark {
+  source: "tastytrade-history";
+  /** Epoch milliseconds when the backfill ran. */
+  at: number;
+  /** Field names on this snapshot that were filled by the backfill. */
+  fields: string[];
 }
 
 const SIDES: EstimatedSideLabel[] = ["estimated at ask", "estimated at bid", "estimated mid", "estimated unknown"];
@@ -235,7 +248,7 @@ export function backfillFeatures(alert: StoredAlert): AlertFeatureSnapshot {
 }
 
 export function featuresForAlert(alert: StoredAlert): AlertFeatureSnapshot {
-  if (alert.features?.capturedAtAlert) return alert.features;
+  if (alert.features?.capturedAtAlert || alert.features?.backfilled) return alert.features;
   return backfillFeatures(alert);
 }
 
@@ -289,7 +302,19 @@ export function parseFeatureSnapshot(value: unknown): AlertFeatureSnapshot | nul
     pairedFlow: pairedValue(row.pairedFlow),
     likelySide: likelyValue(row.likelySide) ?? likelySideFromEstimate(side),
     openingCheck: parseOpeningStatus(row.openingCheck),
+    ...backfillMarkOf(row.backfilled),
   };
+}
+
+function backfillMarkOf(value: unknown): { backfilled?: FeatureBackfillMark } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const row = value as { source?: unknown; at?: unknown; fields?: unknown };
+  if (row.source !== "tastytrade-history") return {};
+  if (typeof row.at !== "number" || !Number.isFinite(row.at)) return {};
+  if (!Array.isArray(row.fields)) return {};
+  const fields = row.fields.filter((item): item is string => typeof item === "string" && item.length > 0 && item.length < 40).slice(0, 40);
+  if (fields.length === 0) return {};
+  return { backfilled: { source: "tastytrade-history", at: row.at, fields } };
 }
 
 function likelyValue(value: unknown): LikelySide | null {
