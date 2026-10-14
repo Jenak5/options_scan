@@ -198,15 +198,19 @@ export function detectPairedFlow(row: PairContract, siblings: readonly PairContr
   return "none";
 }
 
+/** SPY and QQQ price and VWAP from the scan, even when neither had a flow row. */
+export type IndexQuotes = Readonly<Record<string, { price: number | null; vwap: number | null }>>;
+
 export function contextForRow(
   row: FlowRow,
   rows: readonly FlowRow[],
   snapshots: Readonly<Record<string, FlowVolumeSnapshot>>,
   now: Date,
+  indexes?: IndexQuotes,
 ): FlowContext {
   const trend = trendFromPrices(row.putCall, row.underlyingPrice, row.levels?.vwap ?? null, row.levels?.sma20 ?? null);
-  const spy = indexQuote(rows, "SPY");
-  const qqq = indexQuote(rows, "QQQ");
+  const spy = indexQuote(rows, "SPY", indexes);
+  const qqq = indexQuote(rows, "QQQ", indexes);
   const spyDirection = indexDirection(spy.price, spy.vwap);
   const qqqDirection = indexDirection(qqq.price, qqq.vwap);
   const snapshot = snapshots[row.ticker] ?? null;
@@ -237,8 +241,9 @@ export function annotateFlowRows(
   rows: FlowRow[],
   snapshots: Readonly<Record<string, FlowVolumeSnapshot>>,
   now: Date,
+  indexes?: IndexQuotes,
 ): FlowRow[] {
-  return rows.map((row) => ({ ...row, context: contextForRow(row, rows, snapshots, now) }));
+  return rows.map((row) => ({ ...row, context: contextForRow(row, rows, snapshots, now, indexes) }));
 }
 
 /** Keep yesterday's snapshot when today's scan replaces it. Same-day updates keep the older prior session. */
@@ -304,12 +309,18 @@ function strikeStep(contracts: readonly PairContract[]): number | null {
   return step > 0 ? step : null;
 }
 
-function indexQuote(rows: readonly FlowRow[], ticker: string): { price: number | null; vwap: number | null } {
+function indexQuote(
+  rows: readonly FlowRow[],
+  ticker: string,
+  indexes?: IndexQuotes,
+): { price: number | null; vwap: number | null } {
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     if (row.ticker !== ticker) continue;
-    return { price: row.underlyingPrice, vwap: row.levels?.vwap ?? null };
+    if (row.levels?.vwap != null) return { price: row.underlyingPrice, vwap: row.levels.vwap };
   }
+  const scanned = indexes?.[ticker];
+  if (scanned && scanned.price != null && scanned.vwap != null) return { price: scanned.price, vwap: scanned.vwap };
   return { price: null, vwap: null };
 }
 

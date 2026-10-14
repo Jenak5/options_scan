@@ -172,7 +172,13 @@ export async function scanEstimatedFlow(options?: {
     await writeFlowSnapshots(updates);
   }
 
-  const withContext = annotateFlowRows(rows, { ...previous, ...updates }, asOf);
+  const indexes: Record<string, { price: number | null; vwap: number | null }> = {};
+  for (let i = 0; i < passes.length; i++) {
+    const pass = passes[i];
+    if (pass.ticker !== "SPY" && pass.ticker !== "QQQ") continue;
+    indexes[pass.ticker] = { price: pass.underlyingPrice ?? null, vwap: pass.levels?.vwap ?? null };
+  }
+  const withContext = annotateFlowRows(rows, { ...previous, ...updates }, asOf, indexes);
   const result: FlowScanResult = {
     rows: withContext,
     scannedAt: now,

@@ -82,3 +82,30 @@ describe("level cache", () => {
     expect(skipped.checked).toBe(false);
   });
 });
+
+describe("intraday window", () => {
+  it("asks Schwab for today's bars by sending startDate and endDate", async () => {
+    const calls: PriceHistoryRequest[] = [];
+    const now = Date.parse("2026-10-14T14:00:00Z");
+    setPriceHistoryFetcherForTests(async (input) => {
+      calls.push(input);
+      if (input.frequencyType === "daily") return [candle(Date.parse("2026-10-13T13:30:00Z"), 90)];
+      return [candle(Date.parse("2026-10-14T13:35:00Z"), 100), candle(Date.parse("2026-10-14T13:40:00Z"), 102)];
+    });
+    const levels = await keyLevelsForTicker({ ticker: "SPY", spot: 101, now });
+    const intra = calls.find((call) => call.frequencyType === "minute");
+    expect(intra?.endDate).toBe(now);
+    expect(intra?.startDate).toBe(now - 24 * 60 * 60 * 1000);
+    expect(levels.vwap).toBeCloseTo(101, 6);
+  });
+
+  it("leaves VWAP empty when only the prior day's bars come back (the old default)", async () => {
+    const now = Date.parse("2026-10-14T14:00:00Z");
+    setPriceHistoryFetcherForTests(async (input) => {
+      if (input.frequencyType === "daily") return [candle(Date.parse("2026-10-13T13:30:00Z"), 90)];
+      return [candle(Date.parse("2026-10-13T19:55:00Z"), 100)];
+    });
+    const levels = await keyLevelsForTicker({ ticker: "SPY", spot: 101, now });
+    expect(levels.vwap).toBeNull();
+  });
+});
