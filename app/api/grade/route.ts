@@ -8,7 +8,8 @@ import { detectPairedFlow, ivVersusRecent, repeatFromSnapshot } from "@/app/lib/
 import { gradeMyTrade, parseGradeRequest, type GradeTradeResult } from "@/app/lib/gradeTrade";
 import { keyLevelsForTicker } from "@/app/lib/levelScan";
 import type { KeyLevels } from "@/app/lib/levels";
-import { getOptionChain, SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
+import { getOptionChain } from "@/app/lib/marketData";
+import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { readFlowSnapshots } from "@/app/lib/schwabStore";
 import { openGradedTrade } from "@/app/lib/tradeStore";
 import type { LetterGrade } from "@/app/lib/alertConfig";
