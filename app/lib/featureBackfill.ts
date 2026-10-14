@@ -88,10 +88,110 @@ export interface AlertBackfill {
   filled: BackfillField[];
 }
 
+const HOUR_MS = 3_600_000;
+const nyDayByHour = new Map<number, string>();
+
+/**
+ * New York date for an epoch time. The date only changes on an hour boundary, so it is looked up
+ * once per UTC hour and cached. Formatting every bar was the production hang.
+ */
+export function nyDay(at: number): string {
+  const hour = Math.floor(at / HOUR_MS);
+  let day = nyDayByHour.get(hour);
+  if (day == null) {
+    day = newYorkDate(new Date(hour * HOUR_MS));
+    if (nyDayByHour.size > 50_000) nyDayByHour.clear();
+    nyDayByHour.set(hour, day);
+  }
+  return day;
+}
+
+const nyHourByHour = new Map<number, number>();
+const nyHourFormatter = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", hourCycle: "h23" });
+
+/** Minutes after New York midnight. New York offsets are whole hours, so the minute of the hour is the UTC one. */
+export function nyMinutes(at: number): number {
+  const hour = Math.floor(at / HOUR_MS);
+  let nyHour = nyHourByHour.get(hour);
+  if (nyHour == null) {
+    nyHour = Number(nyHourFormatter.format(new Date(hour * HOUR_MS))) % 24;
+    if (nyHourByHour.size > 50_000) nyHourByHour.clear();
+    nyHourByHour.set(hour, nyHour);
+  }
+  return nyHour * 60 + Math.floor((at % HOUR_MS) / 60_000);
+}
+
+const RTH_OPEN = 9 * 60 + 30;
+const RTH_CLOSE = 16 * 60;
+
+/**
+ * Session VWAP from closed bars, the same rule as levels.ts: regular-session bars when there are any,
+ * otherwise pre-market. Volume-weighted typical price. Null without volume.
+ */
+export function sessionVwap(bars: readonly CandleBar[]): number | null {
+  const regular: CandleBar[] = [];
+  const premarket: CandleBar[] = [];
+  for (let i = 0; i < bars.length; i++) {
+    const minutes = nyMinutes(bars[i].t);
+    if (minutes < RTH_OPEN) premarket.push(bars[i]);
+    else if (minutes < RTH_CLOSE) regular.push(bars[i]);
+  }
+  const source = regular.length > 0 ? regular : premarket;
+  let weighted = 0;
+  let volume = 0;
+  for (let i = 0; i < source.length; i++) {
+    const bar = source[i];
+    const v = bar.v ?? 0;
+    if (!(v > 0)) continue;
+    weighted += ((bar.h + bar.l + bar.c) / 3) * v;
+    volume += v;
+  }
+  return volume > 0 ? weighted / volume : null;
+}
+
+interface PreparedHistory {
+  byDay: Map<string, CandleBar[]>;
+  daily: PriceCandle[];
+}
+
+const prepared = new WeakMap<UnderlyingHistory, PreparedHistory>();
+
+/** Group intraday bars by New York day and convert daily bars once per history object. */
+export function prepareHistory(history: UnderlyingHistory, now: Date): PreparedHistory {
+  const cached = prepared.get(history);
+  if (cached) return cached;
+  const byDay = new Map<string, CandleBar[]>();
+  for (let i = 0; i < history.intraday.length; i++) {
+    const bar = history.intraday[i];
+    const day = nyDay(bar.t);
+    let list = byDay.get(day);
+    if (!list) {
+      list = [];
+      byDay.set(day, list);
+    }
+    list.push(bar);
+  }
+  byDay.forEach((list) => list.sort((a, b) => a.t - b.t));
+  const next = { byDay, daily: dailyToPriceCandles(history.daily, now) };
+  prepared.set(history, next);
+  return next;
+}
+
 /** Intraday bars of the alert's New York session that had closed by the send time. */
 export function barsBefore(bars: readonly CandleBar[], sentAt: number): CandleBar[] {
-  const day = newYorkDate(new Date(sentAt));
-  return bars.filter((bar) => bar.t + INTRADAY_MS <= sentAt && newYorkDate(new Date(bar.t)) === day);
+  const day = nyDay(sentAt);
+  return bars.filter((bar) => bar.t + INTRADAY_MS <= sentAt && nyDay(bar.t) === day);
+}
+
+function preparedBarsBefore(history: PreparedHistory, sentAt: number): CandleBar[] {
+  const list = history.byDay.get(nyDay(sentAt));
+  if (!list) return [];
+  const out: CandleBar[] = [];
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].t + INTRADAY_MS <= sentAt) out.push(list[i]);
+    else break;
+  }
+  return out;
 }
 
 /**
@@ -120,13 +220,14 @@ function intradayToPriceCandles(bars: readonly CandleBar[]): PriceCandle[] {
 /** Price, VWAP, 20-day average, and levels as of the send time. Null when the session has no closed bar yet. */
 export function levelsAt(history: UnderlyingHistory | undefined, sentAt: number, spot: number | null, now: Date): { price: number | null; levels: KeyLevels | null } {
   if (!history) return { price: null, levels: null };
-  const intraday = barsBefore(history.intraday, sentAt);
+  const ready = prepareHistory(history, now);
+  const intraday = preparedBarsBefore(ready, sentAt);
   const last = intraday.length > 0 ? intraday[intraday.length - 1].c : null;
   const price = spot != null && spot > 0 ? spot : last;
   if (price == null) return { price: null, levels: null };
   const levels = computeKeyLevels({
     spot: price,
-    daily: dailyToPriceCandles(history.daily, now),
+    daily: ready.daily,
     intraday: intradayToPriceCandles(intraday),
     now: new Date(sentAt),
   });
@@ -135,9 +236,12 @@ export function levelsAt(history: UnderlyingHistory | undefined, sentAt: number,
 
 /** SPY or QQQ above or below its own session VWAP at the send time. */
 export function indexAt(history: UnderlyingHistory | undefined, sentAt: number, now: Date): IndexDirection {
-  const read = levelsAt(history, sentAt, null, now);
-  if (!read.levels || read.levels.vwap == null) return "unknown";
-  return indexDirection(read.price, read.levels.vwap);
+  if (!history) return "unknown";
+  const bars = preparedBarsBefore(prepareHistory(history, now), sentAt);
+  if (bars.length === 0) return "unknown";
+  const vwap = sessionVwap(bars);
+  if (vwap == null) return "unknown";
+  return indexDirection(bars[bars.length - 1].c, vwap);
 }
 
 /**
@@ -279,6 +383,34 @@ export function backfillAlerts(alerts: readonly StoredAlert[], inputs: BackfillI
     return { ...alert, features: result.features };
   });
   return { alerts: out, counts };
+}
+
+/** Same as backfillAlerts, with a pause every few alerts so timers and the runtime get a turn. */
+export async function backfillAlertsPaced(
+  alerts: readonly StoredAlert[],
+  inputs: BackfillInputs,
+  every = 25,
+): Promise<{ alerts: StoredAlert[]; counts: BackfillCounts }> {
+  const outAlerts: StoredAlert[] = [];
+  let counts: BackfillCounts | null = null;
+  for (let i = 0; i < alerts.length; i += every) {
+    if (i > 0) await new Promise((resolve) => setTimeout(resolve, 0));
+    const part = backfillAlerts(alerts.slice(i, i + every), inputs);
+    outAlerts.push(...part.alerts);
+    if (!counts) counts = part.counts;
+    else {
+      counts.alerts += part.counts.alerts;
+      counts.alertsChanged += part.counts.alertsChanged;
+      for (const key of BACKFILL_FIELDS) {
+        counts.missingBefore[key] += part.counts.missingBefore[key];
+        counts.filled[key] += part.counts.filled[key];
+      }
+      for (const key of Object.keys(part.counts.notRecoverable)) {
+        counts.notRecoverable[key] = (counts.notRecoverable[key] ?? 0) + part.counts.notRecoverable[key];
+      }
+    }
+  }
+  return { alerts: outAlerts, counts: counts ?? backfillAlerts([], inputs).counts };
 }
 
 /** SPY trend at entry for a shadow or research path, when it was saved as unknown. */

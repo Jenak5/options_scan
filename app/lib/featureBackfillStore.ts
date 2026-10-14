@@ -1,7 +1,7 @@
 import { parseAlertBook, type StoredAlert } from "@/app/lib/alertBook";
 import type { CandleBar } from "@/app/lib/candleTypes";
 import {
-  backfillAlerts,
+  backfillAlertsPaced,
   DAILY_LOOKBACK_DAYS,
   NOT_RECOVERABLE,
   parseEarningsReports,
@@ -11,6 +11,7 @@ import {
   type EarningsHistory,
   type UnderlyingHistory,
 } from "@/app/lib/featureBackfill";
+import type { IndexDirection } from "@/app/lib/marketContext";
 import { parseShadowBook, serializeShadowBook } from "@/app/lib/shadow";
 import { readAlertBookText, readShadowBookText, updateAlertBook, updateShadowBook } from "@/app/lib/schwabStore";
 import {
@@ -47,6 +48,38 @@ export interface FeatureBackfillResult {
   stoppedAt: string | null;
   /** Each step with its duration, in order. Also written to the function log. */
   trace: BackfillStep[];
+  /** Bars Tastytrade returned per ticker. Zero means that ticker could not be filled. */
+  barCounts: Record<string, { intraday: number; daily: number }>;
+  /** True when ?skipResearch=1 left the C/D research paths alone. */
+  skippedResearch: boolean;
+}
+
+/** Entries handled between pauses, so the cap timer and the runtime get a turn. */
+export const ENTRIES_PER_PAUSE = 25;
+
+export function pause(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/**
+ * SPY trend at each entry time, computed in small slices with a pause between them.
+ * Keyed by entry time. Unknown results are left out.
+ */
+export async function spyTrendsByTime(
+  spy: UnderlyingHistory | undefined,
+  times: readonly number[],
+  now: Date,
+): Promise<Map<number, IndexDirection>> {
+  const out = new Map<number, IndexDirection>();
+  if (!spy) return out;
+  for (let i = 0; i < times.length; i++) {
+    if (i > 0 && i % ENTRIES_PER_PAUSE === 0) await pause();
+    const at = times[i];
+    if (out.has(at)) continue;
+    const trend = spyTrendAt(spy, at, now);
+    if (trend !== "unknown") out.set(at, trend);
+  }
+  return out;
 }
 
 export interface BackfillStep {
@@ -106,6 +139,7 @@ export async function runFeatureBackfill(input: {
   now: Date;
   tickers?: readonly string[] | null;
   capMs?: number;
+  skipResearch?: boolean;
 }): Promise<FeatureBackfillResult> {
   const now = input.now;
   const trace: BackfillStep[] = [];
@@ -124,6 +158,8 @@ export async function runFeatureBackfill(input: {
     partial: false,
     stoppedAt: null,
     trace,
+    barCounts: {},
+    skippedResearch: input.skipResearch === true,
   };
   try {
     return await runSteps(input, now, result, step);
@@ -141,7 +177,7 @@ export async function runFeatureBackfill(input: {
 }
 
 async function runSteps(
-  input: { apply: boolean; tickers?: readonly string[] | null },
+  input: { apply: boolean; tickers?: readonly string[] | null; skipResearch?: boolean },
   now: Date,
   result: FeatureBackfillResult,
   step: ReturnType<typeof makeStepper>,
@@ -162,7 +198,7 @@ async function runSteps(
   let first = Infinity;
   for (let i = 0; i < alerts.length; i++) first = Math.min(first, alerts[i].sentAt);
   for (let i = 0; i < shadows.records.length; i++) first = Math.min(first, shadows.records[i].openedAt);
-  const research = shadows.research ?? [];
+  const research = input.skipResearch ? [] : shadows.research ?? [];
   for (let i = 0; i < research.length; i++) first = Math.min(first, research[i].openedAt);
   let last = -Infinity;
   for (let i = 0; i < alerts.length; i++) last = Math.max(last, alerts[i].sentAt);
@@ -184,6 +220,9 @@ async function runSteps(
   }
   const access = opened.access;
   const history = await step("dxlink candles", () => fetchHistory(access, earliest, latest, result.errors));
+  history.forEach((row, ticker) => {
+    result.barCounts[ticker] = { intraday: row.intraday.length, daily: row.daily.length };
+  });
   for (let i = 0; i < result.tickers.length; i++) {
     const ticker = result.tickers[i];
     const row = history.get(ticker);
@@ -195,7 +234,7 @@ async function runSteps(
     if (value == null) result.earningsUnavailable.push(ticker);
   });
 
-  const filled = backfillAlerts(alerts, { history, earnings, now });
+  const filled = await step("compute alerts", () => backfillAlertsPaced(alerts, { history, earnings, now }));
   result.counts = filled.counts;
   const changedById = new Map<string, StoredAlert>();
   for (let i = 0; i < filled.alerts.length; i++) {
@@ -203,7 +242,17 @@ async function runSteps(
   }
 
   const spy = history.get("SPY");
-  const shadowPlan = planShadowFills(shadows, changedById, spy, now);
+  const entryTimes: number[] = [];
+  for (let i = 0; i < shadows.records.length; i++) {
+    const row = shadows.records[i];
+    if (row.quoteTrack === true && (row.spyTrend == null || row.spyTrend === "unknown")) entryTimes.push(row.openedAt);
+  }
+  for (let i = 0; i < research.length; i++) {
+    if (research[i].spyTrend === "unknown") entryTimes.push(research[i].openedAt);
+  }
+  const trends = await step("compute spy trend", () => spyTrendsByTime(spy, entryTimes, now));
+  const skipResearch = input.skipResearch === true;
+  const shadowPlan = planShadowFills(shadows, changedById, trends, skipResearch);
   result.shadowSpyTrendFilled = shadowPlan.shadowSpy;
   result.researchSpyTrendFilled = shadowPlan.researchSpy;
   if (!input.apply) return result;
@@ -217,7 +266,7 @@ async function runSteps(
   }));
   const shadowSaved = await step("write shadow book", () => updateShadowBook((current) => {
     const latest = parseShadowBook(current);
-    return serializeShadowBook(planShadowFills(latest, changedById, spy, now).book);
+    return serializeShadowBook(planShadowFills(latest, changedById, trends, skipResearch).book);
   }));
   result.saved = alertSaved && shadowSaved;
   if (!alertSaved) result.errors.push("The alert book write failed.");
@@ -235,8 +284,8 @@ function mergeFilled(latest: StoredAlert, filled: StoredAlert | undefined): Stor
 function planShadowFills(
   shadows: ReturnType<typeof parseShadowBook>,
   changedById: ReadonlyMap<string, StoredAlert>,
-  spy: UnderlyingHistory | undefined,
-  now: Date,
+  trends: ReadonlyMap<number, IndexDirection>,
+  skipResearch: boolean,
 ): { book: ReturnType<typeof parseShadowBook>; shadowSpy: number; researchSpy: number } {
   let shadowSpy = 0;
   let researchSpy = 0;
@@ -248,8 +297,8 @@ function planShadowFills(
       next = { ...next, features: alert.features };
     }
     if (next.quoteTrack === true && (next.spyTrend == null || next.spyTrend === "unknown")) {
-      const trend = spyTrendAt(spy, next.openedAt, now);
-      if (trend !== "unknown") {
+      const trend = trends.get(next.openedAt);
+      if (trend) {
         next = { ...next, spyTrend: trend, spyTrendSource: "backfill" };
         shadowSpy += 1;
       }
@@ -257,9 +306,9 @@ function planShadowFills(
     return next;
   });
   const research = (shadows.research ?? []).map((track) => {
-    if (track.spyTrend !== "unknown") return track;
-    const trend = spyTrendAt(spy, track.openedAt, now);
-    if (trend === "unknown") return track;
+    if (skipResearch || track.spyTrend !== "unknown") return track;
+    const trend = trends.get(track.openedAt);
+    if (!trend) return track;
     researchSpy += 1;
     return { ...track, spyTrend: trend, spyTrendSource: "backfill" as const };
   });
