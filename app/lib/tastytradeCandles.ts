@@ -28,6 +28,13 @@ export interface CandleSubscription {
   fromTime: number;
   /** Defaults to 1m. Underlying (non-option) symbols must set a period. */
   period?: CandlePeriod;
+  /**
+   * Optional. When every subscription in a batch has a bar at or before coverFrom and a bar at or
+   * after coverUntil, the batch stops at once instead of waiting for the feed to go quiet.
+   * During market hours live bars keep arriving, so without this the fetch runs to its timeout.
+   */
+  coverFrom?: number;
+  coverUntil?: number;
 }
 
 export interface DxlinkState {
@@ -406,6 +413,7 @@ async function runDxlinkBatch(
   let lastDataAt = 0;
   let subscribedAt = 0;
   let sawHeartbeat = false;
+  let covered = false;
   try {
     const opening = dxlinkOpening(session.token);
     for (let i = 0; i < opening.length; i++) transport.send(JSON.stringify(opening[i]));
@@ -431,6 +439,10 @@ async function runDxlinkBatch(
       if (step.candles.length > 0) {
         lastDataAt = Date.now();
         absorb(byTime, step.candles);
+        if (rangeCovered(subs, byTime)) {
+          covered = true;
+          break;
+        }
       } else if (state.phase === "streaming" && isKeepalive(parsed)) {
         sawHeartbeat = true;
       }
@@ -444,13 +456,35 @@ async function runDxlinkBatch(
     if (bars.length > 0) candles.set(symbol, bars);
   });
   const settled = historySettled(lastDataAt, sawHeartbeat, subscribedAt, quietMs, emptyWaitMs);
-  const completed = state.phase === "streaming" && error == null && settled;
+  const completed = state.phase === "streaming" && error == null && (settled || covered);
   if (!completed && !error) {
     error = state.phase === "auth"
       ? "DXLink did not authorize the quote session."
       : "DXLink returned no candles before the timeout.";
   }
   return { candles, completed, error };
+}
+
+/** True when every subscription asked for a range and has bars at both ends of it. */
+export function rangeCovered(
+  subs: readonly CandleSubscription[],
+  byTime: ReadonlyMap<string, ReadonlyMap<number, CandleBar>>,
+): boolean {
+  if (subs.length === 0) return false;
+  for (let i = 0; i < subs.length; i++) {
+    const sub = subs[i];
+    if (sub.coverFrom == null || sub.coverUntil == null) return false;
+    const times = byTime.get(streamerSymbolKey(sub.streamer));
+    if (!times || times.size === 0) return false;
+    let low = Infinity;
+    let high = -Infinity;
+    times.forEach((_bar, t) => {
+      if (t < low) low = t;
+      if (t > high) high = t;
+    });
+    if (low > sub.coverFrom || high < sub.coverUntil) return false;
+  }
+  return true;
 }
 
 /** Data went quiet, or the feed stayed up and simply had no trades. A hard timeout is not settled. */
