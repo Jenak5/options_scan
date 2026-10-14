@@ -124,3 +124,16 @@ describe("feature snapshot", () => {
     expect(older?.aggressor).toBe("sell");
   });
 });
+
+describe("index quotes from the scan", () => {
+  it("uses SPY and QQQ from the scan when neither has a flow row", async () => {
+    const { contextForRow } = await import("@/app/lib/marketContext");
+    const row = { ticker: "AAPL", putCall: "call", underlyingPrice: 100, levels: null, strike: 100, expiration: "2026-10-23", volume: 10, iv: null, side: "estimated at ask" } as unknown as Parameters<typeof contextForRow>[0];
+    const ctx = contextForRow(row, [row], {}, new Date("2026-10-14T15:00:00Z"), {
+      SPY: { price: 101, vwap: 100 },
+      QQQ: { price: 99, vwap: 100 },
+    });
+    expect(ctx.spyDirection).toBe("up");
+    expect(ctx.qqqDirection).toBe("down");
+  });
+});
