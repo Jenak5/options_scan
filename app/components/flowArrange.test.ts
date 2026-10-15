@@ -37,4 +37,16 @@ describe("flow card order", () => {
     expect(arrangeFlowCards(rows, { verdict: "WATCH", right: "call", sort: "volOi" }).map((item) => item.id)).toEqual(["watch"]);
     expect(arrangeFlowCards(rows, { verdict: "all", right: "put", sort: "grade" }).map((item) => item.id)).toEqual(["stop"]);
   });
+
+  it("puts $3M+ rows first inside their verdict group, not above it", () => {
+    const rows = [
+      row({ id: "take-small", ticker: "AAA", notionalPremium: 500_000, verdict: { verdict: "TAKE", grade: "A" } }),
+      row({ id: "take-big", ticker: "ZZZ", notionalPremium: 3_000_000, verdict: { verdict: "TAKE", grade: "B" } }),
+      row({ id: "watch-small", ticker: "BBB", notionalPremium: 100_000, verdict: { verdict: "WATCH", grade: "B" } }),
+      row({ id: "watch-big", ticker: "YYY", notionalPremium: 4_000_000, verdict: { verdict: "WATCH", grade: "C" } }),
+      row({ id: "skip-big", ticker: "XXX", notionalPremium: 9_000_000, verdict: { verdict: "SKIP", grade: "D" } }),
+    ];
+    expect(arrangeFlowCards(rows, { verdict: "all", right: "all", sort: "grade" }).map((r) => r.id))
+      .toEqual(["take-big", "take-small", "watch-big", "watch-small", "skip-big"]);
+  });
 });

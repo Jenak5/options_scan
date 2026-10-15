@@ -127,7 +127,7 @@ interface ShadowRule {
   comparisons: Array<{ id: string; label: string; live: SideStats; shadow: SideStats; tracked?: SideStats; tooFew: boolean }>;
   trades: Array<{
     id: string;
-    flags: { bigFlow: boolean | null; smallWithMarket: boolean | null; firstOfDay: boolean; breakevenArmed: boolean | null; againstAt60: boolean | null };
+    flags: { big3m: boolean | null; firstOfDay: boolean; weakWindow: boolean; inFilter: boolean; dailyStopped: boolean; inShadowSet: boolean };
   }>;
 }
 
@@ -385,9 +385,9 @@ function ShadowRuleSection({ report }: { report: ShadowRule }) {
         </table>
       </div>
       <p style={{ ...prose, marginTop: 10 }}>
-        Flags per alert: $1M+ flow {countFlag(report, "bigFlow")}; under $1M with the market {countFlag(report, "smallWithMarket")};
-        {" "}first alert of the day for its ticker {countFlag(report, "firstOfDay")}; reached +15% {countFlag(report, "breakevenArmed")};
-        {" "}stock 0.3% against after 60 minutes {countFlag(report, "againstAt60")} (estimated from the option price and delta).
+        Flags per alert: $3M+ flow {countFlag(report, "big3m")}; first alert of the day for its ticker {countFlag(report, "firstOfDay")};
+        {" "}11:00–11:59 CT {countFlag(report, "weakWindow")}; passed the entry filter {countFlag(report, "inFilter")};
+        {" "}skipped by the shadow daily stop {countFlag(report, "dailyStopped")}; in the shadow set {countFlag(report, "inShadowSet")}.
       </p>
     </section>
   );

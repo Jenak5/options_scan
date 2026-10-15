@@ -1,3 +1,4 @@
+import { labelsLine, suggestedExitText } from "@/app/lib/scanLabels";
 import { formatContractPriceLine, formatFlowPremium } from "@/app/lib/alertConfig";
 import { planExitsForAsk } from "@/app/lib/exits";
 import { formatLevelsSummary, type StoredPriceLevels } from "@/app/lib/levels";
@@ -121,6 +122,8 @@ export function formatFlowAlert(flow: {
   alertId?: string | null;
   /** When false, the message says the alert was not saved and omits the paper-trade link. */
   saved?: boolean;
+  /** Display labels such as "$3M+ flow" or "repeat". Labels only; they change nothing else. */
+  labels?: readonly string[];
 }): string {
   const emoji = flow.putCall === "call" ? "🟢" : "🔴";
   const type = flow.putCall === "call" ? "CALL" : "PUT";
@@ -149,6 +152,8 @@ export function formatFlowAlert(flow: {
     flow.prints?.summary ? escapeHtml(flow.prints.summary) : "",
     exitBlock(flow.ask, flow.verdict?.maxContracts),
     flags ? `🏷 ${flags}` : "",
+    flow.labels && flow.labels.length > 0 ? `🔖 ${escapeHtml(labelsLine(flow.labels))}` : "",
+    flow.labels ? escapeHtml(suggestedExitText(flow.ask) ?? "") : "",
     flow.saved === false ? "Not saved in the app. No paper-trade link." : (flow.alertId ? paperTradeLinkHtml(flow.alertId) : ""),
     ``,
     `⏰ ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZoneName: "short" })}`,

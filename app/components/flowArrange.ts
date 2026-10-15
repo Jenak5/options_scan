@@ -1,7 +1,9 @@
 /**
  * Display order for the Flow tab. This does not score contracts.
- * TAKE and WATCH lead. STOP stays with TAKE, because it is a TAKE the daily stop replaced.
+ * TAKE and WATCH lead. Inside each group, $3M+ flow rows go first
+ * (display only; alert selection is unchanged). STOP stays with TAKE, because it is a TAKE the daily stop replaced.
  */
+import { isBig3m } from "@/app/lib/scanLabels";
 
 export type VerdictFilter = "all" | "TAKE" | "WATCH";
 export type RightFilter = "all" | "call" | "put";
@@ -35,6 +37,8 @@ export function arrangeFlowCards<T extends FlowCardOrder>(
   kept.sort((a, b) => {
     const rank = verdictRank(a) - verdictRank(b);
     if (rank !== 0) return rank;
+    const big = Number(isBig3m(b.notionalPremium)) - Number(isBig3m(a.notionalPremium));
+    if (big !== 0) return big;
     const sorted = compareSort(a, b, options.sort);
     if (sorted !== 0) return sorted;
     if (a.ticker !== b.ticker) return a.ticker < b.ticker ? -1 : 1;

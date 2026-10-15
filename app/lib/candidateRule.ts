@@ -5,6 +5,7 @@ import { usableCandleBars } from "@/app/lib/exitWhatIf";
 import { addCalendarDays } from "@/app/lib/flow";
 import { chicagoTradingDayCutoffMs } from "@/app/lib/marketHours";
 import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
+import { inWeakWindow, isBig3m } from "@/app/lib/scanLabels";
 import { contractKey, isExperimentShadow, LAST_WEEK_CALENDAR_DAYS, SHADOW_MIN_TRUST, type ShadowTrade } from "@/app/lib/shadow";
 import { chicagoYmd, newYorkMidnightMs } from "@/app/lib/zonedDay";
 
@@ -33,9 +34,9 @@ export interface ExitRule {
   flatDays: number;
 }
 
-/** The candidate: -40% stop, no target, trail 15% off the peak once up 20%. */
+/** The candidate: -30% stop, no target, trail 15% off the peak once up 20%. */
 export const CANDIDATE_RULE: ExitRule = {
-  stopFraction: -0.40,
+  stopFraction: -0.30,
   targetFraction: null,
   trailArm: 0.20,
   trailGiveback: 0.15,
@@ -61,14 +62,18 @@ const EPS = 1e-6;
 const HOUR_MS = 60 * 60 * 1000;
 
 export interface ShadowRuleFlags {
-  bigFlow: boolean | null;
-  /** Under $1M and with the SPY/QQQ direction. The filter would skip these. */
-  smallWithMarket: boolean | null;
+  /** $3M+ flow premium at send time. Null when the premium was not stored. */
+  big3m: boolean | null;
+  /** First alert on this ticker that Chicago trading day. */
   firstOfDay: boolean;
-  /** Best price reached +15% before the live exit window ended. */
-  breakevenArmed: boolean | null;
-  /** Stock 0.3% or more against the trade 60 minutes after entry. Estimated from option price and delta. */
-  againstAt60: boolean | null;
+  /** Sent 11:00–11:59 AM Chicago. */
+  weakWindow: boolean;
+  /** Passes $3M+, first-of-day and not weak window. */
+  inFilter: boolean;
+  /** Passed the filter but skipped because two shadow-set losses had already closed that day. */
+  dailyStopped: boolean;
+  /** In the shadow set: passed the filter and the daily stop. */
+  inShadowSet: boolean;
 }
 
 export interface ShadowRuleTrade {
@@ -84,8 +89,8 @@ export interface ShadowRuleTrade {
   /** Live exits replayed on the same 1-minute candles. Null when still open under live exits. */
   liveReplayPnl: number | null;
   candidatePnl: number | null;
-  breakevenPnl: number | null;
-  cut60Pnl: number | null;
+  /** When the candidate exit closed. Used for the shadow daily stop. */
+  candidateExitAt: number | null;
   flags: ShadowRuleFlags;
 }
 
@@ -123,7 +128,10 @@ export const SHADOW_RULE_NOTE =
   "What-if only. These rows track a candidate rule. They do not change live exits, grades, the Scorecard, or Telegram. Live replays the live exits and shadow replays the alternative, both on the same stored 1-minute candles, so the two columns compare like for like. The tracked scorecard result is shown as a reference (high and low of each traded minute; gaps are not filled). $ is per contract.";
 
 export const SHADOW_RULE_LABEL =
-  "Candidate exit for $1M+ flow: stop at -40% (loss still capped at $875), no fixed target, and once the trade is up 20%, sell if it falls 15% below its best price. Time stop and last-week exit stay as live.";
+  "Shadow set: $3M+ flow only, first alert per ticker per day, skip 11:00–11:59 AM CT, and the daily stop on (no new shadow trades after two shadow losses close that day). Exit: stop at -30% (loss still capped at $875), no fixed target, and once the trade is up 20%, sell if it falls 15% below its best price. Time stop and last-week exit stay as live.";
+
+/** Shadow losses closed earlier the same day that stop new shadow trades. */
+export const SHADOW_DAILY_STOP_LOSSES = 2;
 
 export function shadowSampleText(n: number): string {
   if (n >= SHADOW_MIN_TRUST) return `${n} trades in the smallest compared row.`;
@@ -225,9 +233,9 @@ export function analyzeShadowRule(input: {
     const base = { entryPrice: row.entryPrice, openedAt: row.openedAt, expiration: row.expiration, candles, delta: features?.delta ?? null, underlying };
     const liveReplay = replayRule(base, LIVE_RULE);
     const candidate = replayRule(base, CANDIDATE_RULE);
-    const breakeven = replayRule(base, BREAKEVEN_RULE);
-    const cut60 = replayRule(base, CUT60_RULE);
-    const alignment = features?.marketAlignment ?? null;
+    const big3m = premium == null ? null : isBig3m(premium);
+    const firstOfDay = firstIds.size === 0 ? true : firstIds.has(row.alertId);
+    const weakWindow = inWeakWindow(row.openedAt);
     trades.push({
       id: row.id,
       ticker: row.ticker,
@@ -239,34 +247,24 @@ export function analyzeShadowRule(input: {
       livePnl: row.pnlDollars,
       liveReplayPnl: liveReplay?.pnlDollars ?? null,
       candidatePnl: candidate?.pnlDollars ?? null,
-      breakevenPnl: breakeven?.pnlDollars ?? null,
-      cut60Pnl: cut60?.pnlDollars ?? null,
+      candidateExitAt: candidate?.at ?? null,
       flags: {
-        bigFlow: premium == null ? null : premium >= BIG_FLOW_DOLLARS,
-        smallWithMarket: premium == null || alignment == null || alignment === "unknown"
-          ? null
-          : premium < BIG_FLOW_DOLLARS && alignment === "with",
-        firstOfDay: firstIds.size === 0 ? true : firstIds.has(row.alertId),
-        breakevenArmed: peakReached(candles, row, BREAKEVEN_RULE.breakevenArm as number),
-        againstAt60: againstAt60(candles, row.openedAt, row.entryPrice, base.delta, underlying),
+        big3m,
+        firstOfDay,
+        weakWindow,
+        inFilter: big3m === true && firstOfDay && !weakWindow,
+        dailyStopped: false,
+        inShadowSet: false,
       },
     });
   }
   trades.sort((a, b) => a.openedAt - b.openedAt);
-  const comparisons: ShadowComparison[] = [];
-  const big = trades.filter((t) => t.flags.bigFlow === true);
-  comparisons.push(compare("candidate1m", "$1M+ flow: candidate exit vs live exit", big, big, (t) => t.candidatePnl));
-  comparisons.push(compare("filterBig", "Entry filter: $1M+ flow only (live exits)", trades, big, (t) => t.liveReplayPnl));
-  comparisons.push(compare(
-    "filterSmallWithMarket",
-    "Entry filter: skip under $1M with the SPY/QQQ direction (live exits)",
-    trades,
-    trades.filter((t) => t.flags.smallWithMarket === false),
-    (t) => t.liveReplayPnl,
-  ));
-  comparisons.push(compare("filterFirst", "Entry filter: first alert per ticker per day (live exits)", trades, trades.filter((t) => t.flags.firstOfDay), (t) => t.liveReplayPnl));
-  comparisons.push(compare("exitBreakeven", "Exit: move the stop to breakeven after +15% (all alerts)", trades, trades, (t) => t.breakevenPnl));
-  comparisons.push(compare("exitCut60", "Exit: cut if the stock is 0.3% against after 60 minutes (all alerts)", trades, trades, (t) => t.cut60Pnl));
+  applyShadowDailyStop(trades);
+  const shadowSet = trades.filter((t) => t.flags.inShadowSet);
+  const comparisons: ShadowComparison[] = [
+    compare("shadowVsLive", "All alerts with live exits vs the shadow set with the shadow exit", trades, shadowSet, (t) => t.candidatePnl),
+    compare("shadowSetExits", "Shadow-set alerts only: live exit vs shadow exit", shadowSet, shadowSet, (t) => t.candidatePnl),
+  ];
   const smallest = comparisons.reduce((m, c) => Math.min(m, c.shadow.trades, c.live.trades), Number.POSITIVE_INFINITY);
   return {
     note: SHADOW_RULE_NOTE,
@@ -342,6 +340,37 @@ export function stats(values: readonly number[]): SideStats {
   };
 }
 
+/**
+ * Walk filtered trades in time order per Chicago day. Once two shadow losses
+ * have closed before a trade opens, that trade is daily-stopped.
+ */
+export function applyShadowDailyStop(trades: ShadowRuleTrade[]): void {
+  const byDay = new Map<string, ShadowRuleTrade[]>();
+  for (const trade of trades) {
+    if (!trade.flags.inFilter) continue;
+    const day = chicagoYmd(trade.openedAt);
+    const list = byDay.get(day) ?? [];
+    list.push(trade);
+    byDay.set(day, list);
+  }
+  byDay.forEach((list) => {
+    list.sort((a, b) => a.openedAt - b.openedAt);
+    const taken: ShadowRuleTrade[] = [];
+    for (const trade of list) {
+      let losses = 0;
+      for (const prior of taken) {
+        if (prior.candidatePnl != null && prior.candidatePnl <= -TRADE_RULES.flatAbsDollars && prior.candidateExitAt != null && prior.candidateExitAt <= trade.openedAt) losses += 1;
+      }
+      if (losses >= SHADOW_DAILY_STOP_LOSSES) {
+        trade.flags.dailyStopped = true;
+        continue;
+      }
+      trade.flags.inShadowSet = true;
+      taken.push(trade);
+    }
+  });
+}
+
 /** Earliest A/B alert per ticker per Chicago trading day. */
 export function firstAlertIds(alerts: readonly StoredAlert[]): Set<string> {
   const best = new Map<string, StoredAlert>();
@@ -355,32 +384,7 @@ export function firstAlertIds(alerts: readonly StoredAlert[]): Set<string> {
   return ids;
 }
 
-function peakReached(candles: readonly CandleBar[], row: ShadowTrade, arm: number): boolean {
-  const end = row.closedAt ?? Number.POSITIVE_INFINITY;
-  for (const bar of usableCandleBars(candles, row.openedAt)) {
-    if (bar.t > end) break;
-    if (bar.h + EPS >= row.entryPrice * (1 + arm)) return true;
-  }
-  return false;
-}
 
-function againstAt60(
-  candles: readonly CandleBar[],
-  openedAt: number,
-  entry: number,
-  delta: number | null,
-  underlying: number | null,
-): boolean | null {
-  const bars = usableCandleBars(candles, openedAt);
-  let last: CandleBar | null = null;
-  for (const bar of bars) {
-    if (bar.t > openedAt + HOUR_MS) break;
-    last = bar;
-  }
-  if (!last) return null;
-  const against = stockAgainstFraction(last.c, entry, delta, underlying);
-  return against == null ? null : against + EPS >= CUT60_RULE.cutAgainstAt60!;
-}
 
 function lastWeekCutoff(expiration: string): number {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(expiration)) return Number.POSITIVE_INFINITY;

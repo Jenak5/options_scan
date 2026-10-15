@@ -1,3 +1,4 @@
+import { flowRowLabels } from "@/app/lib/scanLabels";
 import { alertScanMinPremium, alertsPerDayLimit } from "@/app/lib/alertConfig";
 import { loadAlertBook, recordOpeningChecks, rememberSentAlert } from "@/app/lib/alertStore";
 import {
@@ -65,7 +66,10 @@ export async function recordDisplayedAlerts(
   const tradingDay = chicagoDate(now);
   const candidates = selectAlertRows(rows.slice(), { minPremium, otmOnly, limit: 80 });
   const graded = gradeAlertCandidates(candidates, consecutiveLosses, now);
-  const sent = indexSentAlerts((await loadAlertBook()).records, tradingDay);
+  const bookRecords = (await loadAlertBook()).records;
+  const sent = indexSentAlerts(bookRecords, tradingDay);
+  const sentTickers = new Set<string>();
+  for (const record of bookRecords) if (record.tradingDay === tradingDay) sentTickers.add(record.ticker);
   const room = Math.max(0, maxPerDay - sent.count);
   const queued = chooseAlerts({
     candidates: graded,
@@ -81,11 +85,15 @@ export async function recordDisplayedAlerts(
     if (!created) continue;
     saved += 1;
     const alertId = `${now.getTime()}-${item.row.id}`;
+    const labels: string[] = flowRowLabels(item.row, now.getTime());
+    if (sentTickers.has(item.row.ticker)) labels.splice(1, 0, "repeat");
+    sentTickers.add(item.row.ticker);
     await sendTelegramAlert(formatFlowAlert({
       ...item.row,
       verdict: item.verdict,
       alertId,
       saved: true,
+      labels,
     }));
   }
 

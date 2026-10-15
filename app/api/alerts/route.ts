@@ -1,3 +1,4 @@
+import { flowRowLabels, tickerSentToday } from "@/app/lib/scanLabels";
 import { NextRequest, NextResponse } from "next/server";
 import { alertScanMinPremium, alertsPerDayLimit } from "@/app/lib/alertConfig";
 import {
@@ -75,12 +76,15 @@ export async function GET(request: NextRequest) {
 
         for (const item of picks) {
           if (alertsSent >= room) break;
-          const latest = indexSentAlerts((await loadAlertBook()).records, tradingDay);
+          const latestBook = (await loadAlertBook()).records;
+          const latest = indexSentAlerts(latestBook, tradingDay);
           if (latest.count >= maxPerDay) break;
           if (latest.contracts.has(item.row.id) || latest.setups.has(alertSetupKey(item.row))) continue;
           const alertId = `${now.getTime()}-${item.row.id}`;
           const saved = await rememberSentAlert(item.row, item.verdict, now);
-          const message = formatFlowAlert({ ...item.row, verdict: item.verdict, alertId, saved });
+          const labels: string[] = flowRowLabels(item.row, now.getTime());
+          if (tickerSentToday(latestBook, item.row.ticker, tradingDay)) labels.splice(1, 0, "repeat");
+          const message = formatFlowAlert({ ...item.row, verdict: item.verdict, alertId, saved, labels });
           const delivered = await sendTelegramAlert(message);
           if (delivered) alertsSent++;
           if (!saved) {
