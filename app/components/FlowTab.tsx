@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { PaperTradeButton } from "@/app/components/PaperTradeButton";
 import { formatContractCost, formatFlowPremium } from "@/app/lib/alertConfig";
+import { flowRowLabels, suggestedExitText } from "@/app/lib/scanLabels";
 import { arrangeFlowCards, type FlowSort, type RightFilter, type VerdictFilter } from "@/app/components/flowArrange";
 import { defaultTimeStop, planExitsForAsk } from "@/app/lib/exits";
 import { FLOW_DISCLAIMER, gateCheckHref, type FlowRow } from "@/app/lib/flow";
@@ -221,6 +222,24 @@ export function FlowTab() {
   );
 }
 
+function LabelChips({ labels }: { labels: readonly string[] }) {
+  if (labels.length === 0) return null;
+  return (
+    <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
+      {labels.map((label) => (
+        <span key={label} style={{
+          fontSize: 12,
+          fontWeight: 700,
+          padding: "2px 8px",
+          borderRadius: 999,
+          background: label === "$3M+ flow" ? "rgba(52,211,153,0.15)" : label === "weak window" ? "rgba(251,191,36,0.15)" : "rgba(148,163,184,0.15)",
+          color: label === "$3M+ flow" ? "#34d399" : label === "weak window" ? "#fbbf24" : "#cbd5e1",
+        }}>{label}</span>
+      ))}
+    </div>
+  );
+}
+
 function FlowCard({ row }: { row: ScoredFlow }) {
   const verdict = row.verdict;
   const name = verdict?.verdict ?? "SKIP";
@@ -246,6 +265,7 @@ function FlowCard({ row }: { row: ScoredFlow }) {
           {row.alertId && (
             <div style={{ marginTop: 6, color: "#06b6d4", fontSize: 13, fontWeight: 700 }}>Alerted today</div>
           )}
+          <LabelChips labels={flowRowLabels(row, Date.now())} />
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <VerdictBadge name={name} label={verdict?.verdictLabel ?? "—"} />
@@ -253,6 +273,9 @@ function FlowCard({ row }: { row: ScoredFlow }) {
         </div>
       </div>
       <p style={{ margin: "12px 0 16px", fontSize: 16, lineHeight: 1.45, color: "#e2e8f0" }}>{reason}</p>
+      {suggestedExitText(row.ask) && (
+        <p style={{ margin: "-8px 0 14px", fontSize: 13, lineHeight: 1.4, color: "#94a3b8" }}>{suggestedExitText(row.ask)}</p>
+      )}
 
       <div className="flow-sections">
         <Box title="Quote">
