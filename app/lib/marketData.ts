@@ -103,6 +103,39 @@ export async function withFallback<T>(
 type ChainInput = Parameters<typeof schwab.getOptionChain>[0];
 type HistoryInput = Parameters<typeof schwab.getPriceHistory>[0];
 
+/**
+ * Option chain for the Flow scan only. Schwab first, Tastytrade as the backup.
+ * Tastytrade's REST snapshot has no last-trade size or time, and the Flow tab
+ * needs both for prints, block and sweep-like flags, and follow-up reads.
+ * DATA_SOURCE=schwab still means Schwab only. Other callers keep getOptionChain.
+ */
+export async function getFlowOptionChain(
+  input: ChainInput,
+  env: Record<string, string | undefined> = process.env,
+): Promise<ChainParseResult> {
+  const usable = (r: ChainParseResult) => r.contracts.length > 0 && r.underlyingPrice != null;
+  if (preferredDataSource(env) === "schwab") {
+    const value = await schwab.getOptionChain(input);
+    note("chain", `${input.symbol} flow`, "schwab", null);
+    return value;
+  }
+  let reason: string;
+  try {
+    const value = await schwab.getOptionChain(input);
+    if (usable(value)) {
+      note("chain", `${input.symbol} flow`, "schwab", null);
+      return value;
+    }
+    reason = "empty Schwab answer";
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    reason = safeReason(err);
+  }
+  const value = await ttOptionChain(input);
+  note("chain", `${input.symbol} flow`, "tastytrade", reason);
+  return value;
+}
+
 export async function getOptionChain(input: ChainInput): Promise<ChainParseResult> {
   return withFallback(
     "chain",
