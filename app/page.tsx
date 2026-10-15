@@ -19,6 +19,7 @@ import {
 } from "@/app/lib/quoteSide";
 import { formatLevelsSummary } from "@/app/lib/levels";
 import { planExitsForAsk } from "@/app/lib/exits";
+import { alertLabels, check60, labelsLine, suggestedExitText } from "@/app/lib/scanLabels";
 import type { AlertVerdict } from "@/app/lib/verdict";
 
 // ─── API helpers ───────────────────────────────────────────────────────────
@@ -646,6 +647,7 @@ function AlertReportTab() {
                         <div style={{ color: "#fbbf24", fontSize: 12, marginTop: 4 }}>{alert.eventLine}</div>
                       )}
                       <ExitLines ask={alert.ask} maxContracts={alert.maxContracts} />
+                      <AlertLabelLines alert={alert} all={report.alerts} />
                     </td>
                     {(["m15", "h1", "close"] as const).map((name) => (
                       <td key={name} style={{ ...TD_MONO, color: "#e2e8f0" }} title={checkpointTitle(alert.checkpoints[name])}>
@@ -662,6 +664,29 @@ function AlertReportTab() {
       )}
     </div>
   );
+}
+
+function AlertLabelLines({ alert, all }: { alert: StoredAlert; all: readonly StoredAlert[] }) {
+  const labels = alertLabels(alert, all);
+  const check = check60(alert);
+  const exit = suggestedExitText(alert.ask);
+  return (
+    <>
+      {labels.length > 0 && (
+        <div style={{ color: "#34d399", fontSize: 12, marginTop: 4, fontWeight: 700 }}>{labelsLine(labels)}</div>
+      )}
+      <div style={{ color: "#64748b", fontSize: 12, marginTop: 4 }}>{check60Line(check)}</div>
+      {exit && <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 4 }}>{exit}</div>}
+    </>
+  );
+}
+
+function check60Line(check: ReturnType<typeof check60>): string {
+  if (check.status === "pending") return "60-minute check: waiting for the 1-hour stock price.";
+  if (check.status === "unknown") return "60-minute check: unknown (stock price at entry or about +60 min not saved).";
+  const pct = ((check.againstFraction ?? 0) * 100).toFixed(2);
+  const word = check.status === "cut" ? "cut" : "ok";
+  return `60-minute check: ${word}. Stock ${check.entry?.toFixed(2)} → ${check.at60?.toFixed(2)} after ${check.minutes} min, ${pct}% against the trade (cut at 0.30%). Label only.`;
 }
 
 function ReportTable({ title, headers, rows }: { title: string; headers: string[]; rows: string[][] }) {
