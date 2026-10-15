@@ -81,15 +81,16 @@ describe("scan labels", () => {
     expect(suggestedExitText(0)).toBeNull();
   });
 
-  it("sorts $3M+ rows to the top of the Flow display only", () => {
+  it("sorts $3M+ rows to the top of their verdict group in the Flow display only", () => {
     const rows = [
       { id: "a", ticker: "A", strike: 1, putCall: "call" as const, notionalPremium: 500_000, volOiRatio: 1, verdict: { verdict: "TAKE" as const, grade: "A" } },
       { id: "b", ticker: "B", strike: 1, putCall: "call" as const, notionalPremium: 4_000_000, volOiRatio: 1, verdict: { verdict: "WATCH" as const, grade: "C" } },
+      { id: "c", ticker: "C", strike: 1, putCall: "call" as const, notionalPremium: 3_500_000, volOiRatio: 1, verdict: { verdict: "TAKE" as const, grade: "B" } },
     ];
     const copy = rows.slice();
-    expect(arrangeFlowCards(rows, { verdict: "all", right: "all", sort: "grade" }).map((r) => r.id)).toEqual(["b", "a"]);
+    expect(arrangeFlowCards(rows, { verdict: "all", right: "all", sort: "grade" }).map((r) => r.id)).toEqual(["c", "a", "b"]);
     expect(rows).toEqual(copy);
-    expect(big3mFirst(rows).map((r) => r.id)).toEqual(["b", "a"]);
+    expect(big3mFirst(rows).map((r) => r.id)).toEqual(["b", "c", "a"]);
   });
 });
 
