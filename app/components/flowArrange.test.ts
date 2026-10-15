@@ -15,7 +15,7 @@ function row(over: Partial<FlowCardOrder> & Pick<FlowCardOrder, "id">): FlowCard
 
 describe("flow card order", () => {
   const rows = [
-    row({ id: "skip", ticker: "ZZZ", notionalPremium: 9_000_000, volOiRatio: 20, verdict: { verdict: "SKIP", grade: "D" } }),
+    row({ id: "skip", ticker: "ZZZ", notionalPremium: 900_000, volOiRatio: 20, verdict: { verdict: "SKIP", grade: "D" } }),
     row({ id: "watch", ticker: "AAA", notionalPremium: 50_000, volOiRatio: 0.4, verdict: { verdict: "WATCH", grade: "B" } }),
     row({ id: "take", ticker: "MMM", notionalPremium: 20_000, volOiRatio: 2, verdict: { verdict: "TAKE", grade: "A" } }),
     row({ id: "stop", ticker: "SPY", putCall: "put", notionalPremium: 80_000, volOiRatio: 3, verdict: { verdict: "STOP", grade: "B" } }),
