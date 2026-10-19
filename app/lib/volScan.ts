@@ -4,8 +4,7 @@ import {
   compareVolReadings,
   type VolArbReading,
 } from "@/app/lib/volArb";
-import { requireMarketData, getOptionChain, getPriceHistory } from "@/app/lib/marketData";
-import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
+import { BothSourcesFailedError, getOptionChain, getPriceHistory, requireMarketData, rethrowIfSchwabOnly } from "@/app/lib/marketData";
 
 /**
  * Reads Schwab chains and Schwab daily prices for the vol view.
@@ -91,7 +90,7 @@ export async function scanVolArb(options: {
       try {
         rows.push(await readSymbol(symbol, asOf));
       } catch (err) {
-        if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+        rethrowIfSchwabOnly(err);
         errors.push({ symbol, message: safeMessage(err) });
       }
     }));
@@ -132,7 +131,7 @@ async function readSymbol(symbol: string, now: Date): Promise<VolArbReading> {
     });
     closes = bars.map((bar) => bar.close);
   } catch (err) {
-    if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+    rethrowIfSchwabOnly(err);
     priceHistoryFailed = true;
   }
 
@@ -161,6 +160,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function safeMessage(err: unknown): string {
+  if (err instanceof BothSourcesFailedError) return err.message.slice(0, 180);
   if (err instanceof Error && err.message.startsWith("Schwab ")) return err.message.slice(0, 180);
   return "Schwab market data request failed";
 }

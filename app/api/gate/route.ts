@@ -6,7 +6,8 @@ import { denyIfUnauthorized } from "@/app/lib/auth";
 import { evaluateGate, findContract } from "@/app/lib/gate";
 import { earningsForTicker } from "@/app/lib/earnings";
 import { keyLevelsForTicker } from "@/app/lib/levelScan";
-import { getOptionChain } from "@/app/lib/marketData";
+import { preferredDataSource } from "@/app/lib/dataSourcePref";
+import { getOptionChain, isSchwabBackupMiss } from "@/app/lib/marketData";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { gradeContract } from "@/app/lib/verdict";
 
@@ -88,6 +89,38 @@ export async function POST(request: NextRequest) {
       exitDefaults: exitDefaultsSummary(),
     });
   } catch (err) {
+    if (preferredDataSource() === "tastytrade" && isSchwabBackupMiss(err)) {
+      const now = new Date();
+      const risk = await loadRiskStatus(now).catch(() => null);
+      const losses = risk?.stop.consecutiveLosses ?? 0;
+      const result = evaluateGate({
+        contract: null,
+        contracts: parsed.value.contracts,
+        plannedEntry: parsed.value.plannedEntry,
+        debitSpreadWidth: parsed.value.debitSpreadWidth,
+        underlyingStop: parsed.value.underlyingStop,
+        timeStop: parsed.value.timeStop,
+        profitRule: parsed.value.profitRule,
+        consecutiveLosses: losses,
+        delayed: false,
+      });
+      return NextResponse.json({
+        overall: result.overall,
+        checks: result.checks,
+        singleContractExceedsCap: result.singleContractExceedsCap,
+        suggestion: result.suggestion,
+        maxLoss: result.maxLoss,
+        delayed: false,
+        contract: null,
+        verdict: null,
+        dailyStop: risk?.stop.dailyStop ?? false,
+        consecutiveLosses: losses,
+        weeklyNote: risk?.weeklyNote ?? null,
+        exits: exitPlan(parsed.value, null),
+        exitDefaults: exitDefaultsSummary(),
+        skipped: [parsed.value.ticker],
+      });
+    }
     if (err instanceof SchwabNotConnectedError) {
       return NextResponse.json({ error: err.message, reconnect: "/api/schwab/connect" }, { status: 409 });
     }

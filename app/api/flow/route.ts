@@ -13,6 +13,8 @@ import {
 } from "@/app/lib/flow";
 import { pinTodayAlerts } from "@/app/lib/flowAlerts";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
+import { preferredDataSource } from "@/app/lib/dataSourcePref";
+import { BothSourcesFailedError, isSchwabBackupMiss } from "@/app/lib/marketData";
 import { chicagoDate, isChicagoMarketHours, isMarketDay, isNyseHoliday } from "@/app/lib/marketHours";
 import { noteBrowserScan, recordFlowPageSession } from "@/app/lib/pageScan";
 import { formatScanRunLine } from "@/app/lib/scanHealth";
@@ -125,9 +127,24 @@ async function handleFlow(request: NextRequest) {
       scanComplete,
       nextOffset,
       errors: scan.errors,
+      skipped: scan.errors.map((item) => item.ticker),
       liquidity: { ...FLOW_LIQUIDITY_RULES, liquidOnly },
     });
   } catch (err) {
+    if (preferredDataSource() === "tastytrade" && isSchwabBackupMiss(err)) {
+      const skipped = err instanceof BothSourcesFailedError ? [err.label] : [];
+      return NextResponse.json({
+        data: [],
+        disclaimer: FLOW_DISCLAIMER,
+        verdictBanner: verdictBanner(),
+        connected: true,
+        errors: skipped.map((ticker) => ({
+          ticker,
+          message: err instanceof Error ? err.message.slice(0, 180) : "skipped",
+        })),
+        skipped,
+      });
+    }
     if (err instanceof SchwabNotConnectedError) {
       return NextResponse.json({
         error: err.message,

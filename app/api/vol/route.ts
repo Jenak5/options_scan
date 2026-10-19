@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import { isFlowTicker } from "@/app/lib/flow";
+import { preferredDataSource } from "@/app/lib/dataSourcePref";
+import { BothSourcesFailedError, isSchwabBackupMiss } from "@/app/lib/marketData";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { VOL_DEFINITIONS, VOL_DISCLAIMER } from "@/app/lib/volArb";
 import { scanVolArb, type VolScanError } from "@/app/lib/volScan";
@@ -48,10 +50,28 @@ export async function GET(request: NextRequest) {
       definitions: VOL_DEFINITIONS,
       rows: scan.rows,
       errors: [...parsed.rejected, ...scan.errors],
+      skipped: scan.errors.map((item) => item.symbol),
       scannedAt: scan.scannedAt,
       cached: scan.cached,
     });
   } catch (err) {
+    if (preferredDataSource() === "tastytrade" && isSchwabBackupMiss(err)) {
+      const skipped = err instanceof BothSourcesFailedError ? [err.label] : parsed.symbols;
+      return NextResponse.json({
+        connected: true,
+        source: "Schwab market data",
+        disclaimer: VOL_DISCLAIMER,
+        definitions: VOL_DEFINITIONS,
+        rows: [],
+        errors: skipped.map((symbol) => ({
+          symbol,
+          message: err instanceof Error ? err.message.slice(0, 180) : "skipped",
+        })),
+        skipped,
+        scannedAt: Date.now(),
+        cached: false,
+      });
+    }
     if (err instanceof SchwabNotConnectedError) {
       return NextResponse.json({
         error: err.message,

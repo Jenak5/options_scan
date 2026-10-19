@@ -6,8 +6,7 @@ import {
   type KeyLevels,
   type WallContract,
 } from "@/app/lib/levels";
-import { getPriceHistory } from "@/app/lib/marketData";
-import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
+import { getPriceHistory, rethrowIfSchwabOnly } from "@/app/lib/marketData";
 import type { PriceCandle } from "@/app/lib/schwabParse";
 
 /**
@@ -113,7 +112,7 @@ export async function keyLevelsForTicker(input: {
       contracts: input.contracts,
     });
   } catch (err) {
-    if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+    rethrowIfSchwabOnly(err);
     return emptyLevels(spot);
   }
 }

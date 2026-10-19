@@ -93,7 +93,12 @@ export function FlowTab() {
         if (Array.isArray(json.data)) collected.push(...json.data);
         if (Array.isArray(json.errors)) {
           for (const item of json.errors) {
-            if (item && typeof item.ticker === "string" && item.ticker) missed.push(item.ticker);
+            if (item && typeof item.ticker === "string" && item.ticker && !missed.includes(item.ticker)) missed.push(item.ticker);
+          }
+        }
+        if (Array.isArray(json.skipped)) {
+          for (const ticker of json.skipped) {
+            if (typeof ticker === "string" && ticker && !missed.includes(ticker)) missed.push(ticker);
           }
         }
         if (filters.ticker || json.scanComplete !== false) break;
@@ -207,7 +212,7 @@ export function FlowTab() {
       {loading && <Spinner />}
       {!disconnected && error && <ErrorBox message={error} onRetry={() => load(true)} />}
       {!loading && partial.length > 0 && (
-        <p style={{ color: "#fbbf24", fontSize: 14, margin: "0 0 12px" }}>Some tickers did not load: {partial.join(", ")}</p>
+        <p style={{ color: "#94a3b8", fontSize: 14, margin: "0 0 12px" }}>Skipped: {partial.join(", ")}</p>
       )}
 
       {!loading && !error && !disconnected && visible.length === 0 && (

@@ -8,7 +8,8 @@ import { detectPairedFlow, ivVersusRecent, repeatFromSnapshot } from "@/app/lib/
 import { gradeMyTrade, parseGradeRequest, type GradeTradeResult } from "@/app/lib/gradeTrade";
 import { keyLevelsForTicker } from "@/app/lib/levelScan";
 import type { KeyLevels } from "@/app/lib/levels";
-import { getOptionChain } from "@/app/lib/marketData";
+import { preferredDataSource } from "@/app/lib/dataSourcePref";
+import { BothSourcesFailedError, getOptionChain, isFatalSchwabError, isSchwabBackupMiss } from "@/app/lib/marketData";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { readFlowSnapshots } from "@/app/lib/schwabStore";
 import { openGradedTrade } from "@/app/lib/tradeStore";
@@ -87,8 +88,9 @@ export async function POST(request: NextRequest) {
       plannedEntry: parsed.value.plannedEntry,
       thesis: parsed.value.thesis,
     });
-    const reconnect = err instanceof SchwabNotConnectedError ? "/api/schwab/connect" : null;
-    return respond(graded, save, parsed.value, now, reconnect);
+    const reconnect = isFatalSchwabError(err) && err instanceof SchwabNotConnectedError ? "/api/schwab/connect" : null;
+    const skipped = preferredDataSource() === "tastytrade" && isSchwabBackupMiss(err) ? [parsed.value.ticker] : [];
+    return respond(graded, save, parsed.value, now, reconnect, skipped);
   }
 }
 
@@ -98,9 +100,10 @@ async function respond(
   request: { ticker: string; expiration: string; strike: number; putCall: "call" | "put" },
   now: Date,
   reconnect: string | null = null,
+  skipped: string[] = [],
 ) {
   if (!save) {
-    return NextResponse.json({ ...graded, saved: false, alreadyOpen: false, reconnect });
+    return NextResponse.json({ ...graded, saved: false, alreadyOpen: false, reconnect, skipped });
   }
   if (!graded.canSave || graded.entryPrice == null || graded.entryPriceSource == null) {
     return NextResponse.json({
@@ -108,6 +111,7 @@ async function respond(
       saved: false,
       alreadyOpen: false,
       reconnect,
+      skipped,
       error: graded.saveBlock ?? "This grade was not saved.",
     }, { status: 400 });
   }
@@ -133,13 +137,14 @@ async function respond(
     quotedAt: graded.quotedAt,
   }, now);
   if (!result.ok) {
-    return NextResponse.json({ ...graded, saved: false, alreadyOpen: false, reconnect, error: result.error }, { status: 400 });
+    return NextResponse.json({ ...graded, saved: false, alreadyOpen: false, reconnect, skipped, error: result.error }, { status: 400 });
   }
   return NextResponse.json({
     ...graded,
     saved: !result.alreadyOpen,
     alreadyOpen: result.alreadyOpen,
     reconnect,
+    skipped,
     error: result.alreadyOpen ? "This contract already has an open paper trade." : null,
   });
 }
@@ -232,6 +237,10 @@ async function loadChain(input: { ticker: string; expiration: string; strike: nu
 }
 
 function providerMessage(err: unknown): string {
+  if (err instanceof BothSourcesFailedError) return err.message.slice(0, 180);
+  if (preferredDataSource() === "tastytrade" && (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError)) {
+    return "Schwab backup not connected; this quote was not graded.";
+  }
   if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) return err.message;
   if (err instanceof Error && err.message.startsWith("Schwab ")) return err.message.slice(0, 180);
   return "Schwab market data request failed, so this quote was not graded.";

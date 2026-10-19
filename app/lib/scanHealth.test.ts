@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   connectionNotice,
   emptyScanHealth,
+  SCHWAB_BACKUP_NOTE,
   formatChicagoStamp,
   formatScanRunLine,
   refreshCountdown,
@@ -142,6 +143,23 @@ describe("connection notice", () => {
     expect(notice.severity).toBe("warn");
     expect(notice.lines.join(" ")).toMatch(/HTTP 400/);
     expect(notice.lines.join(" ")).toMatch(/Schwab quotes are separate/);
+  });
+
+  it("uses a quiet backup note when Tastytrade is the source and Schwab is expired", () => {
+    const notice = connectionNotice({
+      configured: true,
+      connected: false,
+      refreshExpired: true,
+      warnRefreshSoon: true,
+      refreshDaysLeft: 0,
+      now: SESSION,
+      schwabIsBackup: true,
+      health: health({ lastSuccessAt: SESSION - 60_000 }),
+    });
+    expect(notice.severity).toBe("ok");
+    expect(notice.lines).toEqual([SCHWAB_BACKUP_NOTE]);
+    expect(notice.lines.join(" ")).not.toMatch(/Scans cannot run/);
+    expect(notice.lines.join(" ")).not.toMatch(/disconnected/i);
   });
 
   it("hides a stored Tastytrade failure while Tastytrade is turned off", () => {

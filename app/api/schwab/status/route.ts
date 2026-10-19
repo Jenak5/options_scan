@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { denyIfUnauthorized } from "@/app/lib/auth";
+import { preferredDataSource } from "@/app/lib/dataSourcePref";
 import { connectionNotice, emptyScanHealth } from "@/app/lib/scanHealth";
 import { getSchwabStatus, noteRefreshWindow } from "@/app/lib/schwab";
 import { readScanHealth } from "@/app/lib/schwabStore";
@@ -25,6 +26,7 @@ export async function GET(request: NextRequest) {
     now,
     health,
     showTastytrade: tastytradeEnabled(),
+    schwabIsBackup: preferredDataSource() === "tastytrade",
   });
   return NextResponse.json({
     configured: status.configured,

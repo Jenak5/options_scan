@@ -12,6 +12,8 @@ import { lastAlertBookWriteError, noteAlertSentUnsaved } from "@/app/lib/schwabS
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
+import { preferredDataSource } from "@/app/lib/dataSourcePref";
+import { BothSourcesFailedError, isSchwabBackupMiss } from "@/app/lib/marketData";
 import { noteBrowserScan } from "@/app/lib/pageScan";
 import { markShadowsFromRows, openMissingShadows, openScanTickers } from "@/app/lib/shadowStore";
 import { chicagoDate, isMarketDay } from "@/app/lib/marketHours";
@@ -122,6 +124,7 @@ export async function GET(request: NextRequest) {
           alerts_sent: alertsSent,
           log,
           errors: scan.errors,
+          skipped: scan.errors.map((item) => item.ticker),
         });
       }
 
@@ -129,6 +132,18 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({ error: "Use action=test or action=scan" }, { status: 400 });
     }
   } catch (err) {
+    if (preferredDataSource() === "tastytrade" && isSchwabBackupMiss(err)) {
+      const skipped = err instanceof BothSourcesFailedError ? [err.label] : [];
+      return NextResponse.json({
+        success: true,
+        scanned: 0,
+        matched: 0,
+        alerts_sent: 0,
+        log: [err instanceof Error ? err.message.slice(0, 180) : "skipped"],
+        errors: skipped.map((ticker) => ({ ticker, message: err instanceof Error ? err.message.slice(0, 180) : "skipped" })),
+        skipped,
+      });
+    }
     if (err instanceof SchwabNotConnectedError) {
       return NextResponse.json({ error: err.message, reconnect: "/api/schwab/connect", connected: false }, { status: 409 });
     }
