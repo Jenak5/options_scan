@@ -18,8 +18,8 @@ import {
 } from "@/app/lib/marketHours";
 import { parseSpyTrend, spyTrendFromDirection, type IndexDirection } from "@/app/lib/marketContext";
 import { normalizeOptionSymbol, schwabOptionSymbol } from "@/app/lib/optionSymbol";
-import { getQuoteEntries, marketDataConfigured } from "@/app/lib/marketData";
-import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
+import { preferredDataSource } from "@/app/lib/dataSourcePref";
+import { getQuoteEntries, marketDataConfigured, rethrowIfSchwabOnly } from "@/app/lib/marketData";
 /** Same length as SHADOW_MARK_CAP. Kept here so this file does not import the scorecard module. */
 export const RESEARCH_MARK_CAP = 220;
 
@@ -294,8 +294,9 @@ export async function quoteResearchSymbols(
       const read = await getQuoteEntries(symbols);
       entries = read.entries;
     } catch (err) {
-      if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+      rethrowIfSchwabOnly(err);
       console.info("Research marks: quote request failed. Unmarked contracts stay unmarked.");
+      if (preferredDataSource() === "tastytrade") continue;
       break;
     }
     const claimed = new Set<string>();

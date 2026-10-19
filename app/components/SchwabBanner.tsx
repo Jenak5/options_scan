@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { SCHWAB_BACKUP_NOTE } from "@/app/lib/scanHealth";
 import { SCHWAB_STORAGE_UNCONFIGURED_MESSAGE, type SchwabStoreKind } from "@/app/lib/schwabStorage";
 
 interface ConnectionNotice {
@@ -81,6 +82,7 @@ export function SchwabBanner() {
   const showStorage = Boolean(storageWarning) && storageWarning !== notice;
   const severity = status?.notice?.severity ?? "ok";
   const lines = status?.notice?.lines ?? [];
+  const backupOnly = lines.includes(SCHWAB_BACKUP_NOTE);
   const urgent = severity === "down" || severity === "warn" || noticeKind === "error" || Boolean(storageWarning);
   const success = noticeKind === "success" && !urgent;
 
@@ -125,13 +127,16 @@ export function SchwabBanner() {
           {showStorage && (
             <div style={{ color: "#fbbf24", marginBottom: 4, fontWeight: 700 }}>{storageWarning}</div>
           )}
-          {lines.map((line) => (
-            <div key={line} style={{ marginTop: 4, fontWeight: 700, color: severity === "down" ? "#fecaca" : "#fde68a" }}>
-              {line}
-            </div>
-          ))}
+          {lines.map((line) => {
+            const quiet = line === SCHWAB_BACKUP_NOTE;
+            return (
+              <div key={line} style={{ marginTop: 4, fontWeight: quiet ? 500 : 700, color: quiet ? "#94a3b8" : severity === "down" ? "#fecaca" : "#fde68a" }}>
+                {line}
+              </div>
+            );
+          })}
           {loadError && "Schwab status is unavailable."}
-          {!loadError && status?.message && status.message !== notice && status.message !== storageWarning && !lines.includes(status.message) && status.message}
+          {!loadError && !backupOnly && status?.message && status.message !== notice && status.message !== storageWarning && !lines.includes(status.message) && status.message}
           {!loadError && !status && "Checking Schwab…"}
           {status?.connected && status.accessExpired && !status.refreshExpired && (
             <div style={{ marginTop: 4 }}>The access token will refresh on the next quote.</div>

@@ -21,8 +21,7 @@ import { keyLevelsForTicker } from "@/app/lib/levelScan";
 import { annotateFlowRows, carryPriorSession } from "@/app/lib/marketContext";
 import { chainInterestFromContracts, type ChainInterest } from "@/app/lib/openingCheck";
 import { quotePointFromContract, type FlowQuotePoint } from "@/app/lib/prints";
-import { requireMarketData, getOptionChain } from "@/app/lib/marketData";
-import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
+import { BothSourcesFailedError, getOptionChain, requireMarketData, rethrowIfSchwabOnly } from "@/app/lib/marketData";
 import { readFlowSnapshots, writeFlowSnapshots } from "@/app/lib/schwabStore";
 
 /**
@@ -112,7 +111,7 @@ export async function scanEstimatedFlow(options?: {
           livePoints: livePointsFromContracts(chain.contracts, sampledAt),
         });
       } catch (err) {
-        if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+        rethrowIfSchwabOnly(err);
         errors.push({ ticker, message: safeScanMessage(err) });
       }
     }));
@@ -139,7 +138,7 @@ export async function scanEstimatedFlow(options?: {
           pass.underlyingPrice = chain.underlyingPrice;
           appendLivePoints(pass.livePoints, chain.contracts, sampledAt);
         } catch (err) {
-          if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+          rethrowIfSchwabOnly(err);
         }
       }));
     }
@@ -295,6 +294,7 @@ function quotesForRows(
 }
 
 function safeScanMessage(err: unknown): string {
+  if (err instanceof BothSourcesFailedError) return err.message.slice(0, 180);
   if (err instanceof Error && err.message.startsWith("Schwab ")) return err.message.slice(0, 180);
   return "Schwab market data request failed";
 }

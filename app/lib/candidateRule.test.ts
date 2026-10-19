@@ -96,7 +96,7 @@ describe("shadow rule report", () => {
   ] as unknown as StoredAlert[];
 
   it("marks the first alert per ticker per day", () => {
-    expect([...firstAlertIds(alerts)].sort()).toEqual(["a1", "a3"]);
+    expect(Array.from(firstAlertIds(alerts)).sort()).toEqual(["a1", "a3"]);
   });
 
   it("builds the shadow set: $3M+, first per ticker, not 11:00-11:59 CT, daily stop on", () => {

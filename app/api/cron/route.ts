@@ -16,7 +16,8 @@ import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import type { ResearchCandidate } from "@/app/lib/researchTrack";
 import { openMissingShadows, openScanTickers, recordExperimentalShadows, runShadowPass } from "@/app/lib/shadowStore";
 import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow, isMarketDay } from "@/app/lib/marketHours";
-import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
+import { preferredDataSource } from "@/app/lib/dataSourcePref";
+import { isFatalSchwabError, isSchwabBackupMiss, rethrowIfSchwabOnly } from "@/app/lib/marketData";
 import { emptyScanHealth, formatScanRunLine, scanSlotDecision, skipNotifyDue, skipTelegramText, skipWarning, type ScanHealth, type ScanRunSummary } from "@/app/lib/scanHealth";
 import { sendTelegramAlert } from "@/app/lib/telegram";
 import { probeTastytrade, tastytradeEnabled } from "@/app/lib/tastytrade";
@@ -252,7 +253,7 @@ async function handleCron(request: NextRequest) {
       followUps = await runAlertFollowUps(now);
       log.push(`Follow-up quotes: ${followUps.quoted} requested, ${followUps.updated} records updated`);
     } catch (err) {
-      if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+      rethrowIfSchwabOnly(err);
       log.push("Alert follow-up failed");
     }
 
@@ -261,7 +262,7 @@ async function handleCron(request: NextRequest) {
       noteShadows(summary, openedEarly.opened, 0, 0, openedEarly.saved);
       if (openedEarly.opened > 0 && openedEarly.saved) shadowAt = now.getTime();
     } catch (err) {
-      if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+      rethrowIfSchwabOnly(err);
       log.push("Shadow alert open failed");
     }
 
@@ -291,7 +292,7 @@ async function handleCron(request: NextRequest) {
       const checked = await recordOpeningChecks(scan.chainInterest, now);
       log.push(`Opening check: ${checked} alert${checked === 1 ? "" : "s"} updated from this chain`);
     } catch (err) {
-      if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+      rethrowIfSchwabOnly(err);
       log.push("Opening check was not saved");
     }
 
@@ -299,7 +300,7 @@ async function handleCron(request: NextRequest) {
       const experiment = await recordExperimentalShadows(scan.rows, losses, now);
       log.push(`Test 43-60 DTE: ${experiment.opened} new shadow${experiment.opened === 1 ? "" : "s"} (not alerted)`);
     } catch (err) {
-      if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+      rethrowIfSchwabOnly(err);
       log.push("Test 43-60 DTE update failed");
     }
 
@@ -343,7 +344,7 @@ async function handleCron(request: NextRequest) {
         for (const reading of vol.rows) volByTicker.set(reading.symbol, reading);
         for (const item of vol.errors) volMiss.set(item.symbol, item.message);
       } catch (err) {
-        if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+        rethrowIfSchwabOnly(err);
         log.push("Vol Arb scan failed");
       }
     }
@@ -411,13 +412,13 @@ async function handleCron(request: NextRequest) {
       noteShadows(summary, shadow.opened, shadow.quoted, shadow.closed, shadow.saved);
       if (shadowTouched(shadow) || (openedLate.opened > 0 && openedLate.saved)) shadowAt = now.getTime();
     } catch (err) {
-      if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+      rethrowIfSchwabOnly(err);
       log.push("Shadow alert update failed");
     }
     summary.outcome = "success";
     await rememberScan("success", now, null, shadowAt);
   } catch (err) {
-    if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) {
+    if (isFatalSchwabError(err) && err instanceof Error) {
       console.warn(skipWarning(err.message));
       log.push(err.message);
       summary.outcome = "skipped";
@@ -425,6 +426,15 @@ async function handleCron(request: NextRequest) {
       await rememberScan("skipped", now, err.message, shadowAt);
       console.info(formatScanRunLine(summary));
       return NextResponse.json({ alertsSent: 0, skipped: true, reason: err.message, log });
+    }
+    if (preferredDataSource() === "tastytrade" && isSchwabBackupMiss(err)) {
+      const line = err instanceof Error ? err.message.slice(0, 180) : "ticker skipped";
+      console.warn(line);
+      log.push(line);
+      summary.outcome = "success";
+      await rememberScan("success", now, null, shadowAt);
+      console.info(formatScanRunLine(summary));
+      return NextResponse.json({ alertsSent, alertsSaved: summary.alertsSaved, log });
     }
     const message = err instanceof Error && err.message.startsWith("Schwab ")
       ? err.message.slice(0, 180)
@@ -546,7 +556,7 @@ async function rememberScan(
             ? null
             : current.tastytradeMessage,
     };
-    if (outcome === "skipped" && skipNotifyDue(current.skipNotifiedAt, now.getTime())) {
+    if (outcome === "skipped" && preferredDataSource() === "schwab" && skipNotifyDue(current.skipNotifiedAt, now.getTime())) {
       const sent = await sendTelegramAlert(skipTelegramText(reason ?? "Schwab is not connected."));
       if (sent) next.skipNotifiedAt = now.getTime();
     }

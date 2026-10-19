@@ -3,7 +3,8 @@ import type { StoredTrade } from "@/app/lib/trades";
 import { FLOW_BATCH_SIZE } from "@/app/lib/flow";
 import { findContract, checkBidAskSpread } from "@/app/lib/gate";
 import { normalizeOptionSymbol, schwabOptionSymbol } from "@/app/lib/optionSymbol";
-import { getOptionChain, getQuoteEntries, marketDataConfigured } from "@/app/lib/marketData";
+import { preferredDataSource } from "@/app/lib/dataSourcePref";
+import { getOptionChain, getQuoteEntries, isFatalSchwabError, marketDataConfigured, rethrowIfSchwabOnly } from "@/app/lib/marketData";
 import { SchwabConfigError, SchwabNotConnectedError, type QuoteEntriesResult } from "@/app/lib/schwab";
 
 /**
@@ -53,7 +54,7 @@ export async function quoteContractMarks(trades: readonly Quotable[]): Promise<R
         mark: await readMark(trade),
       })));
     } catch (err) {
-      if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) return marks;
+      if (isFatalSchwabError(err)) return marks;
       batchMarks = [];
     }
     for (let j = 0; j < batchMarks.length; j++) {
@@ -86,7 +87,7 @@ async function readMark(trade: Quotable): Promise<ContractMark | null> {
     if (mid == null && bid == null) return null;
     return { mid, bid };
   } catch (err) {
-    if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+    rethrowIfSchwabOnly(err);
     return null;
   }
 }
@@ -193,6 +194,17 @@ async function fetchPaperQuotes(
       read = await getQuoteEntries(symbols, signal);
     } catch (err) {
       if (isAbort(err)) throw err;
+      if (isFatalSchwabError(err)) throw err;
+      if (preferredDataSource() === "tastytrade") {
+        const reason = quoteFailureReason(err);
+        const ids: string[] = [];
+        for (let j = 0; j < batch.length; j++) {
+          for (let k = 0; k < batch[j].ids.length; k++) ids.push(batch[j].ids[k]);
+          logQuoteMiss(batch[j].symbol, reason);
+        }
+        stamp(misses, ids, reason);
+        continue;
+      }
       assignMiss(misses, groups, i, quoteFailureReason(err));
       break;
     }

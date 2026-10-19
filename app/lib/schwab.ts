@@ -24,6 +24,7 @@ import {
   resolveTokenBackend,
   writeAlertMeta,
 } from "@/app/lib/schwabStore";
+import { preferredDataSource } from "@/app/lib/dataSourcePref";
 import { sendTelegramAlert, telegramConfigured } from "@/app/lib/telegram";
 
 /**
@@ -92,11 +93,28 @@ export async function getSchwabStatus(now: number = Date.now()): Promise<SchwabP
   });
 }
 
+/**
+ * True when a Schwab token is stored and the refresh token has not expired.
+ * Does not refresh, does not call Schwab, and does not send Telegram.
+ */
+export async function schwabBackupAvailable(now: number = Date.now()): Promise<boolean> {
+  if (!schwabConfigured()) return false;
+  const stored = await readTokens();
+  if (!stored?.accessToken || !stored.refreshToken) return false;
+  return stored.refreshExpiresAt > now;
+}
+
 /** Telegram warning when the refresh token is inside the 2-day window or already expired. */
 export async function noteRefreshWindow(status: SchwabPublicStatus): Promise<void> {
   if (!status.configured) return;
   if (!status.warnRefreshSoon && !status.refreshExpired) return;
+  if (suppressSchwabReconnect(status)) return;
   await notifyExpiry();
+}
+
+/** Tastytrade is the source, so an expired Schwab login is not a scan outage. */
+function suppressSchwabReconnect(status: { connected: boolean; refreshExpired: boolean }): boolean {
+  return preferredDataSource() === "tastytrade" && (status.refreshExpired || !status.connected);
 }
 
 export async function getAccessToken(): Promise<string> {
@@ -343,6 +361,10 @@ function schwabAppConfig(): { clientId: string; clientSecret: string; redirectUr
 }
 
 async function notifyExpiry(): Promise<void> {
+  if (preferredDataSource() === "tastytrade") {
+    const status = await getSchwabStatus();
+    if (suppressSchwabReconnect(status)) return;
+  }
   if (!telegramConfigured()) return;
   try {
     const meta = await readAlertMeta();
@@ -358,6 +380,7 @@ async function notifyExpiry(): Promise<void> {
 }
 
 async function notifyRefreshFailure(): Promise<void> {
+  if (preferredDataSource() === "tastytrade") return;
   if (!telegramConfigured()) return;
   try {
     const meta = await readAlertMeta();

@@ -5,8 +5,7 @@ import {
 } from "@/app/lib/alertStore";
 import type { QuoteObservation, StoredAlert } from "@/app/lib/alertBook";
 import { checkBidAskSpread, findContract } from "@/app/lib/gate";
-import { getOptionChain } from "@/app/lib/marketData";
-import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
+import { getOptionChain, rethrowIfSchwabOnly } from "@/app/lib/marketData";
 
 /**
  * Re-quotes open alerts from the Schwab chains endpoint.
@@ -45,7 +44,7 @@ export async function runAlertFollowUps(
       quotes.set(alert.contractKey, await quote(alert));
       quoted += 1;
     } catch (err) {
-      if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) throw err;
+      rethrowIfSchwabOnly(err);
       console.error("Alert follow-up quote failed");
       quotes.set(alert.contractKey, "error");
     }

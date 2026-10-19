@@ -173,6 +173,9 @@ export function skipNotifyDue(lastNotifiedAt: number | null, now: number): boole
   return now - lastNotifiedAt >= SKIP_NOTIFY_COOLDOWN_MS;
 }
 
+/** Shown when Tastytrade is the source and Schwab cannot be used as a backup. */
+export const SCHWAB_BACKUP_NOTE = "Schwab backup not connected; scans run on tastytrade.";
+
 export function refreshCountdown(daysLeft: number | null, expired: boolean): string | null {
   if (expired) return "The Schwab refresh token is expired. Reconnect Schwab. Scans cannot run until then.";
   if (daysLeft == null || !Number.isFinite(daysLeft) || daysLeft < 0) return null;
@@ -194,17 +197,22 @@ export function connectionNotice(input: {
   health: ScanHealth;
   /** False while Tastytrade is turned off. A stored HTTP 400 stays hidden. */
   showTastytrade?: boolean;
+  /** Tastytrade is preferred, so a dead Schwab login does not stop scans. */
+  schwabIsBackup?: boolean;
 }): ConnectionNotice {
   const lines: string[] = [];
   let severity: ConnectionNotice["severity"] = "ok";
-  if (!input.configured) {
+  const backupDown = input.schwabIsBackup === true && (!input.configured || !input.connected || input.refreshExpired);
+  if (backupDown) {
+    lines.push(SCHWAB_BACKUP_NOTE);
+  } else if (!input.configured) {
     severity = "down";
     lines.push("Schwab market data is not configured, so scans cannot run.");
   } else if (!input.connected || input.refreshExpired) {
     severity = "down";
     lines.push("Schwab is disconnected. Reconnect Schwab. New scans, the scorecard, and Learning mode are not collecting quotes until you do.");
   }
-  if (input.refreshExpired || input.warnRefreshSoon) {
+  if (!backupDown && (input.refreshExpired || input.warnRefreshSoon)) {
     const countdown = refreshCountdown(input.refreshDaysLeft, input.refreshExpired || !input.connected);
     if (countdown) {
       if (severity === "ok") severity = "warn";
