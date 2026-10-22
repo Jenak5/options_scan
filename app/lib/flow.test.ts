@@ -329,30 +329,31 @@ describe("estimated flow scoring", () => {
     expect(first.index).toBe(0);
     expect(first.core).toEqual([...CORE_FLOW_WATCHLIST]);
     expect(first.priority).toEqual([]);
-    expect(first.rotating).toHaveLength(14);
+    expect(first.rotating).toHaveLength(5);
     expect(first.rotating[0]).toBe("JPM");
-    expect(first.tickers).toHaveLength(29);
-    expect(first.coreEveryMinutes).toBe(15);
+    expect(first.tickers).toHaveLength(20);
+    expect(first.coreEveryMinutes).toBe(5);
     expect(first.rotatingEveryMinutes).toBe(30);
     expect(first.tickers.slice(0, 15)).toEqual([...CORE_FLOW_WATCHLIST]);
 
-    const second = planCronScan(list, new Date("2026-10-01T13:45:00Z"));
+    const second = planCronScan(list, new Date("2026-10-01T13:35:00Z"));
     expect(second.index).toBe(1);
     expect(second.core).toEqual([...CORE_FLOW_WATCHLIST]);
-    expect(second.rotating[0]).toBe("XLF");
-    expect(second.rotating).toHaveLength(14);
+    expect(second.rotating[0]).toBe("MS");
+    expect(second.rotating).toHaveLength(5);
     expect(second.tickers.slice(0, 15)).toEqual([...CORE_FLOW_WATCHLIST]);
+    expect(planCronScan(list, new Date("2026-10-01T13:45:00Z")).index).toBe(3);
 
     const seen = new Set<string>();
     for (let i = 0; i < first.count; i++) {
-      const at = new Date(open.getTime() + i * 15 * 60 * 1000);
+      const at = new Date(open.getTime() + i * 5 * 60 * 1000);
       const slice = planCronScan(list, at);
       expect(slice.core).toEqual([...CORE_FLOW_WATCHLIST]);
       expect(slice.rotating.length).toBeGreaterThan(0);
       slice.tickers.forEach((ticker) => seen.add(ticker));
     }
     expect(Array.from(seen).sort()).toEqual([...list].sort());
-    expect(flowCronSliceNote(first, list.length, undefined)).toMatch(/every 15 minutes/);
+    expect(flowCronSliceNote(first, list.length, undefined)).toMatch(/every 5 minutes/);
     expect(flowCronSliceNote(first, list.length, undefined)).toMatch(/every 30 minutes/);
     expect(flowCronSliceNote(first, list.length, "SPY")).toMatch(/replaces the built-in default/);
 
@@ -367,12 +368,12 @@ describe("estimated flow scoring", () => {
 
     const crowded = planCronScan(list, open, ["JPM", "BAC", "GS"]);
     expect(crowded.priority).toEqual(["JPM", "BAC", "GS"]);
-    expect(crowded.rotating).toHaveLength(12);
-    expect(crowded.rotatingEveryMinutes).toBe(45);
+    expect(crowded.rotating).toHaveLength(5);
+    expect(crowded.rotatingEveryMinutes).toBe(25);
     expect(crowded.tickers.slice(0, 15)).toEqual([...CORE_FLOW_WATCHLIST]);
     const crowdedSeen = new Set<string>();
     for (let i = 0; i < crowded.count; i++) {
-      const slice = planCronScan(list, new Date(open.getTime() + i * 15 * 60 * 1000), ["JPM", "BAC", "GS"]);
+      const slice = planCronScan(list, new Date(open.getTime() + i * 5 * 60 * 1000), ["JPM", "BAC", "GS"]);
       expect(slice.priority).toEqual(["JPM", "BAC", "GS"]);
       slice.rotating.forEach((ticker) => crowdedSeen.add(ticker));
     }
@@ -381,7 +382,7 @@ describe("estimated flow scoring", () => {
     const custom = planCronScan(["JPM", "BAC", "XOM"], open, []);
     expect(custom.core).toEqual([]);
     expect(custom.tickers).toEqual(["JPM", "BAC", "XOM"]);
-    expect(custom.rotatingEveryMinutes).toBe(15);
+    expect(custom.rotatingEveryMinutes).toBe(5);
 
     let offset = 0;
     const chunked = new Set<string>();
@@ -395,13 +396,13 @@ describe("estimated flow scoring", () => {
     expect(chunked.size).toBe(list.length);
 
     const planned = plannedCronBudget(list, open);
-    expect(planned.tickers).toBe(29);
-    expect(planned.chainRequests).toBe(84);
-    expect(planned.historyRequests).toBe(58);
+    expect(planned.tickers).toBe(20);
+    expect(planned.chainRequests).toBe(75);
+    expect(planned.historyRequests).toBe(40);
     expect(planned.volHistoryRequests).toBe(9);
     expect(planned.withinChainCap).toBe(true);
     expect(planned.withinHistoryCap).toBe(true);
-    expect(planned.estimatedWallMs).toBe(77_600);
+    expect(planned.estimatedWallMs).toBe(65_600);
     expect(planned.estimatedWallMs).toBeGreaterThan(60_000);
     expect(planned.fitsFunctionBudget).toBe(true);
     expect(FLOW_FUNCTION_BUDGET_MS).toBe(300_000);
@@ -447,7 +448,7 @@ describe("scan expirations", () => {
       contract({ expiration: "2026-10-22", strike: 2 }),
       contract({ expiration: "2026-12-01", strike: 3 }),
     ], 2, "2026-10-01");
-    expect(kept.map((row) => row.expiration).sort()).toEqual(["2026-10-15", "2026-10-22"]);
+    expect(kept.map((row) => row.expiration).sort()).toEqual(["2026-10-02", "2026-10-08", "2026-10-15", "2026-10-22"]);
   });
 
   it("keeps a few 43 to 60 day dates from the same chain and drops a date past 60", () => {
@@ -459,7 +460,18 @@ describe("scan expirations", () => {
       contract({ expiration: "2026-11-20", strike: 3 }),
       contract({ expiration: "2026-12-18", strike: 4 }),
     ], 2, "2026-10-01");
-    expect(kept.map((row) => row.expiration).sort()).toEqual(["2026-10-15", "2026-10-22", "2026-11-20"]);
+    expect(kept.map((row) => row.expiration).sort()).toEqual([
+      "2026-10-02", "2026-10-08", "2026-10-15", "2026-10-22", "2026-11-20",
+    ]);
+  });
+
+  it("does not force-keep a same-day expiration for the 1 to 13 day test", () => {
+    const kept = keepScanExpirations([
+      contract({ expiration: "2026-10-01" }),
+      contract({ expiration: "2026-10-15", strike: 1 }),
+      contract({ expiration: "2026-10-22", strike: 2 }),
+    ], 2, "2026-10-01");
+    expect(kept.map((row) => row.expiration).sort()).toEqual(["2026-10-15", "2026-10-22"]);
   });
 });
 

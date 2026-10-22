@@ -18,10 +18,11 @@ import {
 } from "@/app/lib/marketHours";
 import { parseSpyTrend, spyTrendFromDirection, type IndexDirection } from "@/app/lib/marketContext";
 import { normalizeOptionSymbol, schwabOptionSymbol } from "@/app/lib/optionSymbol";
+import { MARK_REUSE_MS } from "@/app/lib/cronCadence";
 import { preferredDataSource } from "@/app/lib/dataSourcePref";
 import { getQuoteEntries, marketDataConfigured, rethrowIfSchwabOnly } from "@/app/lib/marketData";
 /** Same length as SHADOW_MARK_CAP. Kept here so this file does not import the scorecard module. */
-export const RESEARCH_MARK_CAP = 220;
+export const RESEARCH_MARK_CAP = 680;
 
 export interface TrackedShadow {
   quoteTrack?: boolean;
@@ -43,8 +44,8 @@ export interface TrackedShadow {
  */
 export const RESEARCH_TRACK_CAP = 2000;
 
-/** Skip a second mark when this track was quoted a few minutes ago. */
-export const RESEARCH_MARK_REUSE_MS = 10 * 60 * 1000;
+/** Skip a second mark when this track was quoted inside the scan reuse window. */
+export const RESEARCH_MARK_REUSE_MS = MARK_REUSE_MS;
 
 export interface ResearchTrack {
   id: string;

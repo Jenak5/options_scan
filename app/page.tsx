@@ -196,14 +196,14 @@ function AlertsTab() {
     <div style={{ maxWidth: 640 }}>
       <div style={{ fontSize: 17, fontWeight: 700, color: "#e2e8f0", marginBottom: 4 }}>🔔 Automated Alert System</div>
       <div style={{ fontSize: 14, color: "#64748b", marginBottom: 24 }}>
-        Scheduled scan every 15 min, weekdays, 8:30am–3:00pm Central. Vercel fires 13:30–21:00 UTC so both CST and CDT are covered. Grok screens for red flags before a Telegram alert is sent.
+        Scheduled scan every 5 min, weekdays, 8:30am–3:00pm Central. Vercel fires 13:30–21:00 UTC so both CST and CDT are covered. Grok screens for red flags before a Telegram alert is sent.
       </div>
 
       {/* How it works */}
       <div style={{ background: "rgba(6,182,212,0.06)", border: "1px solid rgba(6,182,212,0.15)", borderRadius: 8, padding: "14px 18px", marginBottom: 20 }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: "#06b6d4", marginBottom: 10 }}>How it works</div>
         {[
-          "Every 15 min on weekdays, from 8:30am to 3:00pm Central, the scanner reads Schwab chains for the watchlist. Outside that window it exits.",
+          "Every 5 min on weekdays, from 8:30am to 3:00pm Central, the scanner reads Schwab chains for the watchlist. Outside that window it exits.",
           "Considers contracts that pass the gate liquidity filters: open interest at least 500, volume at least 100, and spread at most 5% of mid. Estimated flow premium (volume × mid × 100) still has to clear ALERT_MIN_PREMIUM, which defaults to $50,000. Illiquid contracts never grade A or B.",
           "Bid, ask, last, mid, and the spread come from the Schwab chain already on the card. Likely side compares the last price with the bid and ask: at or near the ask is buyers paying up, at or near the bid is sellers, and in between is unclear. That is an estimate from the last price, not a trade print. Flow premium is volume times the midpoint, not an exchange-reported sweep.",
           "Grades every candidate. Only a TAKE graded A or B can alert. An A needs buyers paying up, plus at least $100,000 of flow premium. A B needs at least $50,000. The ask has to be at least $0.50, and one contract can cost up to $875. Expiration is about 2 to 6 weeks out (14 to 42 days). C and D stay on the Flow tab. The next-day open-interest check is recorded later and does not block the alert.",

@@ -18,7 +18,7 @@ export const dynamic = "force-dynamic";
  * Bearer HEALTH_TOKEN, or CRON_SECRET when HEALTH_TOKEN is unset.
  * No session cookie. No secrets in the body.
  * Open paper trades get one batched Schwab quote, with a short timeout.
- * Open scorecard shadows keep the mark stored by the 15-minute scan.
+ * Open scorecard shadows keep the mark stored by the 5-minute scan.
  * This route does not write the trade log, the shadow book, alerts, or scan health.
  * It does not call Tastytrade or place an order.
  */

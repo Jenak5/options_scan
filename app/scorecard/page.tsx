@@ -94,6 +94,7 @@ interface Scorecard {
   byRight: Bucket[];
   rows: Row[];
   experimental?: Experiment;
+  experimentalShort?: Experiment;
 }
 
 export default function ScorecardPage() {
@@ -182,58 +183,18 @@ export default function ScorecardPage() {
             </div>
 
             {page.experimental && (
-              <section style={{ ...cardStyle, borderColor: "rgba(251,191,36,0.45)", marginTop: 18 }}>
-                <h2 style={{ ...heading, color: "#fbbf24" }}>{page.experimental.label}</h2>
-                <Note color="#fbbf24">{page.experimental.note}</Note>
-                <Note color={page.experimental.tooFew ? "#fbbf24" : "#94a3b8"}>{page.experimental.trustNote}</Note>
-                <Stats
-                  closed={page.experimental.resolved}
-                  open={page.experimental.open}
-                  winRate={page.experimental.winRate}
-                  averageWin={page.experimental.averageWin}
-                  averageLoss={page.experimental.averageLoss}
-                  totalPnl={page.experimental.totalPnl}
-                  wins={page.experimental.wins}
-                  losses={page.experimental.losses}
-                  flats={page.experimental.flats}
-                />
-                {page.experimental.rows.length === 0 && (
-                  <p style={{ color: "#94a3b8", fontSize: 15, margin: "10px 0 0" }}>
-                    No test shadows yet. A contract already in a scanned chain, with 43 to 60 days to expiry, is recorded here when the other rules would have made it an A or a B.
-                  </p>
-                )}
-                {page.experimental.rows.length > 0 && (
-                  <div style={{ overflowX: "auto", marginTop: 10 }}>
-                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
-                      <thead>
-                        <tr>
-                          {["Ticker", "Right", "Status", "Exit", "P/L"].map((label) => (
-                            <th key={label} style={thStyle}>{label}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {page.experimental.rows.map((row) => {
-                          const pnl = row.status === "closed" ? row.pnlDollars : row.unrealizedPnl;
-                          return (
-                            <tr key={row.id}>
-                              <td style={tdStyle}>
-                                {row.ticker}
-                                <div style={{ color: "#fbbf24", fontSize: 12, marginTop: 2 }}>{row.experimentLabel ?? "Test: 43-60 DTE"}</div>
-                                {row.probeNote && <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>{row.probeNote}</div>}
-                              </td>
-                              <td style={tdStyle}>{row.putCall === "put" ? "Put" : "Call"}</td>
-                              <td style={tdStyle}>{row.status === "open" ? "Open" : "Closed"}</td>
-                              <td style={tdStyle}>{row.exitLabel || "n/a"}</td>
-                              <td style={{ ...tdStyle, color: pnlColor(pnl) }}>{pnl == null ? "n/a" : signed(pnl)}</td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </section>
+              <ExperimentPanel
+                section={page.experimental}
+                empty="No test shadows yet. A contract already in a scanned chain, with 43 to 60 days to expiry, is recorded here when the other rules would have made it an A or a B."
+                fallbackLabel="Test: 43-60 DTE"
+              />
+            )}
+            {page.experimentalShort && (
+              <ExperimentPanel
+                section={page.experimentalShort}
+                empty="No test shadows yet. A contract already in a scanned chain, with 1 to 13 days to expiry, is recorded here when the other rules would have made it an A or a B. 0 DTE is not included."
+                fallbackLabel="Test: 1-13 DTE"
+              />
             )}
 
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, marginTop: 22 }}>
@@ -345,6 +306,61 @@ function Note({ children, color }: { children: ReactNode; color: string }) {
 
 function money(value: number): string {
   return `$${value.toFixed(2)}`;
+}
+
+function ExperimentPanel({ section, empty, fallbackLabel }: { section: Experiment; empty: string; fallbackLabel: string }) {
+  return (
+    <section style={{ ...cardStyle, borderColor: "rgba(251,191,36,0.45)", marginTop: 18 }}>
+      <h2 style={{ ...heading, color: "#fbbf24" }}>{section.label}</h2>
+      <Note color="#fbbf24">{section.note}</Note>
+      <Note color={section.tooFew ? "#fbbf24" : "#94a3b8"}>{section.trustNote}</Note>
+      <Stats
+        closed={section.resolved}
+        open={section.open}
+        winRate={section.winRate}
+        averageWin={section.averageWin}
+        averageLoss={section.averageLoss}
+        totalPnl={section.totalPnl}
+        wins={section.wins}
+        losses={section.losses}
+        flats={section.flats}
+      />
+      {section.rows.length === 0 && (
+        <p style={{ color: "#94a3b8", fontSize: 15, margin: "10px 0 0" }}>{empty}</p>
+      )}
+      {section.rows.length > 0 && (
+        <div style={{ overflowX: "auto", marginTop: 10 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+            <thead>
+              <tr>
+                {["Ticker", "Right", "Status", "Exit", "P/L"].map((label) => (
+                  <th key={label} style={thStyle}>{label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {section.rows.map((row) => {
+                const pnl = row.status === "closed" ? row.pnlDollars : row.unrealizedPnl;
+                return (
+                  <tr key={row.id}>
+                    <td style={tdStyle}>
+                      {row.ticker}
+                      <div style={{ color: "#fbbf24", fontSize: 12, marginTop: 2 }}>{row.experimentLabel ?? fallbackLabel}</div>
+                      {row.probeNote && <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>{row.probeNote}</div>}
+                    </td>
+                    <td style={tdStyle}>{row.putCall === "put" ? "Put" : "Call"}</td>
+                    <td style={tdStyle}>{row.status === "open" ? "Open" : "Closed"}</td>
+                    <td style={tdStyle}>{row.exitLabel || "n/a"}</td>
+                    <td style={{ ...tdStyle, color: pnlColor(pnl) }}>{pnl == null ? "n/a" : signed(pnl)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
 }
 
 function signed(value: number): string {

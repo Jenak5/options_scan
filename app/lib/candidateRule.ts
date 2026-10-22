@@ -3,10 +3,10 @@ import type { StoredAlert } from "@/app/lib/alertBook";
 import type { CandleBar } from "@/app/lib/candleTypes";
 import { usableCandleBars } from "@/app/lib/exitWhatIf";
 import { addCalendarDays } from "@/app/lib/flow";
-import { chicagoTradingDayCutoffMs } from "@/app/lib/marketHours";
+import { chicagoCloseBeforeExpirationMs, chicagoTradingDayCutoffMs } from "@/app/lib/marketHours";
 import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import { inWeakWindow, isBig3m } from "@/app/lib/scanLabels";
-import { contractKey, isExperimentShadow, LAST_WEEK_CALENDAR_DAYS, SHADOW_MIN_TRUST, type ShadowTrade } from "@/app/lib/shadow";
+import { contractKey, isExperimentShadow, LAST_WEEK_CALENDAR_DAYS, SHADOW_MIN_TRUST, type ShadowCohort, type ShadowTrade } from "@/app/lib/shadow";
 import { chicagoYmd, newYorkMidnightMs } from "@/app/lib/zonedDay";
 
 /**
@@ -141,12 +141,20 @@ export function shadowSampleText(n: number): string {
 export interface ExitOutcome {
   pnlDollars: number;
   at: number;
-  reason: "stop" | "target" | "trail" | "breakeven" | "cut60" | "time" | "lastWeek";
+  reason: "stop" | "target" | "trail" | "breakeven" | "cut60" | "time" | "lastWeek" | "preExpiry";
 }
 
 /** Walk traded minutes. A stop and a target in the same minute counts as the stop. */
 export function replayRule(
-  input: { entryPrice: number; openedAt: number; expiration: string; candles: readonly CandleBar[]; delta: number | null; underlying: number | null },
+  input: {
+    entryPrice: number;
+    openedAt: number;
+    expiration: string;
+    candles: readonly CandleBar[];
+    delta: number | null;
+    underlying: number | null;
+    cohort?: ShadowCohort;
+  },
   rule: ExitRule,
 ): ExitOutcome | null {
   const entry = input.entryPrice;
@@ -155,7 +163,10 @@ export function replayRule(
   if (bars.length === 0) return null;
   const hardStop = Math.max(entry * (1 + rule.stopFraction), entry - MAX_LOSS_DOLLARS / 100);
   const target = rule.targetFraction == null ? null : entry * (1 + rule.targetFraction);
-  const lastWeekAt = lastWeekCutoff(input.expiration);
+  const short = input.cohort === "experiment-short";
+  const lastWeekAt = short
+    ? (chicagoCloseBeforeExpirationMs(input.expiration) ?? Number.POSITIVE_INFINITY)
+    : lastWeekCutoff(input.expiration);
   const flatAt = chicagoTradingDayCutoffMs(new Date(input.openedAt), rule.flatDays) ?? Number.POSITIVE_INFINITY;
   const cutAt = input.openedAt + HOUR_MS;
   let stop = hardStop;
@@ -189,7 +200,7 @@ export function replayRule(
       stop = entry;
       stopReason = "breakeven";
     }
-    if (bar.t >= lastWeekAt) return out(bar.c, bar.t, "lastWeek");
+    if (bar.t >= lastWeekAt) return out(bar.c, bar.t, short ? "preExpiry" : "lastWeek");
     if (bar.t >= flatAt) return out(bar.c, bar.t, "time");
   }
   return null;
@@ -230,7 +241,7 @@ export function analyzeShadowRule(input: {
     const features = row.features;
     const premium = features?.flowPremium ?? null;
     const underlying = row.entryUnderlying ?? alert?.underlyingPrice ?? null;
-    const base = { entryPrice: row.entryPrice, openedAt: row.openedAt, expiration: row.expiration, candles, delta: features?.delta ?? null, underlying };
+    const base = { entryPrice: row.entryPrice, openedAt: row.openedAt, expiration: row.expiration, candles, delta: features?.delta ?? null, underlying, cohort: row.cohort };
     const liveReplay = replayRule(base, LIVE_RULE);
     const candidate = replayRule(base, CANDIDATE_RULE);
     const big3m = premium == null ? null : isBig3m(premium);

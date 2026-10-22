@@ -183,7 +183,7 @@ export default function LearnPage() {
               {page.summary.map((line) => <p key={line} style={prose}>{line}</p>)}
               {empty && (
                 <p style={prose}>
-                  An A or a B becomes a shadow after it is saved. A paper trade counts once it is closed. The 43–60 day test is separate and is not an A or a B.
+                  An A or a B becomes a shadow after it is saved. A paper trade counts once it is closed. The 43–60 day test and the 1–13 day test are separate and are not an A or a B.
                 </p>
               )}
             </section>
@@ -395,7 +395,7 @@ function ShadowRuleSection({ report }: { report: ShadowRule }) {
 
 function sourceLabel(source: Trade["source"]): string {
   if (source === "paper") return "Paper trade";
-  if (source === "test") return "Test: 43-60 DTE";
+  if (source === "test") return "Test shadow";
   return "Shadow alert";
 }
 
@@ -416,9 +416,9 @@ function signed(value: number): string {
 function candleSourceLabel(source: "1m" | "15m" | "mixed" | undefined, candlePaths: number, markPaths: number): string {
   if (source === "1m") return "Data: 1-minute candles.";
   if (source === "mixed") {
-    return `Data: mixed, ${candlePaths} on 1-minute candles and ${markPaths} on 15-minute marks.`;
+    return `Data: mixed, ${candlePaths} on 1-minute candles and ${markPaths} on 5-minute marks.`;
   }
-  return "Data: 15-minute marks.";
+  return "Data: 5-minute marks.";
 }
 
 function rate(fraction: number): string {

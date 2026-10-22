@@ -137,7 +137,7 @@ export function FlowTab() {
 
       <p style={{ margin: "0 0 14px", color: "#94a3b8", fontSize: 15, lineHeight: 1.5 }}>{disclaimer}</p>
       <p style={{ margin: "0 0 14px", color: "#94a3b8", fontSize: 15, lineHeight: 1.5 }}>
-        Search checks one ticker. This tab reads the full list in small groups so each request can finish. The scheduled scan is separate: the original 15 names, plus any ticker with an open alert or paper trade, run every 15 minutes. The other names rotate, so each of them runs every 30 minutes.
+        Search checks one ticker. This tab reads the full list in small groups so each request can finish. The scheduled scan is separate: the original 15 names, plus any ticker with an open alert or paper trade, run every 5 minutes. The other names rotate, so each of them runs every 30 minutes.
         {watchlistNote ? ` ${watchlistNote}` : ""}
       </p>
       {verdictNote && (

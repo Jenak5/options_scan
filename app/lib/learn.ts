@@ -1,4 +1,4 @@
-import { ALERT_RULES, EXPERIMENT_DTE, TRADE_RULES } from "@/app/lib/alertConfig";
+import { ALERT_RULES, EXPERIMENT_DTE, EXPERIMENT_SHORT_DTE, TRADE_RULES } from "@/app/lib/alertConfig";
 import {
   emptyFeatures,
   featuresForAlert,
@@ -69,7 +69,7 @@ export interface LearnTrade {
   strike: number;
   expiration: string;
   gradeLabel: string;
-  cohort: "ab" | "experiment" | "paper";
+  cohort: "ab" | "experiment" | "experiment-short" | "paper";
   exitReason: string;
   exitDetail: string;
   pnlDollars: number;
@@ -124,7 +124,7 @@ export interface LearnInput {
    */
   grades?: readonly string[];
   research?: readonly ResearchTrack[];
-  /** Stored 1-minute candles keyed by contract. Missing keys stay on 15-minute marks. */
+  /** Stored 1-minute candles keyed by contract. Missing keys stay on 5-minute marks. */
   candles?: ReadonlyMap<string, readonly CandleBar[]>;
 }
 
@@ -155,8 +155,8 @@ export function analyzeLearning(input: LearnInput): LearnReport {
   ranked.sort(bySeparation);
   for (let i = 0; i < ranked.length; i++) ranked[i].rank = i + 1;
 
-  const main = built.trades.filter((row) => row.cohort !== "experiment");
-  const tests = built.trades.filter((row) => row.cohort === "experiment");
+  const main = built.trades.filter((row) => !isLearnTest(row));
+  const tests = built.trades.filter((row) => isLearnTest(row));
   const totals = tally(main);
   const report: LearnReport = {
     estimateNote: ESTIMATE_NOTE,
@@ -319,6 +319,7 @@ function buildTrades(input: LearnInput): { trades: LearnTrade[]; omittedShadows:
 
 function fromShadow(shadow: ShadowTrade, alert: StoredAlert | null): LearnTrade {
   const test = isExperimentShadow(shadow);
+  const short = shadow.cohort === "experiment-short";
   const marks = marksOf(shadow, alert);
   const features = resolveFeatures(shadow, alert, null);
   return {
@@ -328,10 +329,10 @@ function fromShadow(shadow: ShadowTrade, alert: StoredAlert | null): LearnTrade 
     putCall: shadow.putCall,
     strike: shadow.strike,
     expiration: shadow.expiration,
-    gradeLabel: test ? EXPERIMENT_DTE.label : shadow.grade,
-    cohort: test ? "experiment" : "ab",
+    gradeLabel: short ? EXPERIMENT_SHORT_DTE.label : test ? EXPERIMENT_DTE.label : shadow.grade,
+    cohort: short ? "experiment-short" : test ? "experiment" : "ab",
     exitReason: shadow.exitReason ?? "unknown",
-    exitDetail: shadowExitLabel(shadow.exitReason) || "Exit reason was not stored.",
+    exitDetail: shadowExitLabel(shadow.exitReason, shadow.cohort) || "Exit reason was not stored.",
     pnlDollars: shadow.pnlDollars ?? 0,
     pnlFraction: shadow.pnlFraction,
     result: resultOf(shadow.pnlDollars ?? 0),
@@ -560,9 +561,9 @@ function factorSpecs(): FactorSpec[] {
     {
       id: "dte",
       label: "Days to expiry",
-      cuts: `${dteMin}–${dteMax} is the A/B window, split at 27 so the two halves can be compared. ${EXPERIMENT_DTE.min}–${EXPERIMENT_DTE.max} is the test. That split is not a new rule.`,
+      cuts: `${dteMin}–${dteMax} is the A/B window, split at 27 so the two halves can be compared. ${EXPERIMENT_SHORT_DTE.min}–${EXPERIMENT_SHORT_DTE.max} and ${EXPERIMENT_DTE.min}–${EXPERIMENT_DTE.max} are tests. That split is not a new rule.`,
       includeTest: true,
-      order: ["Under 14 days", "14–27 days", "28–42 days", "43–60 days (test)", "Over 60 days"],
+      order: ["1-13 days (test)", "Under 14 days", "14–27 days", "28–42 days", "43–60 days (test)", "Over 60 days"],
       bucketOf: dteBucket,
     },
     {
@@ -707,7 +708,7 @@ function buildFactor(spec: FactorSpec, trades: readonly LearnTrade[]): LearnFact
   let excludedUnknown = 0;
   for (let i = 0; i < trades.length; i++) {
     const row = trades[i];
-    if (row.cohort === "experiment" && !spec.includeTest) continue;
+    if (isLearnTest(row) && !spec.includeTest) continue;
     const key = spec.bucketOf(row);
     if (key == null) {
       excludedUnknown += 1;
@@ -751,7 +752,7 @@ function summaryLines(report: LearnReport): string[] {
     lines.push(`Fewer than ${LEARN_MIN_TRUST} resolved results is too few to trust. ${ESTIMATE_NOTE}`);
     return lines;
   }
-  lines.push(`${report.resolved} resolved alerts and paper trades: ${report.wins} wins, ${report.losses} losses, ${report.flats} flat. ${report.testResolved} resolved test shadows (43–60 days).`);
+  lines.push(`${report.resolved} resolved alerts and paper trades: ${report.wins} wins, ${report.losses} losses, ${report.flats} flat. ${testCohortSentence(report)}`);
   if (report.resolved < LEARN_MIN_TRUST) {
     lines.push(`${report.resolved} resolved results. Fewer than ${LEARN_MIN_TRUST} is too few to trust.`);
   }
@@ -807,7 +808,28 @@ function dteSentence(factor: LearnFactor, testResolved: number): string {
   const trust = (test?.count ?? testResolved) < EXPERIMENT_DTE.minTrust
     ? ` Fewer than ${EXPERIMENT_DTE.minTrust} test results is too few to consider widening that window.`
     : " That is enough test results to describe, and it is still not a reason to change the rule.";
-  return `${testText}. ${windowText}.${trust} The 14–42 day rule is unchanged.`;
+  let text = `${testText}. ${windowText}.${trust} The 14–42 day rule is unchanged.`;
+  const short = factor.buckets.find((bucket) => bucket.key === "1-13 days (test)");
+  if (short && short.count > 0) {
+    const shortTrust = short.count < EXPERIMENT_SHORT_DTE.minTrust
+      ? ` Fewer than ${EXPERIMENT_SHORT_DTE.minTrust} of those results is too few to consider a shorter window.`
+      : " That is enough to describe, and it is still not a reason to change the rule.";
+    text += ` Test 1–13 DTE is ${forCount(short)}.${shortTrust} The 14–42 day rule is unchanged.`;
+  }
+  return text;
+}
+
+function testCohortSentence(report: LearnReport): string {
+  const dte = report.factors.find((factor) => factor.id === "dte");
+  const long = dte?.buckets.find((bucket) => bucket.key === "43–60 days (test)")?.count ?? report.testResolved;
+  const short = dte?.buckets.find((bucket) => bucket.key === "1-13 days (test)")?.count ?? 0;
+  const parts = [`${long} resolved test shadows (43–60 days)`];
+  if (short > 0) parts.push(`${short} resolved test shadows (1–13 days)`);
+  return `${parts.join(". ")}.`;
+}
+
+function isLearnTest(row: LearnTrade): boolean {
+  return row.cohort === "experiment" || row.cohort === "experiment-short";
 }
 
 function gapSentence(factor: LearnFactor): string {
@@ -845,7 +867,7 @@ function suggestionLines(factors: readonly LearnFactor[]): string[] {
       : "Consider whether that group should be filtered.";
     let line = `${item.bucket.label} lost ${item.bucket.losses} of ${decided} (${item.factor.label}). ${verb} Suggestion only. This does not change grading rules, thresholds, or the $${MAX_LOSS_DOLLARS} cap.`;
     if (item.bucket.count < LEARN_MIN_TRUST) line = `Too few to trust. ${line}`;
-    if (item.factor.id === "dte" && item.bucket.key.includes("43")) {
+    if (item.factor.id === "dte" && (item.bucket.key.includes("43") || item.bucket.key.includes("1-13"))) {
       line += " The 14–42 day rule is unchanged.";
     }
     lines.push(line);
@@ -857,6 +879,7 @@ function suggestionLines(factors: readonly LearnFactor[]): string[] {
 }
 
 function dteBucket(row: LearnTrade): string | null {
+  if (row.cohort === "experiment-short") return "1-13 days (test)";
   if (row.cohort === "experiment") return "43–60 days (test)";
   const dte = row.features.dte;
   if (dte == null) return null;

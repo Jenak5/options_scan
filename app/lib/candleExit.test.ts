@@ -266,7 +266,7 @@ describe("1-minute stop, target, and gaps", () => {
     expect(report.markPaths).toBe(1);
     expect(report.scenarios.every((row) => row.source === "mixed")).toBe(true);
     expect(report.coverageNote).toMatch(/time budget/);
-    expect(report.coverageNote).toMatch(/15-minute/);
+    expect(report.coverageNote).toMatch(/5-minute/);
 
     const stopped = whatIfFromShadows([shadow()], { candles, budgetMs: 0 });
     expect(stopped.candlePaths).toBe(0);

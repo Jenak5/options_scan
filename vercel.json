@@ -28,11 +28,11 @@
   "crons": [
     {
       "path": "/api/cron",
-      "schedule": "30,45 13 * * 1-5"
+      "schedule": "30,35,40,45,50,55 13 * * 1-5"
     },
     {
       "path": "/api/cron",
-      "schedule": "*/15 14-20 * * 1-5"
+      "schedule": "*/5 14-20 * * 1-5"
     },
     {
       "path": "/api/cron",

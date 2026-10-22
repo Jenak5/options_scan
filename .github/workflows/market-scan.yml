@@ -1,5 +1,5 @@
 # Backup caller for the production scan. Manual only.
-# Vercel cron in vercel.json runs the scheduled scans every 15 minutes
+# Vercel cron in vercel.json runs the scheduled scans every 5 minutes
 # during market hours. This workflow had no CRON_SECRET, so its schedule
 # failed on every run and sent "Run failed" emails. The schedule is off.
 #
@@ -7,7 +7,7 @@
 # 1. Add a GitHub Actions secret named CRON_SECRET with the same value
 #    already stored in Vercel (repo Settings, Secrets and variables, Actions).
 # 2. Put the schedule block back under "on:".
-# If a scan already finished in the last 10 minutes, the route exits
+# If a scan already ran in this 5-minute slot, the route exits
 # without reading Schwab, so the two callers do not double the request budget.
 
 name: Market scan

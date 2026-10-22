@@ -2,7 +2,8 @@ import type { OptionContract, PutCall } from "@/app/lib/contract";
 import type { EarningsFact } from "@/app/lib/eventRisk";
 import type { KeyLevels } from "@/app/lib/levels";
 import type { FlowContext } from "@/app/lib/marketContext";
-import { ALERT_POLICY, ALERT_RULES, EXPERIMENT_DTE, OUTCOME_RULES, PRINT_RULES } from "@/app/lib/alertConfig";
+import { ALERT_POLICY, ALERT_RULES, EXPERIMENT_DTE, EXPERIMENT_SHORT_DTE, OUTCOME_RULES, PRINT_RULES } from "@/app/lib/alertConfig";
+import { CRON_CADENCE_MINUTES } from "@/app/lib/cronCadence";
 import { chicagoClock } from "@/app/lib/marketHours";
 import { newYorkYmd } from "@/app/lib/zonedDay";
 import { checkBidAskSpread, openInterestPasses, volumePasses } from "@/app/lib/gate";
@@ -29,7 +30,7 @@ import {
 export const FLOW_DISCLAIMER =
   "Estimated flow from option volume/open interest, not true sweeps.";
 
-/** Scanned on every cron run. Alert latency for these names stays on the 15-minute cadence. */
+/** Scanned on every cron run. Alert latency for these names stays on the 5-minute cadence. */
 export const CORE_FLOW_WATCHLIST = [
   "SPY", "QQQ", "IWM", "AAPL", "NVDA", "TSLA", "AMD", "AMZN",
   "MSFT", "META", "GOOGL", "PLTR", "SOFI", "NFLX", "COIN",
@@ -74,10 +75,11 @@ export const FLOW_BATCH_SIZE = 3;
  */
 export const FLOW_SCAN_TICKERS_PER_RUN = 9;
 
-/** Added names should be scanned at least this often. Core names use the 15-minute cron. */
+/** Added names should be scanned at least this often. Core names use the 5-minute cron. */
 export const FLOW_ROTATING_MAX_MINUTES = 30;
 
-export const FLOW_CRON_CADENCE_MINUTES = 15;
+/** Same clock as vercel.json. Six groups cover the added names inside 30 minutes. */
+export const FLOW_CRON_CADENCE_MINUTES = CRON_CADENCE_MINUTES;
 
 /** levelScan pauses above this many price-history reads in a rolling minute. */
 export const FLOW_HISTORY_MAX_PER_MINUTE = 60;
@@ -93,7 +95,7 @@ export const SHADOW_QUOTES_PER_RUN = 16;
  * These use the quotes endpoint, chunked, not one chain per contract.
  * Oldest mark first. Contracts past the cap wait for a later run.
  * The cap does not delete a track. Exit what-ifs use stored 1-minute candles
- * when a contract has them. These quotes are the 15-minute fallback.
+ * when a contract has them. These quotes are the 5-minute fallback.
  */
 export const RESEARCH_QUOTES_PER_RUN = 40;
 
@@ -248,7 +250,7 @@ export interface CronScanPlan {
   /** Added names scanned on this run. */
   rotating: string[];
   rotatingPool: number;
-  /** Zero-based added-name group for this 15-minute slot. */
+  /** Zero-based added-name group for this 5-minute slot. */
   index: number;
   count: number;
   /** Minutes between scans of one core name. */
@@ -265,7 +267,7 @@ const CORE_TICKERS = new Set<string>(CORE_FLOW_WATCHLIST);
  * Only the added names rotate. The slice is large enough to cover them within
  * 30 minutes when that still fits the chain cap, the history cap, and maxDuration.
  * A short list that fits is scanned whole.
- * 8:30 Chicago is group 0, 8:45 is group 1, then it wraps.
+ * 8:30 Chicago is group 0, 8:35 is group 1, then it wraps.
  */
 export function planCronScan(
   watchlist: readonly string[],
@@ -679,6 +681,14 @@ export function keepScanExpirations(
     .sort((a, b) => a.dte - b.dte || a.expiration.localeCompare(b.expiration));
   for (let i = 0; i < extra.length && i < EXPERIMENT_DTE.keptExpirations; i++) {
     allowed.add(extra[i].expiration);
+  }
+  // 1–13 day dates are already in the same chain. Keep a few when nearer dates filled the cap.
+  // 0 DTE is not force-kept. This does not add a chain read.
+  const shortExtra = ranked
+    .filter((row) => row.dte >= EXPERIMENT_SHORT_DTE.min && row.dte <= EXPERIMENT_SHORT_DTE.max && !allowed.has(row.expiration))
+    .sort((a, b) => a.dte - b.dte || a.expiration.localeCompare(b.expiration));
+  for (let i = 0; i < shortExtra.length && i < EXPERIMENT_SHORT_DTE.keptExpirations; i++) {
+    allowed.add(shortExtra[i].expiration);
   }
   return contracts.filter((contract) => allowed.has(contract.expiration));
 }
