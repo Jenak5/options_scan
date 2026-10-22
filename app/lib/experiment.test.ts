@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { emptyCheckpoint, type StoredAlert } from "@/app/lib/alertBook";
-import { ALERT_RULES, EXPERIMENT_DTE } from "@/app/lib/alertConfig";
+import { ALERT_RULES, EXPERIMENT_DTE, EXPERIMENT_SHORT_DTE } from "@/app/lib/alertConfig";
 import { chooseAlerts } from "@/app/lib/alertPolicy";
 import {
   chooseExperimental,
@@ -72,10 +72,22 @@ describe("43-60 day test shadows", () => {
     expect(EXPERIMENT_DTE.quotesPerRun).toBe(4);
     expect(SHADOW_QUOTES_PER_RUN).toBe(16);
     expect(MAX_LOSS_DOLLARS).toBe(875);
-    expect(experimentWindow(42)).toBe(false);
-    expect(experimentWindow(43)).toBe(true);
-    expect(experimentWindow(60)).toBe(true);
-    expect(experimentWindow(61)).toBe(false);
+    expect(experimentWindow(0)).toBeNull();
+    expect(experimentWindow(1)).toBe("experiment-short");
+    expect(experimentWindow(13)).toBe("experiment-short");
+    expect(experimentWindow(14)).toBeNull();
+    expect(experimentWindow(42)).toBeNull();
+    expect(experimentWindow(43)).toBe("experiment");
+    expect(experimentWindow(60)).toBe("experiment");
+    expect(experimentWindow(61)).toBeNull();
+    expect(EXPERIMENT_SHORT_DTE).toMatchObject({
+      min: 1,
+      max: 13,
+      label: "Test: 1-13 DTE",
+      minTrust: 30,
+      opensPerRun: 2,
+      opensPerDay: 4,
+    });
   });
 
   it("probes a contract the other rules would pass and does not grade the real row A or B", () => {
@@ -238,6 +250,117 @@ describe("43-60 day test shadows", () => {
   });
 });
 
+describe("1-13 day test shadows", () => {
+  it("assigns the short cohort, keeps 0 DTE out, and does not alert", () => {
+    const row = shortRow();
+    expect(experimentWindow(row.dte)).toBe("experiment-short");
+    expect(experimentProbe(row, null, NOW)).toBe("A");
+    const real = gradeFlowRow(row, null, NOW);
+    expect(real.grade).not.toBe("A");
+    expect(real.grade).not.toBe("B");
+    expect(chooseAlerts({
+      candidates: [{ row, verdict: real }],
+      alreadySentContractKeys: new Set(),
+      alreadySentSetupKeys: new Set(),
+      limit: 5,
+    })).toEqual([]);
+    expect(experimentProbe(shortRow({ dte: 0, expiration: "2026-12-16" }), null, NOW)).toBeNull();
+    expect(experimentWindow(0)).toBeNull();
+
+    const imminent = shortRow({
+      earnings: { status: "known", date: "2026-12-17", timing: "before-market", estimated: false },
+    });
+    expect(gradeFlowRow(imminent, null, NOW).verdict).toBe("SKIP");
+    expect(experimentProbe(imminent, null, NOW)).toBeNull();
+  });
+
+  it("caps each cohort on its own and shares the leftover quote slots", () => {
+    const shorts = [5, 6, 7].map((strike, index) => shortRow({
+      strike,
+      id: `NVDA|2026-12-21|${strike}|call`,
+      score: 100 - index,
+    }));
+    const longs = [104, 105].map((strike, index) => longRow({
+      strike,
+      id: `NVDA|2027-02-04|${strike}|call`,
+      score: 40 - index,
+    }));
+    const picked = chooseExperimental({
+      rows: shorts.concat(longs),
+      consecutiveLosses: null,
+      now: NOW,
+      existing: [],
+    });
+    expect(picked.filter((pick) => pick.cohort === "experiment-short")).toHaveLength(EXPERIMENT_SHORT_DTE.opensPerRun);
+    expect(picked.filter((pick) => pick.cohort === "experiment")).toHaveLength(EXPERIMENT_DTE.opensPerRun);
+
+    const openedShort = shorts.map((row) => experimentalShadow(row, "A", NOW)).filter((row): row is ShadowTrade => row != null);
+    expect(openedShort).toHaveLength(3);
+    const longOnly = chooseExperimental({
+      rows: shorts.concat(longs),
+      consecutiveLosses: null,
+      now: NOW,
+      existing: openedShort.concat(openedShort.slice(0, 1)).map((row, index) => ({ ...row, id: `${row.id}-${index}` })),
+      limit: 2,
+    });
+    expect(longOnly.every((pick) => pick.cohort === "experiment")).toBe(true);
+    expect(longOnly).toHaveLength(EXPERIMENT_DTE.opensPerRun);
+
+    const fourShort = [1, 2, 3, 4].map((n) => {
+      const row = experimentalShadow(shortRow({ strike: n, id: `NVDA|2026-12-21|${n}|call` }), "A", NOW);
+      if (!row) throw new Error("expected a short shadow");
+      return { ...row, id: `short-day-${n}` };
+    });
+    const afterDaily = chooseExperimental({
+      rows: shorts.concat(longs),
+      consecutiveLosses: null,
+      now: NOW,
+      existing: fourShort,
+    });
+    expect(afterDaily.every((pick) => pick.cohort === "experiment")).toBe(true);
+    expect(afterDaily).toHaveLength(EXPERIMENT_DTE.opensPerRun);
+
+    const tests = fourShort.concat([104, 105, 106, 107].map((strike) => testShadow(strike)));
+    const quoted = shadowsToQuote(tests);
+    expect(quoted).toHaveLength(EXPERIMENT_DTE.quotesPerRun);
+    expect(quoted.length).toBeLessThan(8);
+  });
+
+  it("keeps the short cohort out of A/B totals, trust, and Telegram rows", () => {
+    const shadow = experimentalShadow(shortRow(), "A", NOW);
+    if (!shadow) throw new Error("expected a short shadow");
+    expect(shadow.cohort).toBe("experiment-short");
+    expect(shadow.grade).toBe("test");
+    expect(shadow.experimentLabel).toBe("Test: 1-13 DTE");
+    const closed = applyShadowQuote(shadow, { mid: 2.9, bid: 2.8 }, NOW);
+    expect(closed.exitReason).toBe("profit");
+    const card = summarizeShadows([closed], new Set(), NOW);
+    expect(card.resolved).toBe(0);
+    expect(card.experimental.resolved).toBe(0);
+    expect(card.experimentalShort.resolved).toBe(1);
+    expect(card.experimentalShort.label).toBe("Test: 1-13 DTE");
+    expect(card.experimentalShort.rows).toHaveLength(1);
+    expect(card.rows.some((row) => row.cohort === "experiment-short")).toBe(false);
+    expect(card.tooFew).toBe(true);
+
+    const csv = shadowsToCsv([closed], new Set());
+    expect(csv).toContain("experiment-short");
+    expect(csv).toContain(",no");
+    const parsed = parseShadowBook(JSON.stringify({ version: 1, records: [closed] })).records[0];
+    expect(parsed.cohort).toBe("experiment-short");
+    expect(parsed.grade).toBe("test");
+    expect(parsed.probeGrade).toBe("A");
+
+    const legacy = JSON.parse(JSON.stringify(closed)) as Record<string, unknown>;
+    delete legacy.cohort;
+    delete legacy.experimentLabel;
+    legacy.grade = "test";
+    const kept = parseShadowBook(JSON.stringify({ version: 1, records: [legacy] })).records[0];
+    expect(kept.cohort).toBe("experiment");
+    expect(kept.experimentLabel).toBe(EXPERIMENT_DTE.label);
+  });
+});
+
 function longRow(over: Partial<FlowRow> = {}): FlowRow {
   return {
     id: "NVDA|2027-02-04|104|call",
@@ -277,6 +400,15 @@ function longRow(over: Partial<FlowRow> = {}): FlowRow {
     score: 80,
     ...over,
   };
+}
+
+function shortRow(over: Partial<FlowRow> = {}): FlowRow {
+  return longRow({
+    id: "NVDA|2026-12-21|104|call",
+    expiration: "2026-12-21",
+    dte: 5,
+    ...over,
+  });
 }
 
 function levels(): KeyLevels {

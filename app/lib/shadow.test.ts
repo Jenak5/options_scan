@@ -11,6 +11,7 @@ import {
   whatIfFromShadows,
 } from "@/app/lib/exitWhatIf";
 import { SHADOW_QUOTES_PER_RUN } from "@/app/lib/flow";
+import { chicagoCloseBeforeExpirationMs } from "@/app/lib/marketHours";
 import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import {
   clearMemoryStoreForTests,
@@ -29,6 +30,7 @@ import {
   mergeShadowBooks,
   parseShadowBook,
   SHADOW_MARK_CAP,
+  shadowExitLabel,
   shadowFromAlert,
   shadowsToCsv,
   shadowsToQuote,
@@ -197,6 +199,52 @@ describe("shadow exits", () => {
     expect(stale.exitStale).toBe(true);
     expect(stale.exitPrice).toBe(1.2);
     expect(stale.exitQuote).toBe("bid");
+
+    const short = openShadow({
+      cohort: "experiment-short",
+      grade: "test",
+      experimentLabel: "Test: 1-13 DTE",
+      expiration: "2026-10-08",
+    });
+    const stillOpen = applyShadowQuote(short, { mid: 2.2, bid: 2.1 }, OPEN);
+    expect(stillOpen.status).toBe("open");
+    expect(stillOpen.exitReason).toBeNull();
+    const dayBefore = applyShadowQuote(short, { mid: 2.2, bid: 2.1 }, new Date("2026-10-07T19:00:00Z"));
+    expect(dayBefore.status).toBe("open");
+    const preExpiry = applyShadowQuote(short, { mid: 2.2, bid: 2.1 }, new Date("2026-10-07T20:00:00Z"));
+    expect(preExpiry.exitReason).toBe("expiration");
+    expect(shadowExitLabel(preExpiry.exitReason, preExpiry.cohort)).toMatch(/trading day before expiration/);
+
+    const oneDay = openShadow({
+      cohort: "experiment-short",
+      grade: "test",
+      expiration: "2026-10-02",
+    });
+    expect(applyShadowQuote(oneDay, { mid: 2.2, bid: 2.1 }, new Date("2026-10-01T19:00:00Z")).status).toBe("open");
+    const sameDay = applyShadowQuote(oneDay, { mid: 2.2, bid: 2.1 }, new Date("2026-10-01T20:00:00Z"));
+    expect(sameDay.exitReason).toBe("expiration");
+
+    const holidayOpen = new Date("2026-11-23T16:00:00Z");
+    const holidayShadow = openShadow({
+      cohort: "experiment-short",
+      grade: "test",
+      expiration: "2026-11-27",
+      openedAt: holidayOpen.getTime(),
+    });
+    expect(chicagoCloseBeforeExpirationMs("2026-11-27")).toBe(Date.parse("2026-11-25T21:00:00Z"));
+    expect(applyShadowQuote(holidayShadow, { mid: 2.2, bid: 2.1 }, new Date("2026-11-24T21:00:00Z")).status).toBe("open");
+    expect(applyShadowQuote(holidayShadow, { mid: 2.2, bid: 2.1 }, new Date("2026-11-25T20:00:00Z")).status).toBe("open");
+    const holidayClose = applyShadowQuote(holidayShadow, { mid: 2.2, bid: 2.1 }, new Date("2026-11-25T21:00:00Z"));
+    expect(holidayClose.exitReason).toBe("expiration");
+
+    expect(applyShadowQuote(short, { mid: 2.8, bid: 2.7 }, OPEN).exitReason).toBe("profit");
+    expect(applyShadowQuote(short, { mid: 1.5, bid: 1.45 }, OPEN).exitReason).toBe("stop");
+    const flatShort = openShadow({
+      cohort: "experiment-short",
+      grade: "test",
+      expiration: "2026-10-16",
+    });
+    expect(applyShadowQuote(flatShort, { mid: 2, bid: 1.95 }, THREE_DAYS).exitReason).toBe("flat");
   });
 
   it("does not tick the 3-day flat stop on Thanksgiving, and does tick the half day", () => {
@@ -359,7 +407,7 @@ describe("shadow scorecard", () => {
     expect(shadowPathStillNeeded(tracked, new Date("2026-10-12T15:00:00Z"))).toBe(false);
     expect(summarizeShadows([tracked], new Set(), OPEN).totalPnl).toBeCloseTo(summarizeShadows([resolved], new Set(), OPEN).totalPnl, 6);
 
-    expect(SHADOW_MARK_CAP).toBeGreaterThanOrEqual(8 * 27);
+    expect(SHADOW_MARK_CAP).toBeGreaterThanOrEqual(8 * 82);
     let held = stopped;
     for (let i = 0; i < SHADOW_MARK_CAP - 1; i++) {
       held = appendShadowPathMark(held, { mid: 1.4, bid: 1.35 }, new Date(OPEN.getTime() + (i + 1) * 60_000));

@@ -32,7 +32,7 @@ export const maxDuration = 300;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // AUTOMATED ALERT CRON  — /api/cron
-// Vercel cron hits this every 15 minutes from 13:30 through 21:00 UTC on
+// Vercel cron hits this every 5 minutes from 13:30 through 21:00 UTC on
 // weekdays (see vercel.json). That window covers Central market hours in
 // both daylight and standard time. This handler then keeps only
 // 8:30am–3:00pm America/Chicago, Monday–Friday, and returns before any
@@ -238,7 +238,7 @@ async function handleCron(request: NextRequest) {
   if (slot !== "ok") {
     summary.reason = slot === "busy"
       ? "Another scan is already running."
-      : "A scan already finished in the last 10 minutes.";
+      : "A scan already ran in this 5-minute slot.";
     console.info(formatScanRunLine(summary));
     return NextResponse.json({ skipped: true, reason: summary.reason });
   }
@@ -298,10 +298,10 @@ async function handleCron(request: NextRequest) {
 
     try {
       const experiment = await recordExperimentalShadows(scan.rows, losses, now);
-      log.push(`Test 43-60 DTE: ${experiment.opened} new shadow${experiment.opened === 1 ? "" : "s"} (not alerted)`);
+      log.push(`Test shadows: ${experiment.opened} new (43–60 and 1–13 DTE, not alerted)`);
     } catch (err) {
       rethrowIfSchwabOnly(err);
-      log.push("Test 43-60 DTE update failed");
+      log.push("Test shadow update failed");
     }
 
     const minPremium = alertScanMinPremium(process.env.ALERT_MIN_PREMIUM);

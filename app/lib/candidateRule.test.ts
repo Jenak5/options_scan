@@ -149,6 +149,49 @@ describe("shadow rule report", () => {
     expect(report.skippedNoCandles).toBe(1);
   });
 
+  it("closes a 1-13 day test at the trading-day close before expiration", () => {
+    const early = bars([[1, 2.05, 2.2, 2.1]]);
+    const ab = replayRule({ ...input(early), expiration: "2026-10-08" }, LIVE_RULE);
+    expect(ab?.reason).toBe("lastWeek");
+    const held = replayRule({ ...input(early), expiration: "2026-10-08", cohort: "experiment-short" }, LIVE_RULE);
+    expect(held).toBeNull();
+    const due = Date.parse("2026-10-07T20:00:00Z");
+    const closed = replayRule({
+      entryPrice: 2,
+      openedAt: OPEN,
+      expiration: "2026-10-08",
+      cohort: "experiment-short",
+      candles: [{ t: due, o: 2.1, h: 2.2, l: 2.05, c: 2.15 }],
+      delta: 0.5,
+      underlying: 100,
+    }, LIVE_RULE);
+    expect(closed?.reason).toBe("preExpiry");
+    expect(closed?.at).toBe(due);
+
+    const holidayOpen = Date.parse("2026-11-23T16:00:00Z");
+    const tuesday = replayRule({
+      entryPrice: 2,
+      openedAt: holidayOpen,
+      expiration: "2026-11-27",
+      cohort: "experiment-short",
+      candles: [{ t: Date.parse("2026-11-24T21:00:00Z"), o: 2.1, h: 2.2, l: 2.05, c: 2.15 }],
+      delta: 0.5,
+      underlying: 100,
+    }, LIVE_RULE);
+    expect(tuesday).toBeNull();
+    const beforeHoliday = replayRule({
+      entryPrice: 2,
+      openedAt: holidayOpen,
+      expiration: "2026-11-27",
+      cohort: "experiment-short",
+      candles: [{ t: Date.parse("2026-11-25T21:00:00Z"), o: 2.1, h: 2.2, l: 2.05, c: 2.15 }],
+      delta: 0.5,
+      underlying: 100,
+    }, LIVE_RULE);
+    expect(beforeHoliday?.reason).toBe("preExpiry");
+    expect(beforeHoliday?.at).toBe(Date.parse("2026-11-25T21:00:00Z"));
+  });
+
   it("compares both columns on the same candles, with tracked as reference", () => {
     const s1 = shadow("a1", { pnlDollars: -60 });
     const candles = new Map<string, CandleBar[]>([[contractKey(s1), bars([[1, 2.0, 2.9], [2, 2.3, 2.5]])]]);

@@ -30,6 +30,7 @@ import {
   type ShadowScorecard,
   type ShadowTrade,
 } from "@/app/lib/shadow";
+import { MARK_REUSE_MS } from "@/app/lib/cronCadence";
 import {
   readShadowBookText,
   readTradeLogText,
@@ -102,12 +103,10 @@ export async function shadowCsv(): Promise<string> {
  * Open a shadow row for every saved A or B that does not have one yet.
  * No Schwab quote. A later pass marks the open rows.
  */
-/** Skip a second mark when this shadow was already marked a few minutes ago. */
-const MARK_REUSE_MS = 10 * 60 * 1000;
-
 /**
  * Mark open shadows from chain rows this scan already scored.
- * No extra Schwab read. A shadow marked in the last 10 minutes is left as it is.
+ * No extra Schwab read. A shadow marked inside the reuse window is left as it is.
+ * That window is one minute under the 5-minute cadence, so the next scheduled scan still marks.
  */
 export async function markShadowsFromRows(
   rows: readonly FlowRow[],

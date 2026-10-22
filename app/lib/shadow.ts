@@ -1,12 +1,12 @@
-import { EXPERIMENT_DTE, OUTCOME_RULES, TRADE_RULES } from "@/app/lib/alertConfig";
+import { EXPERIMENT_DTE, EXPERIMENT_SHORT_DTE, OUTCOME_RULES, TRADE_RULES } from "@/app/lib/alertConfig";
 import { parseRulesVersion } from "@/app/lib/rulesVersion";
 import type { ShadowMark } from "@/app/lib/exitWhatIf";
 import { backfillFeatures, parseFeatureSnapshot, type AlertFeatureSnapshot } from "@/app/lib/alertFeatures";
 import type { StoredAlert } from "@/app/lib/alertBook";
-import { EXPERIMENT_SECTION_NOTE, experimentTrustNote } from "@/app/lib/experiment";
+import { EXPERIMENT_SECTION_NOTE, EXPERIMENT_SHORT_SECTION_NOTE, experimentShortTrustNote, experimentTrustNote } from "@/app/lib/experiment";
 import { planExits } from "@/app/lib/exits";
 import { calendarDaysBetween, newYorkDate, SHADOW_QUOTES_PER_RUN } from "@/app/lib/flow";
-import { chicagoTradingDaysElapsed } from "@/app/lib/marketHours";
+import { chicagoCloseBeforeExpirationMs, chicagoTradingDaysElapsed } from "@/app/lib/marketHours";
 import { parseSpyTrend, spyTrendFromDirection, type IndexDirection } from "@/app/lib/marketContext";
 import { mergeResearchTracks, parseResearchTracks, type ResearchTrack } from "@/app/lib/researchTrack";
 
@@ -14,7 +14,7 @@ import { mergeResearchTracks, parseResearchTracks, type ResearchTrack } from "@/
  * Shadow outcome for an A or B alert.
  * One contract bought at the alert ask. No order is placed.
  * Quotes are the chain midpoint, or the bid when the midpoint is missing.
- * A 15-minute snapshot is not a fill.
+ * A 5-minute snapshot is not a fill.
  */
 
 export const SHADOW_MIN_TRUST = 30;
@@ -24,19 +24,19 @@ export const LAST_WEEK_CALENDAR_DAYS = 7;
 
 /**
  * Marks kept on one shadow. Older marks are dropped from the front.
- * The entry session plus 7 later trading days of 15-minute marks,
- * including the cash-close pass, is 216 quotes. 220 leaves that path intact
+ * The entry session plus 7 later trading days of 5-minute marks,
+ * including the cash-close pass, is 656 quotes. 680 leaves that path intact
  * so a what-if replay can still see the live exit.
  */
-export const SHADOW_MARK_CAP = 220;
+export const SHADOW_MARK_CAP = 680;
 
 export const SHADOW_ESTIMATE_NOTE =
-  "These results are estimates from quotes (the midpoint, or the bid when the midpoint is missing), not fills. Open shadows are marked every 15 minutes, and the option chain is only a snapshot, so an exit can show up late.";
+  "These results are estimates from quotes (the midpoint, or the bid when the midpoint is missing), not fills. Open shadows are marked every 5 minutes, and the option chain is only a snapshot, so an exit can show up late.";
 
 export type ShadowExitReason = "profit" | "stop" | "flat" | "expiration";
 export type ShadowQuoteSource = "mid" | "bid";
 export type ShadowGrade = "A" | "B" | "test";
-export type ShadowCohort = "ab" | "experiment";
+export type ShadowCohort = "ab" | "experiment" | "experiment-short";
 
 export interface ShadowTrade {
   id: string;
@@ -46,7 +46,7 @@ export interface ShadowTrade {
   putCall: "call" | "put";
   strike: number;
   expiration: string;
-  /** A or B for a real alert. "test" is the 43–60 day experiment and is not a grade. */
+  /** A or B for a real alert. "test" is a DTE experiment and is not a grade. */
   grade: ShadowGrade;
   /** Missing on shadows saved before the test. Those stay in the A/B totals. */
   cohort: ShadowCohort;
@@ -188,6 +188,8 @@ export interface ShadowScorecard {
   rows: ShadowListItem[];
   /** 43–60 day test. Left out of the totals above. */
   experimental: ExperimentSection;
+  /** 1–13 day test. Left out of the totals above and out of the 43–60 section. */
+  experimentalShort: ExperimentSection;
 }
 
 const ID_PATTERN = /^[A-Za-z0-9_.:|-]{8,180}$/;
@@ -219,12 +221,15 @@ export function shadowSampleNote(resolved: number): string {
   return `${resolved} resolved alerts.`;
 }
 
-export function shadowExitLabel(reason: ShadowExitReason | null): string {
+export function shadowExitLabel(reason: ShadowExitReason | null, cohort?: ShadowCohort): string {
   if (reason === "profit") {
     return "Profit target. One contract, so half off closes the whole trade.";
   }
   if (reason === "stop") return "Stop.";
   if (reason === "flat") return "Flat after 3 trading days.";
+  if (reason === "expiration" && cohort === "experiment-short") {
+    return "Out at the 3:00 PM Central close on the trading day before expiration.";
+  }
   if (reason === "expiration") return "Out before the last week to expiration.";
   return "";
 }
@@ -275,8 +280,13 @@ export function shadowFromAlert(alert: StoredAlert): ShadowTrade | null {
   return row;
 }
 
+export function isShortExperimentShadow(row: Pick<ShadowTrade, "cohort">): boolean {
+  return row.cohort === "experiment-short";
+}
+
+/** Both test cohorts. Never an A or a B, never sent, and left out of the 30-trade trust count. */
 export function isExperimentShadow(row: Pick<ShadowTrade, "cohort" | "grade">): boolean {
-  return row.cohort === "experiment" || row.grade === "test";
+  return row.cohort === "experiment" || row.cohort === "experiment-short" || row.grade === "test";
 }
 
 /** Append rows and keep the same book cap the A/B shadows already use. */
@@ -390,8 +400,8 @@ export function contractKey(row: Pick<ShadowTrade, "ticker" | "expiration" | "st
 
 /**
  * Open shadows to quote this run. Extra contracts past the cap wait for a later run.
- * A/B shadows are quoted first. Test shadows use only the leftover slots, and at most
- * EXPERIMENT_DTE.quotesPerRun of them, so the run stays inside the existing quote cap.
+ * A/B shadows are quoted first. Both test cohorts share the leftover slots, and at most
+ * EXPERIMENT_DTE.quotesPerRun of them together, so the run stays inside the existing quote cap.
  */
 export function shadowsToQuote(
   rows: readonly ShadowTrade[],
@@ -469,22 +479,29 @@ export function summarizeShadows(
   const byTicker: Array<ShadowBucket & { winDollars: number; lossDollars: number }> = [];
   const overall = emptyBucket("all");
   const testOverall = emptyBucket("test");
+  const shortOverall = emptyBucket("test-short");
   let open = 0;
   let excludedPaper = 0;
   let unpriced = 0;
   let testOpen = 0;
+  let shortOpen = 0;
 
   for (let i = 0; i < records.length; i++) {
     const row = records[i];
-    if (isExperimentShadow(row)) {
+    const section = experimentSectionKind(row);
+    if (section) {
       const paper = paperAlertIds.has(row.alertId);
       if (row.status === "open") {
-        if (!paper) testOpen += 1;
+        if (!paper) {
+          if (section === "short") shortOpen += 1;
+          else testOpen += 1;
+        }
         continue;
       }
       if (paper) continue;
       if (row.pnlDollars == null || row.exitPrice == null) continue;
-      addBucket([testOverall], "test", row.pnlDollars, resultOf(row.pnlDollars));
+      const bucket = section === "short" ? shortOverall : testOverall;
+      addBucket([bucket], bucket.key, row.pnlDollars, resultOf(row.pnlDollars));
       continue;
     }
     const paper = paperAlertIds.has(row.alertId);
@@ -526,22 +543,51 @@ export function summarizeShadows(
     byTicker: byTicker.map(publishBucket),
     byRight: byRight.map(publishBucket),
     rows: recentRows(records, paperAlertIds, now),
-    experimental: {
-      label: EXPERIMENT_DTE.label,
-      note: EXPERIMENT_SECTION_NOTE,
-      trustNote: experimentTrustNote(testOverall.closed),
-      resolved: testOverall.closed,
-      open: testOpen,
-      tooFew: testOverall.closed < EXPERIMENT_DTE.minTrust,
-      wins: testOverall.wins,
-      losses: testOverall.losses,
-      flats: testOverall.flats,
-      winRate: testOverall.winRate,
-      averageWin: testOverall.averageWin,
-      averageLoss: testOverall.averageLoss,
-      totalPnl: testOverall.pnlDollars,
-      rows: experimentRows(records, paperAlertIds, now),
-    },
+    experimental: experimentSection(
+      EXPERIMENT_DTE.label,
+      EXPERIMENT_SECTION_NOTE,
+      experimentTrustNote(testOverall.closed),
+      testOverall,
+      testOpen,
+      EXPERIMENT_DTE.minTrust,
+      experimentRows(records, paperAlertIds, now, "long"),
+    ),
+    experimentalShort: experimentSection(
+      EXPERIMENT_SHORT_DTE.label,
+      EXPERIMENT_SHORT_SECTION_NOTE,
+      experimentShortTrustNote(shortOverall.closed),
+      shortOverall,
+      shortOpen,
+      EXPERIMENT_SHORT_DTE.minTrust,
+      experimentRows(records, paperAlertIds, now, "short"),
+    ),
+  };
+}
+
+function experimentSection(
+  label: string,
+  note: string,
+  trustNote: string,
+  bucket: ShadowBucket & { winDollars: number; lossDollars: number },
+  open: number,
+  minTrust: number,
+  rows: ShadowListItem[],
+): ExperimentSection {
+  return {
+    label,
+    note,
+    trustNote,
+    resolved: bucket.closed,
+    open,
+    tooFew: bucket.closed < minTrust,
+    wins: bucket.wins,
+    losses: bucket.losses,
+    flats: bucket.flats,
+    winRate: bucket.winRate,
+    averageWin: bucket.averageWin,
+    averageLoss: bucket.averageLoss,
+    totalPnl: bucket.pnlDollars,
+    rows,
   };
 }
 
@@ -564,7 +610,7 @@ export function shadowsToCsv(
       row.ticker,
       row.putCall,
       row.grade,
-      isExperimentShadow(row) ? "experiment" : "ab",
+      row.cohort === "experiment-short" ? "experiment-short" : isExperimentShadow(row) ? "experiment" : "ab",
       row.experimentLabel ?? "",
       row.probeGrade ?? "",
       String(row.strike),
@@ -634,7 +680,16 @@ function decideExit(
       return { reason: "profit", price: marked.price, source: marked.source, stale: false };
     }
   }
-  if (dte != null && dte <= LAST_WEEK_CALENDAR_DAYS) {
+  if (isShortExperimentShadow(row)) {
+    const due = chicagoCloseBeforeExpirationMs(row.expiration);
+    if (due != null && now.getTime() >= due) {
+      if (marked) return { reason: "expiration", price: marked.price, source: marked.source, stale: false };
+      if (row.lastMark != null && row.lastMark > 0 && row.lastMarkSource) {
+        return { reason: "expiration", price: row.lastMark, source: row.lastMarkSource, stale: true };
+      }
+      return { reason: "expiration", price: null, source: null, stale: false };
+    }
+  } else if (dte != null && dte <= LAST_WEEK_CALENDAR_DAYS) {
     if (marked) return { reason: "expiration", price: marked.price, source: marked.source, stale: false };
     if (dte < 0 && row.lastMark != null && row.lastMark > 0 && row.lastMarkSource) {
       return { reason: "expiration", price: row.lastMark, source: row.lastMarkSource, stale: true };
@@ -678,8 +733,13 @@ function recentRows(records: readonly ShadowTrade[], paperAlertIds: ReadonlySet<
   return picked.map((row) => toListItem(row, paperAlertIds, now));
 }
 
-function experimentRows(records: readonly ShadowTrade[], paperAlertIds: ReadonlySet<string>, now: Date): ShadowListItem[] {
-  const tests = records.filter((row) => isExperimentShadow(row));
+function experimentRows(
+  records: readonly ShadowTrade[],
+  paperAlertIds: ReadonlySet<string>,
+  now: Date,
+  section: "long" | "short",
+): ShadowListItem[] {
+  const tests = records.filter((row) => experimentSectionKind(row) === section);
   const open = tests.filter((row) => row.status === "open").slice().sort((a, b) => b.openedAt - a.openedAt);
   const closed = tests.filter((row) => row.status === "closed").slice().sort((a, b) => (b.closedAt ?? 0) - (a.closedAt ?? 0));
   return open.concat(closed).slice(0, RECENT_LIMIT).map((row) => toListItem(row, paperAlertIds, now));
@@ -699,14 +759,14 @@ function toListItem(row: ShadowTrade, paperAlertIds: ReadonlySet<string>, now: D
     ticker: row.ticker,
     putCall: row.putCall,
     grade: row.grade,
-    cohort: isExperimentShadow(row) ? "experiment" : "ab",
+    cohort: listedCohort(row),
     experimentLabel: row.experimentLabel,
     probeNote: probeNote(row),
     strike: row.strike,
     expiration: row.expiration,
     status: row.status,
     exitReason: row.exitReason,
-    exitLabel: shadowExitLabel(row.exitReason),
+    exitLabel: shadowExitLabel(row.exitReason, row.cohort),
     exitPrice: row.exitPrice,
     exitQuote: row.exitQuote,
     exitStale: row.exitStale,
@@ -723,6 +783,18 @@ function toListItem(row: ShadowTrade, paperAlertIds: ReadonlySet<string>, now: D
     counted,
     countNote,
   };
+}
+
+function listedCohort(row: Pick<ShadowTrade, "cohort" | "grade">): ShadowCohort {
+  if (row.cohort === "experiment-short") return "experiment-short";
+  if (isExperimentShadow(row)) return "experiment";
+  return "ab";
+}
+
+function experimentSectionKind(row: Pick<ShadowTrade, "cohort" | "grade">): "long" | "short" | null {
+  if (row.cohort === "experiment-short") return "short";
+  if (row.cohort === "experiment" || row.grade === "test") return "long";
+  return null;
 }
 
 function probeNote(row: ShadowTrade): string | null {
@@ -859,8 +931,12 @@ function parseShadow(value: unknown): ShadowTrade | null {
   if (!DATE_PATTERN.test(expiration)) return null;
   const grade: ShadowGrade | null = row.grade === "A" || row.grade === "B" || row.grade === "test" ? row.grade : null;
   if (!grade) return null;
-  const cohort: ShadowCohort = row.cohort === "experiment" || grade === "test" ? "experiment" : "ab";
-  if (cohort === "experiment" && grade !== "test") return null;
+  const cohort: ShadowCohort = row.cohort === "experiment-short"
+    ? "experiment-short"
+    : row.cohort === "experiment" || grade === "test"
+      ? "experiment"
+      : "ab";
+  if ((cohort === "experiment" || cohort === "experiment-short") && grade !== "test") return null;
   if (cohort === "ab" && grade === "test") return null;
   const probeGrade = row.probeGrade === "A" || row.probeGrade === "B" ? row.probeGrade : null;
   if (row.contracts !== 1) return null;
@@ -892,7 +968,7 @@ function parseShadow(value: unknown): ShadowTrade | null {
     grade,
     cohort,
     experimentLabel: experimentLabelOf(row.experimentLabel, cohort),
-    probeGrade: cohort === "experiment" ? probeGrade : null,
+    probeGrade: cohort === "ab" ? null : probeGrade,
     features: parseFeatureSnapshot(row.features),
     rulesVersion: parseRulesVersion(row.rulesVersion),
     marks: parseMarks(row.marks),
@@ -925,9 +1001,9 @@ function parseShadow(value: unknown): ShadowTrade | null {
 }
 
 function experimentLabelOf(value: unknown, cohort: ShadowCohort): string | null {
-  if (cohort !== "experiment") return null;
+  if (cohort !== "experiment" && cohort !== "experiment-short") return null;
   if (typeof value === "string" && value.trim()) return value.trim().slice(0, 80);
-  return EXPERIMENT_DTE.label;
+  return cohort === "experiment-short" ? EXPERIMENT_SHORT_DTE.label : EXPERIMENT_DTE.label;
 }
 
 function asTime(value: unknown): number | null {

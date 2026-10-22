@@ -9,6 +9,7 @@ import {
   scanFreshness,
   scanIsStale,
   scanSlotDecision,
+  scanSlotKey,
   skipNotifyDue,
   skipTelegramText,
   skipWarning,
@@ -27,7 +28,7 @@ function health(over: Partial<ScanHealth> = {}): ScanHealth {
 }
 
 describe("scan staleness", () => {
-  it("warns during market hours when the last success is missing or older than 30 minutes", () => {
+  it("warns during market hours when the last success is missing or older than two scans", () => {
     expect(scanIsStale(SESSION, null, true)).toBe(true);
     expect(scanIsStale(SESSION, SESSION - SCAN_STALE_MS - 1, true)).toBe(true);
     expect(scanIsStale(SESSION, SESSION - SCAN_STALE_MS + 60_000, true)).toBe(false);
@@ -80,7 +81,8 @@ describe("connection notice", () => {
     expect(notice.lines.join(" ")).not.toMatch(/30 minutes/);
   });
 
-  it("warns when the session has gone more than 30 minutes without a successful scan", () => {
+  it("warns when the session has gone more than two scans without a successful scan", () => {
+    const gap = SCAN_STALE_MS + 60_000;
     const notice = connectionNotice({
       configured: true,
       connected: true,
@@ -88,11 +90,11 @@ describe("connection notice", () => {
       warnRefreshSoon: false,
       refreshDaysLeft: 5,
       now: SESSION,
-      health: health({ lastSuccessAt: SESSION - 31 * 60_000 }),
+      health: health({ lastSuccessAt: SESSION - gap }),
     });
     expect(notice.severity).toBe("warn");
-    expect(notice.lines.join(" ")).toMatch(/31 minutes ago/);
-    expect(notice.lines.join(" ")).toMatch(/30 minutes/);
+    expect(notice.lines.join(" ")).toMatch(/11 minutes ago/);
+    expect(notice.lines.join(" ")).toMatch(/10 minutes/);
   });
 
   it("stays quiet on a full-day holiday during the usual session", () => {
@@ -197,6 +199,13 @@ describe("scan slot", () => {
     }), now)).toBe("ok");
     expect(scanSlotDecision(health({ lastSuccessAt: now - 60_000 }), now)).toBe("recent");
     expect(scanSlotDecision(health({ lastSuccessAt: now - SCAN_RECENT_SUCCESS_MS }), now)).toBe("ok");
+    expect(scanSlotDecision(health({ lastSuccessAt: now - 4 * 60_000 }), now)).toBe("ok");
+    expect(scanSlotDecision(health({ runStartedAt: now - 4 * 60_000 }), now)).toBe("busy");
+    const sameSlot = Date.parse("2026-10-06T15:00:00Z");
+    expect(scanSlotKey(sameSlot)).toBe(scanSlotKey(sameSlot + 3 * 60_000));
+    expect(scanSlotDecision(health({ lastSuccessAt: sameSlot }), sameSlot + 3 * 60_000)).toBe("recent");
+    expect(scanSlotDecision(health({ lastSuccessAt: sameSlot }), sameSlot + 4 * 60_000)).toBe("recent");
+    expect(scanSlotDecision(health({ lastSuccessAt: sameSlot }), sameSlot + 5 * 60_000)).toBe("ok");
   });
 });
 

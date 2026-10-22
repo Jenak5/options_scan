@@ -1,3 +1,4 @@
+import { CRON_CADENCE_MINUTES, SCAN_SLOT_DEDUPE_MS, SCAN_STALE_AFTER_MS } from "@/app/lib/cronCadence";
 import { isChicagoMarketHours, isMarketDay } from "@/app/lib/marketHours";
 
 /**
@@ -6,12 +7,24 @@ import { isChicagoMarketHours, isMarketDay } from "@/app/lib/marketHours";
  * Nothing here places an order or calls a broker.
  */
 
-export const SCAN_STALE_MS = 30 * 60 * 1000;
+/** Two missed scans. The banner reads this. */
+export const SCAN_STALE_MS = SCAN_STALE_AFTER_MS;
 export const SKIP_NOTIFY_COOLDOWN_MS = 30 * 60 * 1000;
-/** A second caller waits this long before treating a started run as abandoned. */
+/** A second caller waits this long before treating a started run as abandoned. Longer than one 5-minute slot. */
 export const SCAN_IN_PROGRESS_MS = 6 * 60 * 1000;
-/** A finished success blocks another Schwab pass so two schedulers do not double the request budget. */
-export const SCAN_RECENT_SUCCESS_MS = 10 * 60 * 1000;
+/**
+ * A finished success blocks another Schwab pass inside this window,
+ * and also for the rest of the same 5-minute UTC slot.
+ */
+export const SCAN_RECENT_SUCCESS_MS = SCAN_SLOT_DEDUPE_MS;
+
+/** UTC year-month-day-hour and the minute floored to the scan cadence. */
+export function scanSlotKey(ms: number): string {
+  if (!Number.isFinite(ms)) return "";
+  const date = new Date(ms);
+  const minute = Math.floor(date.getUTCMinutes() / CRON_CADENCE_MINUTES) * CRON_CADENCE_MINUTES;
+  return `${date.getUTCFullYear()}-${date.getUTCMonth() + 1}-${date.getUTCDate()}-${date.getUTCHours()}-${minute}`;
+}
 
 export type ScanOutcome = "success" | "skipped" | "failed";
 export type ScanSlot = "ok" | "busy" | "recent";
@@ -100,9 +113,11 @@ export function parseScanHealth(value: unknown): ScanHealth {
 }
 
 /**
- * One Schwab pass at a time. A run that started and has not finished holds the slot.
- * A success inside the recent window holds it too, so Vercel cron and a backup caller
- * do not both read the chains.
+ * One Schwab pass at a time. A run that started and has not finished holds the slot
+ * until SCAN_IN_PROGRESS_MS, which is longer than the 5-minute cadence.
+ * A finished success holds the same UTC 5-minute slot, and also the next
+ * SCAN_RECENT_SUCCESS_MS, so a retry cannot double-read the chains.
+ * The next scheduled slot is a different key and is outside that window, so it runs.
  */
 export function scanSlotDecision(health: ScanHealth, now: number): ScanSlot {
   const started = health.runStartedAt;
@@ -110,7 +125,10 @@ export function scanSlotDecision(health: ScanHealth, now: number): ScanSlot {
     if (health.lastRunAt == null || health.lastRunAt < started) return "busy";
   }
   const success = health.lastSuccessAt;
-  if (success != null && now >= success && now - success < SCAN_RECENT_SUCCESS_MS) return "recent";
+  if (success != null && now >= success) {
+    if (now - success < SCAN_RECENT_SUCCESS_MS) return "recent";
+    if (scanSlotKey(success) === scanSlotKey(now)) return "recent";
+  }
   return "ok";
 }
 
@@ -226,7 +244,8 @@ export function connectionNotice(input: {
     const when = input.health.lastSuccessAt == null
       ? "No successful scan has been recorded."
       : `The last successful scan was ${minutesAgo(input.now, input.health.lastSuccessAt)} minutes ago.`;
-    lines.push(`${when} During market hours a gap over 30 minutes means the scorecard and Learning mode are not getting new quotes.`);
+    const staleMinutes = Math.round(SCAN_STALE_MS / 60_000);
+    lines.push(`${when} During market hours a gap over ${staleMinutes} minutes means the scorecard and Learning mode are not getting new quotes.`);
   }
   if (input.showTastytrade && input.health.tastytradeOk === false && input.health.tastytradeMessage) {
     if (severity === "ok") severity = "warn";

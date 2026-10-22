@@ -1,24 +1,24 @@
 import { TRADE_RULES } from "@/app/lib/alertConfig";
 import type { CandleBar } from "@/app/lib/candleTypes";
 import { addCalendarDays, calendarDaysBetween, newYorkDate, SHADOW_QUOTES_PER_RUN } from "@/app/lib/flow";
-import { chicagoTradingDayCutoffMs, chicagoTradingDaysElapsed, PATH_MARK_TRADING_DAY_CAP } from "@/app/lib/marketHours";
+import { chicagoCloseBeforeExpirationMs, chicagoTradingDayCutoffMs, chicagoTradingDaysElapsed, PATH_MARK_TRADING_DAY_CAP } from "@/app/lib/marketHours";
 import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
-import { contractKey, isExperimentShadow, LAST_WEEK_CALENDAR_DAYS, SHADOW_MIN_TRUST, type ShadowTrade } from "@/app/lib/shadow";
+import { contractKey, isExperimentShadow, LAST_WEEK_CALENDAR_DAYS, SHADOW_MIN_TRUST, type ShadowCohort, type ShadowTrade } from "@/app/lib/shadow";
 import { chicagoYmd, newYorkMidnightMs, newYorkYmd } from "@/app/lib/zonedDay";
 
 /**
  * Replay stored shadow marks under other exit rules.
- * The live exits are not changed. A 15-minute snapshot can miss the touch,
+ * The live exits are not changed. A 5-minute snapshot can miss the touch,
  * so every result here is an estimate, not a fill.
  */
 
 export const WHAT_IF_NOTE =
-  "When stored 1-minute candles exist, the high and the low of each minute decide a stop or a target. A minute with no trade is a gap and is not filled in. Otherwise these are estimates from the stored 15-minute quote snapshots, not fills. A snapshot can miss the exact high or low between quotes. These rows are for comparison only. They do not change the live exits: take profit at +40%, stop at -25% with the loss capped at $875, out if it is still flat after 3 trading days, and out before the last week.";
+  "When stored 1-minute candles exist, the high and the low of each minute decide a stop or a target. A minute with no trade is a gap and is not filled in. Otherwise these are estimates from the stored 5-minute quote snapshots, not fills. A snapshot can miss the exact high or low between quotes. These rows are for comparison only. They do not change the live exits: take profit at +40%, stop at -25% with the loss capped at $875, out if it is still flat after 3 trading days, and out before the last week.";
 
 export const WHAT_IF_PATH_NOTE =
-  "Shadows that stored a quote path are included. A stored 1-minute candle series is included even when the 15-minute path is missing. Older shadows kept the best and worst price, not the path, so they are left out instead of guessed.";
+  "Shadows that stored a quote path are included. A stored 1-minute candle series is included even when the 5-minute path is missing. Older shadows kept the best and worst price, not the path, so they are left out instead of guessed.";
 
-/** Stop the 1-minute replay after this and finish the remaining paths on 15-minute marks. */
+/** Stop the 1-minute replay after this and finish the remaining paths on 5-minute marks. */
 export const WHAT_IF_CANDLE_BUDGET_MS = 45_000;
 
 export interface ShadowMark {
@@ -133,6 +133,7 @@ export function replayExit(
     openedAt: number;
     expiration: string;
     marks: readonly ShadowMark[];
+    cohort?: ShadowCohort | null;
   },
   rule: WhatIfScenario,
 ): ReplayExit | null {
@@ -144,7 +145,7 @@ export function replayExit(
   if (marks.length === 0) return null;
   const stopPrice = cappedStop(input.entryPrice, rule.stopFraction);
   const profitPrice = rule.profitFraction == null ? null : input.entryPrice * (1 + rule.profitFraction);
-  const lastWeekAt = lastWeekCutoffMs(input.expiration);
+  const lastWeekAt = lastWeekCutoffMs(input.expiration, input.cohort);
   const flatAt = flatCutoffMs(input.openedAt, rule.flatDays);
   let peak = input.entryPrice;
   let armed = false;
@@ -177,6 +178,7 @@ export function replayCandleExit(
     openedAt: number;
     expiration: string;
     candles: readonly CandleBar[];
+    cohort?: ShadowCohort | null;
   },
   rule: WhatIfScenario,
 ): CandleWalk | null {
@@ -186,7 +188,7 @@ export function replayCandleExit(
   return walkCandles(
     input.entryPrice,
     bars,
-    lastWeekCutoffMs(input.expiration),
+    lastWeekCutoffMs(input.expiration, input.cohort),
     flatCutoffMs(input.openedAt, rule.flatDays),
     rule,
   );
@@ -221,7 +223,7 @@ export function whatIfFromShadows(
     grades?: readonly string[];
     research?: readonly WhatIfPath[];
     candles?: ReadonlyMap<string, readonly CandleBar[]>;
-    /** Defaults to WHAT_IF_CANDLE_BUDGET_MS. Zero finishes every candle path on 15-minute marks. */
+    /** Defaults to WHAT_IF_CANDLE_BUDGET_MS. Zero finishes every candle path on 5-minute marks. */
     budgetMs?: number;
     nowMs?: () => number;
   },
@@ -231,7 +233,7 @@ export function whatIfFromShadows(
   let skipped = 0;
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    if (row.cohort === "experiment" || row.grade === "test") continue;
+    if (isExperimentShadow(row)) continue;
     if (grades && grades.indexOf(row.grade) === -1) continue;
     const marks = row.marks ?? [];
     const key = contractKey(row);
@@ -284,32 +286,32 @@ export function whatIfFromShadows(
 export function whatIfCoverageNote(candlePaths: number, markPaths: number, budgetPaths = 0): string {
   if (budgetPaths > 0) return budgetCoverageNote(candlePaths, markPaths, budgetPaths);
   if (candlePaths === 0 && markPaths === 0) {
-    return "No path has 1-minute candles or 15-minute marks yet.";
+    return "No path has 1-minute candles or 5-minute marks yet.";
   }
   if (candlePaths === 0) {
-    return "No stored 1-minute candles for these paths, so every row uses the 15-minute marks.";
+    return "No stored 1-minute candles for these paths, so every row uses the 5-minute marks.";
   }
   if (markPaths === 0) {
     return "Every included path uses 1-minute highs and lows. A minute with no trade is a gap and is not filled in.";
   }
   const candleLabel = `${candlePaths} included path${candlePaths === 1 ? "" : "s"}`;
-  const markLabel = `${markPaths} use 15-minute marks because no candles are stored for them.`;
+  const markLabel = `${markPaths} use 5-minute marks because no candles are stored for them.`;
   return `${candleLabel} use 1-minute highs and lows. ${markLabel} Minutes with no trades are left as gaps.`;
 }
 
 function budgetCoverageNote(candlePaths: number, markPaths: number, budgetPaths: number): string {
   const storedMarks = markPaths - budgetPaths;
   if (candlePaths === 0 && storedMarks <= 0) {
-    return "The 1-minute replay hit its time budget, so every row uses the 15-minute marks.";
+    return "The 1-minute replay hit its time budget, so every row uses the 5-minute marks.";
   }
   const parts: string[] = [];
   if (candlePaths > 0) {
     parts.push(`${candlePaths} included path${candlePaths === 1 ? "" : "s"} use 1-minute highs and lows.`);
   }
   if (storedMarks > 0) {
-    parts.push(`${storedMarks} use 15-minute marks because no candles are stored for them.`);
+    parts.push(`${storedMarks} use 5-minute marks because no candles are stored for them.`);
   }
-  parts.push(`${budgetPaths} use 15-minute marks because the 1-minute replay hit its time budget.`);
+  parts.push(`${budgetPaths} use 5-minute marks because the 1-minute replay hit its time budget.`);
   parts.push("Minutes with no trades are left as gaps.");
   return parts.join(" ");
 }
@@ -501,7 +503,10 @@ function stampBars(bars: readonly CandleBar[]): PreparedBar[] {
   return out;
 }
 
-function lastWeekCutoffMs(expiration: string): number {
+function lastWeekCutoffMs(expiration: string, cohort?: ShadowCohort | null): number {
+  if (cohort === "experiment-short") {
+    return chicagoCloseBeforeExpirationMs(expiration) ?? Number.POSITIVE_INFINITY;
+  }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(expiration)) return Number.POSITIVE_INFINITY;
   const start = addCalendarDays(expiration, -LAST_WEEK_CALENDAR_DAYS);
   const ms = newYorkMidnightMs(start);

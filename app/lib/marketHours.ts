@@ -227,6 +227,20 @@ export function nextChicagoTradingDay(ymd: string): string | null {
 }
 
 /**
+ * 3:00 PM America/Chicago on the trading day before `expiration`.
+ * Saturday, Sunday, and full-day NYSE holidays are not trading days.
+ * Early closes are trading days, and the clock stays 3:00 PM Central.
+ * A contract opened at 1 DTE expires the next calendar day, so this close
+ * is the same Chicago session as the open.
+ */
+export function chicagoCloseBeforeExpirationMs(expiration: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(expiration)) return null;
+  const day = previousChicagoTradingDay(expiration);
+  if (!day) return null;
+  return chicagoWallTimeMs(day, 15, 0);
+}
+
+/**
  * The Chicago trading day before `ymd`.
  * Saturday, Sunday, and full-day NYSE holidays are skipped. Early closes are not.
  */

@@ -134,7 +134,7 @@ export function candleHealthFromIndex(index: CandleIndex): CandleHealth {
 
 export function scorecardCandleNote(health: CandleHealth): string {
   if (health.candleAlertsCovered === 0 && health.candlesLastRun == null) {
-    return "1-minute candles are not stored yet. Exit what-ifs fall back to 15-minute marks. The results on this page are the live scorecard and stay as stored.";
+    return "1-minute candles are not stored yet. Exit what-ifs fall back to 5-minute marks. The results on this page are the live scorecard and stay as stored.";
   }
   const when = health.candlesLastRun ? ` Last candle run ${formatChicago(health.candlesLastRun)}.` : "";
   const errors = health.candleErrors > 0
@@ -268,7 +268,7 @@ export async function commitCandleRun(input: {
 /**
  * Read compact series files only. One index read, then at most one read per contract.
  * Stops at the budget and returns whatever finished. Missing or stale series are left out
- * so the caller keeps the 15-minute marks. This does not read per-day blobs.
+ * so the caller keeps the 5-minute marks. This does not read per-day blobs.
  */
 export async function loadCandleSummaries(
   keys: readonly string[],

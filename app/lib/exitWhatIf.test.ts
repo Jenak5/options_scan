@@ -57,7 +57,7 @@ describe("exit what-ifs", () => {
     expect(TRADE_RULES.stopLossFraction).toBe(0.25);
     expect(TRADE_RULES.flatAfterTradingDays).toBe(3);
     expect(MAX_LOSS_DOLLARS).toBe(875);
-    expect(WHAT_IF_NOTE).toMatch(/15-minute/);
+    expect(WHAT_IF_NOTE).toMatch(/5-minute/);
     expect(WHAT_IF_NOTE).toMatch(/do not change the live exits/i);
   });
 
@@ -72,6 +72,50 @@ describe("exit what-ifs", () => {
     expect(replayExit(input, scenario("tp40"))?.pnlDollars).toBeCloseTo(80);
     expect(replayExit(input, scenario("tp60"))?.pnlDollars).toBeCloseTo(120);
     expect(replayExit({ ...input, marks: [{ at: OPEN + 60_000, price: 2.1 }] }, scenario("tp40"))).toBeNull();
+  });
+
+  it("closes a 1-13 day test at the prior trading day's 3pm close and leaves it out of the A/B what-if", () => {
+    const early = [{ at: OPEN + 60_000, price: 2.2 }];
+    expect(replayExit({ entryPrice: 2, openedAt: OPEN, expiration: "2026-10-08", marks: early }, scenario("tp40"))).not.toBeNull();
+    expect(replayExit({
+      entryPrice: 2,
+      openedAt: OPEN,
+      expiration: "2026-10-08",
+      marks: early,
+      cohort: "experiment-short",
+    }, scenario("tp40"))).toBeNull();
+    const due = Date.parse("2026-10-07T20:00:00Z");
+    expect(replayExit({
+      entryPrice: 2,
+      openedAt: OPEN,
+      expiration: "2026-10-08",
+      cohort: "experiment-short",
+      marks: [{ at: due, price: 2.2 }],
+    }, scenario("tp40"))).not.toBeNull();
+
+    const opened = Date.parse("2026-11-23T16:00:00Z");
+    expect(replayExit({
+      entryPrice: 2,
+      openedAt: opened,
+      expiration: "2026-11-27",
+      cohort: "experiment-short",
+      marks: [{ at: Date.parse("2026-11-24T21:00:00Z"), price: 2.2 }],
+    }, scenario("tp40"))).toBeNull();
+    expect(replayExit({
+      entryPrice: 2,
+      openedAt: opened,
+      expiration: "2026-11-27",
+      cohort: "experiment-short",
+      marks: [{ at: Date.parse("2026-11-25T21:00:00Z"), price: 2.2 }],
+    }, scenario("tp40"))).not.toBeNull();
+
+    const report = whatIfFromShadows([shadow({
+      cohort: "experiment-short",
+      grade: "test",
+      expiration: "2026-10-08",
+      marks: early,
+    })]);
+    expect(report.included).toBe(0);
   });
 
   it("checks the stop before a profit target on the same snapshot", () => {

@@ -154,6 +154,28 @@ export const EXPERIMENT_DTE = {
   keptExpirations: 4,
 } as const;
 
+/**
+ * Test-only shadows for 1–13 days to expiration.
+ * Same idea as EXPERIMENT_DTE: not a grade, not a Telegram alert, and not part of the 14–42 day rule.
+ * 0 DTE is outside this window. The two cohorts do not share open caps.
+ * Quotes per run stay on EXPERIMENT_DTE.quotesPerRun for both cohorts together.
+ */
+export const EXPERIMENT_SHORT_DTE = {
+  min: 1,
+  max: 13,
+  label: "Test: 1-13 DTE",
+  minTrust: 30,
+  /** New test shadows written on one cron run. */
+  opensPerRun: 2,
+  /** New test shadows written on one Chicago day. */
+  opensPerDay: 4,
+  /**
+   * Expirations in this window kept from a chain the scan already fetched.
+   * This does not add a Schwab request. 0 DTE is not kept for the test.
+   */
+  keptExpirations: 8,
+} as const;
+
 export type FlowPremiumFit = "below-b" | "below-a" | "ok";
 
 /** Below the B floor cannot be an A or a B. Between the floors can be a B, not an A. */
@@ -182,7 +204,10 @@ export function alertScanMinPremium(raw: string | undefined): number {
 export const ALERT_POLICY = {
   /** Letters that may be sent and stored. C and D stay on the Flow tab. */
   alertGrades: ["A", "B"] as readonly LetterGrade[],
-  /** Default cap for one Chicago trading day. A is chosen before B. */
+  /**
+   * Default cap for one Chicago trading day. A is chosen before B.
+   * A faster cron does not raise this. The cap is the day, not the run.
+   */
   maxPerDay: 5,
   /** ALERT_MAX_PER_DAY outside 1..maxPerDayCeiling is ignored. */
   maxPerDayCeiling: 50,
@@ -252,7 +277,7 @@ export const OUTCOME_RULES = {
 /**
  * Quote-derived prints. These are not exchange-reported sweeps.
  * Schwab's chain carries the latest trade (last size, trade time, bid, and ask),
- * not a tape. The cron runs every 15 minutes, so the only second-scale samples
+ * not a tape. The cron runs every 5 minutes, so the only second-scale samples
  * are a few extra chain reads inside that one request.
  */
 export const PRINT_RULES = {

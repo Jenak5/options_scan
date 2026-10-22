@@ -113,7 +113,7 @@ function contractKey(trade: Quotable): string {
 
 /**
  * One Schwab quotes read for the open paper trades in a brief.
- * Chains are heavier and the scorecard already uses them on its 15-minute pass.
+ * Chains are heavier and the scorecard already uses them on its 5-minute pass.
  * This does not write a trade, a shadow, or an alert. A slow or failed quote
  * returns whatever already arrived, or nothing, so the brief can label the stored mark.
  * A token refresh inside the Schwab client can still update the stored access token.

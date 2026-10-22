@@ -34,6 +34,7 @@ import {
   type RepeatFlow,
   type TrendAlignment,
 } from "@/app/lib/marketContext";
+import { CRON_CADENCE_MINUTES } from "@/app/lib/cronCadence";
 import { chicagoClock, isChicagoMarketHours } from "@/app/lib/marketHours";
 import { DAILY_STOP_CONSECUTIVE_LOSSES, MAX_LOSS_DOLLARS, MIN_CONTRACT_VOLUME, MIN_OPEN_INTEREST } from "@/app/lib/risk";
 import { gradeContract, knownLosses, readSetupFacts, type SetupInput, type VerdictName } from "@/app/lib/verdict";
@@ -47,11 +48,11 @@ import { likelySideFromEstimate, quoteFacts, type QuoteFacts } from "@/app/lib/q
  *
  * The alert grader has no minute-level stale cutoff. This form treats a quote as
  * stale when the market is closed, the quote time is missing, the quote is not
- * from the current Chicago session, or the quote is older than the 15-minute
+ * from the current Chicago session, or the quote is older than the 5-minute
  * scan cadence.
  */
 
-export const QUOTE_MAX_AGE_MS = 15 * 60 * 1000;
+export const QUOTE_MAX_AGE_MS = CRON_CADENCE_MINUTES * 60 * 1000;
 
 export type GradeCheckStatus = "pass" | "fail" | "unknown";
 export type OverallGrade = "A" | "B" | "Fail";
@@ -356,7 +357,7 @@ function quoteFreshness(input: GradeMyTradeInput): Freshness {
     return {
       state: "stale",
       quotedAt,
-      detail: `The quote time ${formatChicago(quotedAt)} is more than 15 minutes from now, so it was not graded as live.`,
+      detail: `The quote time ${formatChicago(quotedAt)} is more than ${CRON_CADENCE_MINUTES} minutes from now, so it was not graded as live.`,
     };
   }
   return { state: "live", quotedAt, detail: `Quote time ${formatChicago(quotedAt)}.` };

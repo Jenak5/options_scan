@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { emptyCheckpoint, type StoredAlert } from "@/app/lib/alertBook";
-import { ALERT_RULES, EXPERIMENT_DTE } from "@/app/lib/alertConfig";
+import { ALERT_RULES, EXPERIMENT_DTE, EXPERIMENT_SHORT_DTE } from "@/app/lib/alertConfig";
 import { backfillFeatures, emptyFeatures, snapshotFromFlow, type AlertFeatureSnapshot } from "@/app/lib/alertFeatures";
 import { analyzeLearning, learningCsv, readGradeChecks, LEARN_MIN_TRUST } from "@/app/lib/learn";
 import { EMPTY_PRINTS } from "@/app/lib/prints";
@@ -74,6 +74,41 @@ describe("learning mode", () => {
     expect(ALERT_RULES.alertDteMin).toBe(14);
     expect(MAX_LOSS_DOLLARS).toBe(875);
     expect(EXPERIMENT_DTE.minTrust).toBe(30);
+  });
+
+  it("puts a 1-13 day test in its own bucket and leaves a short A/B under 14 days", () => {
+    const short = closed({
+      id: "learnshorttestlossabcd",
+      putCall: "call",
+      win: false,
+      spread: 0.01,
+      cohort: "experiment-short",
+      grade: "test",
+      experimentLabel: EXPERIMENT_SHORT_DTE.label,
+      probeGrade: "B",
+      dte: 5,
+    });
+    const front = closedCall(1, true);
+    const report = analyzeLearning({
+      shadows: [short, { ...front, features: { ...front.features, dte: 5 } } as ShadowTrade],
+      alerts: [],
+      trades: [],
+      checksByTradeId: new Map(),
+      now: OPEN,
+    });
+    expect(report.resolved).toBe(1);
+    expect(report.testResolved).toBe(1);
+    const dte = report.factors.find((factor) => factor.id === "dte");
+    expect(dte?.buckets.find((bucket) => bucket.key === "1-13 days (test)")).toMatchObject({ count: 1, losses: 1 });
+    expect(dte?.buckets.find((bucket) => bucket.key === "Under 14 days")?.count).toBe(1);
+    expect(dte?.buckets.find((bucket) => bucket.key === "43–60 days (test)")).toBeUndefined();
+    const grade = report.factors.find((factor) => factor.id === "grade");
+    expect(grade?.included).toBe(1);
+    expect(report.summary.join(" ")).toMatch(/1–13 days/);
+    expect(report.summary.join(" ")).toMatch(/14–42 day rule is unchanged/);
+    const row = report.trades?.find((trade) => trade.id === short.id);
+    expect(row?.gradeLabel).toBe("Test: 1-13 DTE");
+    expect(row?.cohort).toBe("experiment-short");
   });
 
   it("says there is nothing to trust yet when no trade has closed", () => {
@@ -339,7 +374,7 @@ function closed(input: {
   putCall: "call" | "put";
   win: boolean;
   spread: number;
-  cohort?: "ab" | "experiment";
+  cohort?: "ab" | "experiment" | "experiment-short";
   grade?: "A" | "B" | "test";
   experimentLabel?: string | null;
   probeGrade?: "A" | "B" | null;
