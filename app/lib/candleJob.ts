@@ -15,6 +15,7 @@ import {
 } from "@/app/lib/candleTargets";
 import { chicagoClock, chicagoDate } from "@/app/lib/marketHours";
 import { parseShadowBook } from "@/app/lib/shadow";
+import { refineStoredTimeStops } from "@/app/lib/shadowStore";
 import { readAlertBookText, readShadowBookText } from "@/app/lib/schwabStore";
 import {
   fetchOptionCandles,
@@ -29,6 +30,7 @@ import type { CandleBar } from "@/app/lib/candleTypes";
  * Fetch 1-minute option candles and store one blob per contract per day.
  * One call handles a slice, saves each contract before the next, and returns
  * how many are still waiting. This does not recompute live scorecard exits.
+ * A stored 60-minute paper row can be repriced from the bars just saved. The A or B exit stays as stored.
  */
 
 /** Contracts started on one cron or backfill call. DXLink allows 100; this stays under the route limit. */
@@ -175,6 +177,8 @@ export async function runCandleJob(options: {
   let daysSkipped = 0;
   let errors = 0;
   const notes: string[] = [];
+  const refined: { key: string; bars: readonly CandleBar[] }[] = [];
+  const hasTimeStop = book.records.some((row) => row.cohort === "time-60");
   let errorSample: string | null = null;
   let rateLimited = false;
   for (let i = 0; i < slice.length; i++) {
@@ -231,6 +235,10 @@ export async function runCandleJob(options: {
       break;
     }
     processed += 1;
+    if (hasTimeStop) refined.push({ key: target.contractKey, bars });
+  }
+  if (hasTimeStop && refined.length > 0) {
+    await refineStoredTimeStops(refined, now).catch(() => undefined);
   }
   const remaining = pending.length - processed;
   return {
