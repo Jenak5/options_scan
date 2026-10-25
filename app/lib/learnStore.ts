@@ -3,7 +3,7 @@ import { LEARN_CANDLE_BUDGET_MS, loadCandleSummaries } from "@/app/lib/candleSto
 import { analyzeLearning, learningCsv, readGradeChecks, type LearnReport } from "@/app/lib/learn";
 import type { ResearchTrack } from "@/app/lib/researchTrack";
 import { readAlertBookText, readShadowBookText, readTradeLogText, resolveStoreKind } from "@/app/lib/schwabStore";
-import { contractKey, isExperimentShadow, parseShadowBook, type ShadowTrade } from "@/app/lib/shadow";
+import { contractKey, excludedFromMainTotals, parseShadowBook, type ShadowTrade } from "@/app/lib/shadow";
 import { parseTradeLog } from "@/app/lib/trades";
 
 /**
@@ -48,7 +48,7 @@ export function learnCandleKeys(
   };
   for (let i = 0; i < shadows.length; i++) {
     const row = shadows[i];
-    if (isExperimentShadow(row) || row.grade === "test") continue;
+    if (excludedFromMainTotals(row) || row.grade === "test") continue;
     if (!(row.entryPrice > 0)) continue;
     if (grades && grades.indexOf(row.grade) === -1) continue;
     add(contractKey(row));

@@ -183,7 +183,7 @@ export default function LearnPage() {
               {page.summary.map((line) => <p key={line} style={prose}>{line}</p>)}
               {empty && (
                 <p style={prose}>
-                  An A or a B becomes a shadow after it is saved. A paper trade counts once it is closed. The 43–60 day test and the 1–13 day test are separate and are not an A or a B.
+                  An A or a B becomes a shadow after it is saved. A paper trade counts once it is closed. The 43–60 day test, the 1–13 day test, and Earnings in window are separate from the main totals. Earnings in window does not change a grade.
                 </p>
               )}
             </section>

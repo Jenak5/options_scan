@@ -37,7 +37,7 @@ interface Row {
 }
 
 interface ExperimentRow extends Omit<Row, "grade"> {
-  grade: "test";
+  grade: "A" | "B" | "test";
   experimentLabel: string | null;
   probeNote: string | null;
 }
@@ -95,6 +95,7 @@ interface Scorecard {
   rows: Row[];
   experimental?: Experiment;
   experimentalShort?: Experiment;
+  experimentalEarnings?: Experiment;
 }
 
 export default function ScorecardPage() {
@@ -194,6 +195,13 @@ export default function ScorecardPage() {
                 section={page.experimentalShort}
                 empty="No test shadows yet. A contract already in a scanned chain, with 1 to 13 days to expiry, is recorded here when the other rules would have made it an A or a B. 0 DTE is not included."
                 fallbackLabel="Test: 1-13 DTE"
+              />
+            )}
+            {page.experimentalEarnings && (
+              <ExperimentPanel
+                section={page.experimentalEarnings}
+                empty="No rows yet. A saved A or B is tracked here when earnings are 1 to 14 calendar days ahead and still inside the hold, before the last week. A contract the earnings downgrade kept out of A and B can be tracked here on paper. Nothing in this group is a new alert."
+                fallbackLabel="Earnings in window"
               />
             )}
 

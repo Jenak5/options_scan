@@ -3,7 +3,7 @@ import { chicagoDate, isMarketDay, isNyseHoliday } from "@/app/lib/marketHours";
 import { RULES_VERSION } from "@/app/lib/rulesVersion";
 import { latestScan, type ScanHealth, type ScanOutcome } from "@/app/lib/scanHealth";
 import { countTrackedAlerts, type ResearchTrack, type TrackedShadow } from "@/app/lib/researchTrack";
-import { isExperimentShadow, type ShadowTrade } from "@/app/lib/shadow";
+import { excludedFromMainTotals, type ShadowTrade } from "@/app/lib/shadow";
 
 /**
  * Numbers for the hourly monitor. No tokens, no account numbers, no messages.
@@ -108,7 +108,7 @@ export function countShadowTotals(records: readonly ShadowTrade[]): { openShadow
   let resolvedShadows = 0;
   for (let i = 0; i < records.length; i++) {
     const row = records[i];
-    if (isExperimentShadow(row)) continue;
+    if (excludedFromMainTotals(row)) continue;
     if (row.status === "open") openShadows += 1;
     else if (row.status === "closed" && row.pnlDollars != null && row.exitPrice != null) resolvedShadows += 1;
   }

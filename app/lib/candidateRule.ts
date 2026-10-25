@@ -6,7 +6,7 @@ import { addCalendarDays } from "@/app/lib/flow";
 import { chicagoCloseBeforeExpirationMs, chicagoTradingDayCutoffMs } from "@/app/lib/marketHours";
 import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import { inWeakWindow, isBig3m } from "@/app/lib/scanLabels";
-import { contractKey, isExperimentShadow, LAST_WEEK_CALENDAR_DAYS, SHADOW_MIN_TRUST, type ShadowCohort, type ShadowTrade } from "@/app/lib/shadow";
+import { contractKey, excludedFromMainTotals, LAST_WEEK_CALENDAR_DAYS, SHADOW_MIN_TRUST, type ShadowCohort, type ShadowTrade } from "@/app/lib/shadow";
 import { chicagoYmd, newYorkMidnightMs } from "@/app/lib/zonedDay";
 
 /**
@@ -227,7 +227,7 @@ export function analyzeShadowRule(input: {
   let skippedNoCandles = 0;
   let skippedOpen = 0;
   for (const row of input.shadows) {
-    if (isExperimentShadow(row) || row.grade === "test") continue;
+    if (excludedFromMainTotals(row) || row.grade === "test") continue;
     if (row.status !== "closed" || row.pnlDollars == null || !(row.entryPrice > 0)) {
       skippedOpen += 1;
       continue;

@@ -15,6 +15,7 @@ import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import { preferredDataSource } from "@/app/lib/dataSourcePref";
 import { BothSourcesFailedError, isSchwabBackupMiss } from "@/app/lib/marketData";
 import { noteBrowserScan } from "@/app/lib/pageScan";
+import { earningsDateMapForRows, windowEarningsDateForContract } from "@/app/lib/earningsWindow";
 import { markShadowsFromRows, openMissingShadows, openScanTickers } from "@/app/lib/shadowStore";
 import { chicagoDate, isMarketDay } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
@@ -69,6 +70,7 @@ export async function GET(request: NextRequest) {
         });
         let alertsSent = 0;
         const log: string[] = [flowCronSliceNote(plan, watchlist.length, process.env.FLOW_WATCHLIST)];
+        const earningsDates = await earningsDateMapForRows(scan.rows, now);
         try {
           const checked = await recordOpeningChecks(scan.chainInterest, now);
           log.push(`Opening check: ${checked} alert${checked === 1 ? "" : "s"} updated from this chain`);
@@ -83,7 +85,13 @@ export async function GET(request: NextRequest) {
           if (latest.count >= maxPerDay) break;
           if (latest.contracts.has(item.row.id) || latest.setups.has(alertSetupKey(item.row))) continue;
           const alertId = `${now.getTime()}-${item.row.id}`;
-          const saved = await rememberSentAlert(item.row, item.verdict, now);
+          const windowDate = windowEarningsDateForContract({
+            ticker: item.row.ticker,
+            expiration: item.row.expiration,
+            now,
+            dates: earningsDates,
+          });
+          const saved = await rememberSentAlert(item.row, item.verdict, now, windowDate);
           const labels: string[] = flowRowLabels(item.row, now.getTime());
           if (tickerSentToday(latestBook, item.row.ticker, tradingDay)) labels.splice(1, 0, "repeat");
           const message = formatFlowAlert({ ...item.row, verdict: item.verdict, alertId, saved, labels });

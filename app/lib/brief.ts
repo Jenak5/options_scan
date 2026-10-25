@@ -6,7 +6,7 @@ import type { HealthReport } from "@/app/lib/healthReport";
 import { chicagoClock, chicagoDate, chicagoTradingDaysElapsed, isChicagoMarketHours, previousChicagoTradingDay } from "@/app/lib/marketHours";
 import { likelySideFromEstimate, likelySideText, openingLabel, type LikelySide } from "@/app/lib/quoteSide";
 import { DAILY_STOP_CONSECUTIVE_LOSSES } from "@/app/lib/risk";
-import { isExperimentShadow, type ShadowExitReason, type ShadowTrade } from "@/app/lib/shadow";
+import { excludedFromMainTotals, type ShadowExitReason, type ShadowTrade } from "@/app/lib/shadow";
 import {
   dailyStopState,
   tradeMetrics,
@@ -626,7 +626,7 @@ function contractOf(putCall: "call" | "put", strike: number, expiry: string, now
 }
 
 function isAb(row: Pick<ShadowTrade, "grade" | "cohort">): boolean {
-  if (isExperimentShadow(row)) return false;
+  if (excludedFromMainTotals(row)) return false;
   return row.grade === "A" || row.grade === "B";
 }
 

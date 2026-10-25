@@ -3,7 +3,7 @@ import type { CandleBar } from "@/app/lib/candleTypes";
 import { addCalendarDays, calendarDaysBetween, newYorkDate, SHADOW_QUOTES_PER_RUN } from "@/app/lib/flow";
 import { chicagoCloseBeforeExpirationMs, chicagoTradingDayCutoffMs, chicagoTradingDaysElapsed, PATH_MARK_TRADING_DAY_CAP } from "@/app/lib/marketHours";
 import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
-import { contractKey, isExperimentShadow, LAST_WEEK_CALENDAR_DAYS, SHADOW_MIN_TRUST, type ShadowCohort, type ShadowTrade } from "@/app/lib/shadow";
+import { contractKey, excludedFromMainTotals, isExperimentShadow, LAST_WEEK_CALENDAR_DAYS, SHADOW_MIN_TRUST, type ShadowCohort, type ShadowTrade } from "@/app/lib/shadow";
 import { chicagoYmd, newYorkMidnightMs, newYorkYmd } from "@/app/lib/zonedDay";
 
 /**
@@ -233,7 +233,7 @@ export function whatIfFromShadows(
   let skipped = 0;
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    if (isExperimentShadow(row)) continue;
+    if (excludedFromMainTotals(row)) continue;
     if (grades && grades.indexOf(row.grade) === -1) continue;
     const marks = row.marks ?? [];
     const key = contractKey(row);

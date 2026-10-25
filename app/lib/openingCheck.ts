@@ -95,6 +95,10 @@ export function withOpeningLabels<T extends ShadowScorecard>(page: T, alerts: re
       ...page.experimentalShort,
       rows: page.experimentalShort.rows.map(stamp),
     },
+    experimentalEarnings: {
+      ...page.experimentalEarnings,
+      rows: page.experimentalEarnings.rows.map(stamp),
+    },
   };
 }
 

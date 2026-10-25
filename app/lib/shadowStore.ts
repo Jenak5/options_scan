@@ -3,6 +3,7 @@ import { selectPathMarkShadows, shadowPathStillNeeded } from "@/app/lib/exitWhat
 import { openingLabelsById } from "@/app/lib/openingCheck";
 import { quoteContractMarks } from "@/app/lib/tradeQuotes";
 import { parseTradeLog } from "@/app/lib/trades";
+import { chooseEarningsWindow, earningsWindowShadow } from "@/app/lib/earningsWindow";
 import { chooseExperimental, experimentalShadow } from "@/app/lib/experiment";
 import type { FlowRow } from "@/app/lib/flow";
 import {
@@ -303,6 +304,37 @@ export async function recordExperimentalShadows(
     const added: ShadowTrade[] = [];
     for (let i = 0; i < picks.length; i++) {
       const shadow = experimentalShadow(picks[i].row, picks[i].probe, now);
+      if (shadow) added.push(shadow);
+    }
+    opened = added.length;
+    if (added.length === 0) return serializeShadowBook(latest);
+    return serializeShadowBook(addShadowRecords(latest, added));
+  });
+  return { opened: saved ? opened : 0, saved };
+}
+
+/**
+ * Paper shadows for contracts the earnings downgrade kept out of A and B.
+ * Saved A and B alerts are opened by openMissingShadows and are not duplicated here.
+ * No chain read and no Telegram send.
+ */
+export async function recordEarningsWindowShadows(
+  rows: readonly FlowRow[],
+  consecutiveLosses: number | null,
+  now: Date,
+  dates: ReadonlyMap<string, string | null>,
+): Promise<{ opened: number; saved: boolean }> {
+  const current = parseShadowBook(await readShadowBookText());
+  if (chooseEarningsWindow({ rows, consecutiveLosses, now, existing: current.records, dates }).length === 0) {
+    return { opened: 0, saved: true };
+  }
+  let opened = 0;
+  const saved = await updateShadowBook((text) => {
+    const latest = parseShadowBook(text);
+    const picks = chooseEarningsWindow({ rows, consecutiveLosses, now, existing: latest.records, dates });
+    const added: ShadowTrade[] = [];
+    for (let i = 0; i < picks.length; i++) {
+      const shadow = earningsWindowShadow(picks[i].row, picks[i].probe, now);
       if (shadow) added.push(shadow);
     }
     opened = added.length;
