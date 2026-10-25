@@ -6,6 +6,7 @@ import {
   gradeAlertCandidates,
   indexSentAlerts,
 } from "@/app/lib/alertPolicy";
+import { earningsDateMapForRows, windowEarningsDateForContract } from "@/app/lib/earningsWindow";
 import { selectAlertRows, type FlowRow } from "@/app/lib/flow";
 import { chicagoDate, isChicagoMarketHours, isMarketDay } from "@/app/lib/marketHours";
 import type { ChainInterest } from "@/app/lib/openingCheck";
@@ -77,11 +78,20 @@ export async function recordDisplayedAlerts(
     alreadySentSetupKeys: sent.setups,
     limit: room,
   });
+  const earningsDates = queued.length === 0
+    ? new Map<string, string | null>()
+    : await earningsDateMapForRows(queued.map((item) => item.row), now);
 
   let saved = 0;
   for (let i = 0; i < queued.length; i++) {
     const item = queued[i];
-    const created = await saveNewAlert(item.row, item.verdict, now);
+    const windowDate = windowEarningsDateForContract({
+      ticker: item.row.ticker,
+      expiration: item.row.expiration,
+      now,
+      dates: earningsDates,
+    });
+    const created = await saveNewAlert(item.row, item.verdict, now, windowDate);
     if (!created) continue;
     saved += 1;
     const alertId = `${now.getTime()}-${item.row.id}`;
@@ -115,10 +125,11 @@ async function saveNewAlert(
   row: FlowRow,
   verdict: Parameters<typeof rememberSentAlert>[1],
   now: Date,
+  windowEarningsDate: string | null,
 ): Promise<boolean> {
   const tradingDay = chicagoDate(now);
   const sentAt = now.getTime();
-  const ok = await rememberSentAlert(row, verdict, now);
+  const ok = await rememberSentAlert(row, verdict, now, windowEarningsDate);
   if (!ok) return false;
   const book = await loadAlertBook();
   for (let i = 0; i < book.records.length; i++) {

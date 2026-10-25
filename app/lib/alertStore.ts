@@ -72,8 +72,16 @@ function setupAlreadySent(book: AlertBook, record: { ticker: string; putCall: st
   return false;
 }
 
-export async function rememberSentAlert(row: FlowRow, verdict: AlertVerdict, now: Date): Promise<boolean> {
+export async function rememberSentAlert(
+  row: FlowRow,
+  verdict: AlertVerdict,
+  now: Date,
+  windowEarningsDate?: string | null,
+): Promise<boolean> {
   const record = buildStoredAlert(row, verdict, now);
+  if (windowEarningsDate && /^\d{4}-\d{2}-\d{2}$/.test(windowEarningsDate)) {
+    record.windowEarningsDate = windowEarningsDate;
+  }
   let kept = false;
   const saved = await updateAlertBook((current) => {
     const book = parseAlertBook(current);

@@ -176,6 +176,24 @@ export const EXPERIMENT_SHORT_DTE = {
   keptExpirations: 8,
 } as const;
 
+/**
+ * Paper scorecard group for earnings 1 to 14 calendar days ahead
+ * that still fall inside the contract's hold, before the last-week exit.
+ * Not a grade change, not a new Telegram alert, and not part of the A/B totals.
+ * Quotes for the paper rows stay inside EXPERIMENT_DTE.quotesPerRun.
+ * A saved A or B in this group keeps a normal shadow quote slot.
+ */
+export const EARNINGS_WINDOW = {
+  minCalendarDays: 1,
+  maxCalendarDays: 14,
+  label: "Earnings in window",
+  minTrust: 30,
+  /** New paper shadows written on one cron run. Saved A/B alerts are not capped by this. */
+  opensPerRun: 2,
+  /** New paper shadows written on one Chicago day. */
+  opensPerDay: 4,
+} as const;
+
 export type FlowPremiumFit = "below-b" | "below-a" | "ok";
 
 /** Below the B floor cannot be an A or a B. Between the floors can be a B, not an A. */
