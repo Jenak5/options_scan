@@ -1,4 +1,4 @@
-import { EARNINGS_WINDOW, EXPERIMENT_DTE, EXPERIMENT_SHORT_DTE, OUTCOME_RULES, TRADE_RULES } from "@/app/lib/alertConfig";
+import { EARNINGS_WINDOW, EXPERIMENT_DTE, EXPERIMENT_SHORT_DTE, OUTCOME_RULES, TIME_STOP_60, TRADE_RULES, VWAP_PUT_TEST } from "@/app/lib/alertConfig";
 import { parseRulesVersion } from "@/app/lib/rulesVersion";
 import type { ShadowMark } from "@/app/lib/exitWhatIf";
 import { backfillFeatures, parseFeatureSnapshot, type AlertFeatureSnapshot } from "@/app/lib/alertFeatures";
@@ -7,9 +7,11 @@ import { EARNINGS_SECTION_NOTE, alertInEarningsWindow, earningsWindowTrustNote }
 import { EXPERIMENT_SECTION_NOTE, EXPERIMENT_SHORT_SECTION_NOTE, experimentShortTrustNote, experimentTrustNote } from "@/app/lib/experiment";
 import { planExits } from "@/app/lib/exits";
 import { calendarDaysBetween, newYorkDate, SHADOW_QUOTES_PER_RUN } from "@/app/lib/flow";
-import { chicagoCloseBeforeExpirationMs, chicagoTradingDaysElapsed } from "@/app/lib/marketHours";
+import { chicagoCloseBeforeExpirationMs, chicagoDate, chicagoTradingDaysElapsed } from "@/app/lib/marketHours";
 import { parseSpyTrend, spyTrendFromDirection, type IndexDirection } from "@/app/lib/marketContext";
 import { mergeResearchTracks, parseResearchTracks, type ResearchTrack } from "@/app/lib/researchTrack";
+import { liveTimeStopExit, TIME_STOP_SECTION_NOTE, timeStopTrustNote } from "@/app/lib/timeStop60";
+import { VWAP_PUT_SECTION_NOTE, vwapPutTrustNote, vwapSameDayCloseMs } from "@/app/lib/vwapPut";
 
 /**
  * Shadow outcome for an A or B alert.
@@ -37,7 +39,9 @@ export const SHADOW_ESTIMATE_NOTE =
 export type ShadowExitReason = "profit" | "stop" | "flat" | "expiration";
 export type ShadowQuoteSource = "mid" | "bid";
 export type ShadowGrade = "A" | "B" | "test";
-export type ShadowCohort = "ab" | "experiment" | "experiment-short" | "experiment-earnings";
+export type ShadowCohort = "ab" | "experiment" | "experiment-short" | "experiment-earnings" | "vwap-put" | "time-60";
+/** Where a 60-minute paper result got its price. Missing on every other row. */
+export type StudySource = "live" | "1m";
 
 export interface ShadowTrade {
   id: string;
@@ -94,6 +98,11 @@ export interface ShadowTrade {
   spyTrend?: IndexDirection | null;
   /** "backfill" when spyTrend was filled later from Tastytrade SPY candles. */
   spyTrendSource?: "backfill";
+  /**
+   * 60-minute paper row only. "1m" means stored option candles have already priced the exit.
+   * The live A or B row does not use this field.
+   */
+  studySource?: StudySource;
 }
 
 export interface ShadowBook {
@@ -193,6 +202,10 @@ export interface ShadowScorecard {
   experimentalShort: ExperimentSection;
   /** Earnings 1–14 days ahead and inside the hold. Left out of the totals above. */
   experimentalEarnings: ExperimentSection;
+  /** VWAP rejection puts. Left out of the totals above and out of the DTE tests. */
+  vwapPuts: ExperimentSection;
+  /** 60-minute time stop beside each saved A or B. The A or B result is unchanged. */
+  timeStop60: ExperimentSection;
 }
 
 const ID_PATTERN = /^[A-Za-z0-9_.:|-]{8,180}$/;
@@ -229,6 +242,8 @@ export function shadowExitLabel(reason: ShadowExitReason | null, cohort?: Shadow
     return "Profit target. One contract, so half off closes the whole trade.";
   }
   if (reason === "stop") return "Stop.";
+  if (reason === "flat" && cohort === "vwap-put") return "Flat by the close the same day.";
+  if (reason === "flat" && cohort === "time-60") return "Flat at 60 minutes.";
   if (reason === "flat") return "Flat after 3 trading days.";
   if (reason === "expiration" && cohort === "experiment-short") {
     return "Out at the 3:00 PM Central close on the trading day before expiration.";
@@ -288,9 +303,18 @@ export function isShortExperimentShadow(row: Pick<ShadowTrade, "cohort">): boole
   return row.cohort === "experiment-short";
 }
 
-/** DTE tests, and any row stored with grade "test". Left out of the 30-trade trust count. */
+/** DTE tests, VWAP puts, the 60-minute row, and any row stored with grade "test". A saved Earnings in window A or B is not this. */
 export function isExperimentShadow(row: Pick<ShadowTrade, "cohort" | "grade">): boolean {
-  return row.cohort === "experiment" || row.cohort === "experiment-short" || row.grade === "test";
+  return row.cohort === "experiment"
+    || row.cohort === "experiment-short"
+    || row.cohort === "vwap-put"
+    || row.cohort === "time-60"
+    || row.grade === "test";
+}
+
+/** VWAP rejection puts and the 60-minute time stop. Not the 43–60 or 1–13 day tests. */
+export function isSideStudyShadow(row: Pick<ShadowTrade, "cohort">): boolean {
+  return row.cohort === "vwap-put" || row.cohort === "time-60";
 }
 
 /**
@@ -319,7 +343,7 @@ export function attachMissingFeatures(records: readonly ShadowTrade[], alerts: r
   });
 }
 
-export function addMissingShadows(book: ShadowBook, alerts: readonly StoredAlert[]): { book: ShadowBook; opened: number } {
+export function addMissingShadows(book: ShadowBook, alerts: readonly StoredAlert[]): { book: ShadowBook; opened: number; added: ShadowTrade[] } {
   const ids = new Set<string>();
   for (let i = 0; i < book.records.length; i++) ids.add(book.records[i].alertId);
   const added: ShadowTrade[] = [];
@@ -331,10 +355,11 @@ export function addMissingShadows(book: ShadowBook, alerts: readonly StoredAlert
     ids.add(alert.id);
     added.push(row);
   }
-  if (added.length === 0) return { book, opened: 0 };
+  if (added.length === 0) return { book, opened: 0, added };
   return {
     book: { version: 1, records: trimShadows(book.records.concat(added)), research: book.research },
     opened: added.length,
+    added,
   };
 }
 
@@ -385,7 +410,14 @@ export function applyShadowQuote(row: ShadowTrade, quote: ShadowQuote | null, no
   if (marked) next = trackMark(next, marked.price);
   const decision = decideExit(next, marked, now);
   if (!decision) return next;
-  return closeShadow(next, decision, now);
+  const closed = closeShadow(next, decision, now);
+  if (!isSideStudyShadow(row) || decision.at == null) return closed;
+  return {
+    ...closed,
+    closedAt: decision.at,
+    tradingDaysHeld: chicagoTradingDaysElapsed(new Date(row.openedAt), new Date(decision.at)),
+    studySource: row.cohort === "time-60" ? "live" : closed.studySource,
+  };
 }
 
 function appendMark(marks: ShadowMark[] | undefined, mark: ShadowMark): ShadowMark[] {
@@ -413,8 +445,9 @@ export function contractKey(row: Pick<ShadowTrade, "ticker" | "expiration" | "st
 /**
  * Open shadows to quote this run. Extra contracts past the cap wait for a later run.
  * A/B shadows are quoted first, including a saved A or B in Earnings in window.
- * DTE tests and paper Earnings in window rows share the leftover slots, and at most
+ * DTE tests, paper Earnings in window rows, and VWAP puts share the leftover slots, and at most
  * EXPERIMENT_DTE.quotesPerRun of them together, so the run stays inside the existing quote cap.
+ * The 60-minute row is not quoted. It uses the A or B quote already fetched.
  */
 export function shadowsToQuote(
   rows: readonly ShadowTrade[],
@@ -423,7 +456,7 @@ export function shadowsToQuote(
 ): ShadowTrade[] {
   const open = rows.filter((row) => row.status === "open").slice().sort(byMarkAge);
   const primary = open.filter((row) => !isExperimentShadow(row));
-  const tests = open.filter((row) => isExperimentShadow(row));
+  const tests = open.filter((row) => isExperimentShadow(row) && row.cohort !== "time-60");
   const seen = new Set<string>();
   const out: ShadowTrade[] = [];
   takeQuotes(primary, out, seen, limit);
@@ -494,12 +527,16 @@ export function summarizeShadows(
   const testOverall = emptyBucket("test");
   const shortOverall = emptyBucket("test-short");
   const earningsOverall = emptyBucket("test-earnings");
+  const vwapOverall = emptyBucket("vwap");
+  const timeOverall = emptyBucket("time60");
   let open = 0;
   let excludedPaper = 0;
   let unpriced = 0;
   let testOpen = 0;
   let shortOpen = 0;
   let earningsOpen = 0;
+  let vwapOpen = 0;
+  let timeOpen = 0;
 
   for (let i = 0; i < records.length; i++) {
     const row = records[i];
@@ -510,13 +547,23 @@ export function summarizeShadows(
         if (!paper) {
           if (section === "short") shortOpen += 1;
           else if (section === "earnings") earningsOpen += 1;
+          else if (section === "vwap") vwapOpen += 1;
+          else if (section === "time60") timeOpen += 1;
           else testOpen += 1;
         }
         continue;
       }
       if (paper) continue;
       if (row.pnlDollars == null || row.exitPrice == null) continue;
-      const bucket = section === "short" ? shortOverall : section === "earnings" ? earningsOverall : testOverall;
+      const bucket = section === "short"
+        ? shortOverall
+        : section === "earnings"
+          ? earningsOverall
+          : section === "vwap"
+            ? vwapOverall
+            : section === "time60"
+              ? timeOverall
+              : testOverall;
       addBucket([bucket], bucket.key, row.pnlDollars, resultOf(row.pnlDollars));
       continue;
     }
@@ -585,6 +632,24 @@ export function summarizeShadows(
       earningsOpen,
       EARNINGS_WINDOW.minTrust,
       experimentRows(records, paperAlertIds, now, "earnings"),
+    ),
+    vwapPuts: experimentSection(
+      VWAP_PUT_TEST.label,
+      VWAP_PUT_SECTION_NOTE,
+      vwapPutTrustNote(vwapOverall.closed),
+      vwapOverall,
+      vwapOpen,
+      VWAP_PUT_TEST.minTrust,
+      experimentRows(records, paperAlertIds, now, "vwap"),
+    ),
+    timeStop60: experimentSection(
+      TIME_STOP_60.label,
+      TIME_STOP_SECTION_NOTE,
+      timeStopTrustNote(timeOverall.closed),
+      timeOverall,
+      timeOpen,
+      TIME_STOP_60.minTrust,
+      experimentRows(records, paperAlertIds, now, "time60"),
     ),
   };
 }
@@ -687,6 +752,8 @@ interface ExitDecision {
   price: number | null;
   source: ShadowQuoteSource | null;
   stale: boolean;
+  /** When the paper study actually exited. The live A or B path leaves this unset. */
+  at?: number;
 }
 
 function decideExit(
@@ -694,6 +761,8 @@ function decideExit(
   marked: { price: number; source: ShadowQuoteSource } | null,
   now: Date,
 ): ExitDecision | null {
+  if (row.cohort === "time-60") return decideTimeStop(row, marked, now);
+  if (row.cohort === "vwap-put") return decideVwapPut(row, marked, now);
   const plan = planExits({ premium: row.entryPrice, contracts: 1, structure: "single" });
   if (!plan) return null;
   const dte = calendarDaysBetween(newYorkDate(now), row.expiration);
@@ -730,6 +799,67 @@ function decideExit(
   return { reason: "flat", price: marked.price, source: marked.source, stale: false };
 }
 
+function decideTimeStop(
+  row: ShadowTrade,
+  marked: { price: number; source: ShadowQuoteSource } | null,
+  now: Date,
+): ExitDecision | null {
+  const exit = liveTimeStopExit(row, now.getTime());
+  if (!exit) return null;
+  const quote = marked && exit.at === now.getTime() ? marked.source : exit.quote;
+  return { reason: exit.reason, price: exit.price, source: quote, stale: exit.stale, at: exit.at };
+}
+
+function decideVwapPut(
+  row: ShadowTrade,
+  marked: { price: number; source: ShadowQuoteSource } | null,
+  now: Date,
+): ExitDecision | null {
+  const plan = planExits({ premium: row.entryPrice, contracts: 1, structure: "single" });
+  if (!plan) return null;
+  if (marked) {
+    if (marked.price <= plan.stopPrice + PRICE_EPS) {
+      return { reason: "stop", price: marked.price, source: marked.source, stale: false };
+    }
+    if (marked.price + PRICE_EPS >= plan.profitPrice) {
+      return { reason: "profit", price: marked.price, source: marked.source, stale: false };
+    }
+  }
+  const closeAt = vwapSameDayCloseMs(row.openedAt);
+  if (closeAt == null || now.getTime() < closeAt) return null;
+  const entryDay = chicagoDate(new Date(row.openedAt));
+  if (marked && chicagoDate(now) === entryDay) {
+    return { reason: "flat", price: marked.price, source: marked.source, stale: false, at: now.getTime() };
+  }
+  const earlier = latestEntryDayMark(row, entryDay);
+  if (earlier != null) {
+    const sameStamp = row.lastMarkedAt != null && chicagoDate(new Date(row.lastMarkedAt)) === entryDay;
+    return {
+      reason: "flat",
+      price: earlier,
+      source: sameStamp ? row.lastMarkSource : null,
+      stale: true,
+      at: closeAt,
+    };
+  }
+  return { reason: "flat", price: null, source: null, stale: false, at: closeAt };
+}
+
+function latestEntryDayMark(row: ShadowTrade, entryDay: string): number | null {
+  let price: number | null = null;
+  let at = -1;
+  const marks = row.marks ?? [];
+  for (let i = 0; i < marks.length; i++) {
+    const mark = marks[i];
+    if (!(mark.price > 0) || chicagoDate(new Date(mark.at)) !== entryDay) continue;
+    if (mark.at >= at) {
+      at = mark.at;
+      price = mark.price;
+    }
+  }
+  return price;
+}
+
 function closeShadow(row: ShadowTrade, decision: ExitDecision, now: Date): ShadowTrade {
   const exitPrice = decision.price;
   const pnlDollars = exitPrice == null ? null : (exitPrice - row.entryPrice) * row.contracts * 100;
@@ -762,7 +892,7 @@ function experimentRows(
   records: readonly ShadowTrade[],
   paperAlertIds: ReadonlySet<string>,
   now: Date,
-  section: "long" | "short" | "earnings",
+  section: "long" | "short" | "earnings" | "vwap" | "time60",
 ): ShadowListItem[] {
   const tests = records.filter((row) => experimentSectionKind(row) === section);
   const open = tests.filter((row) => row.status === "open").slice().sort((a, b) => b.openedAt - a.openedAt);
@@ -811,13 +941,19 @@ function toListItem(row: ShadowTrade, paperAlertIds: ReadonlySet<string>, now: D
 }
 
 function listedCohort(row: Pick<ShadowTrade, "cohort" | "grade">): ShadowCohort {
-  if (row.cohort === "experiment-earnings") return "experiment-earnings";
-  if (row.cohort === "experiment-short") return "experiment-short";
+  if (
+    row.cohort === "experiment-earnings"
+    || row.cohort === "experiment-short"
+    || row.cohort === "vwap-put"
+    || row.cohort === "time-60"
+  ) return row.cohort;
   if (isExperimentShadow(row)) return "experiment";
   return "ab";
 }
 
-function experimentSectionKind(row: Pick<ShadowTrade, "cohort" | "grade">): "long" | "short" | "earnings" | null {
+function experimentSectionKind(row: Pick<ShadowTrade, "cohort" | "grade">): "long" | "short" | "earnings" | "vwap" | "time60" | null {
+  if (row.cohort === "vwap-put") return "vwap";
+  if (row.cohort === "time-60") return "time60";
   if (row.cohort === "experiment-earnings") return "earnings";
   if (row.cohort === "experiment-short") return "short";
   if (row.cohort === "experiment" || row.grade === "test") return "long";
@@ -829,6 +965,8 @@ function csvCohort(row: Pick<ShadowTrade, "cohort" | "grade">): ShadowCohort {
 }
 
 function probeNote(row: ShadowTrade): string | null {
+  if (row.cohort === "vwap-put") return "Paper put after a minute closed back under session VWAP. This is not an A or a B.";
+  if (row.cohort === "time-60") return "Same entry as the saved alert. This 60-minute result is not the scorecard exit.";
   if (row.cohort === "experiment-earnings") {
     if (row.grade === "A" || row.grade === "B") {
       return `Saved as ${row.grade}. Earnings fall inside the hold, so this row is left out of the totals above.`;
@@ -975,11 +1113,15 @@ function parseShadow(value: unknown): ShadowTrade | null {
     ? "experiment-earnings"
     : row.cohort === "experiment-short"
       ? "experiment-short"
-      : row.cohort === "experiment" || grade === "test"
-        ? "experiment"
-        : "ab";
+      : row.cohort === "vwap-put"
+        ? "vwap-put"
+        : row.cohort === "time-60"
+          ? "time-60"
+          : row.cohort === "experiment" || grade === "test"
+            ? "experiment"
+            : "ab";
   if (cohort === "experiment-earnings" && grade !== "test" && grade !== "A" && grade !== "B") return null;
-  if ((cohort === "experiment" || cohort === "experiment-short") && grade !== "test") return null;
+  if ((cohort === "experiment" || cohort === "experiment-short" || cohort === "vwap-put" || cohort === "time-60") && grade !== "test") return null;
   if (cohort === "ab" && grade === "test") return null;
   const probeGrade = row.probeGrade === "A" || row.probeGrade === "B" ? row.probeGrade : null;
   if (row.contracts !== 1) return null;
@@ -1040,10 +1182,19 @@ function parseShadow(value: unknown): ShadowTrade | null {
     trade.spyTrend = parseSpyTrend(row.spyTrend);
     if (row.spyTrendSource === "backfill") trade.spyTrendSource = "backfill";
   }
+  if (cohort === "time-60" && (row.studySource === "live" || row.studySource === "1m")) {
+    trade.studySource = row.studySource;
+  }
   return trade;
 }
 
 function experimentLabelOf(value: unknown, cohort: ShadowCohort): string | null {
+  if (cohort === "vwap-put") {
+    return typeof value === "string" && value.trim() ? value.trim().slice(0, 80) : VWAP_PUT_TEST.label;
+  }
+  if (cohort === "time-60") {
+    return typeof value === "string" && value.trim() ? value.trim().slice(0, 80) : TIME_STOP_60.label;
+  }
   if (cohort !== "experiment" && cohort !== "experiment-short" && cohort !== "experiment-earnings") return null;
   if (typeof value === "string" && value.trim()) return value.trim().slice(0, 80);
   if (cohort === "experiment-earnings") return EARNINGS_WINDOW.label;

@@ -3,9 +3,20 @@ import { selectPathMarkShadows, shadowPathStillNeeded } from "@/app/lib/exitWhat
 import { openingLabelsById } from "@/app/lib/openingCheck";
 import { quoteContractMarks } from "@/app/lib/tradeQuotes";
 import { parseTradeLog } from "@/app/lib/trades";
+import { loadCandleSeries } from "@/app/lib/candleStore";
+import type { CandleBar } from "@/app/lib/candleTypes";
 import { chooseEarningsWindow, earningsWindowShadow } from "@/app/lib/earningsWindow";
 import { chooseExperimental, experimentalShadow } from "@/app/lib/experiment";
-import type { FlowRow } from "@/app/lib/flow";
+import { CORE_FLOW_WATCHLIST, type FlowRow } from "@/app/lib/flow";
+import { chicagoDate, chicagoWallTimeMs, isChicagoMarketHours } from "@/app/lib/marketHours";
+import { fetchOptionCandles, tastytradeCandleConfigured } from "@/app/lib/tastytradeCandles";
+import {
+  addTimeStopShadows,
+  refineTimeStop,
+  syncTimeStops,
+  timeStopsNeedingCandles,
+} from "@/app/lib/timeStop60";
+import { chooseVwapPuts, vwapPutShadow } from "@/app/lib/vwapPut";
 import {
   addResearchTracks,
   type ResearchCandidate,
@@ -20,6 +31,7 @@ import {
   contractKey,
   emptyShadowBook,
   isExperimentShadow,
+  isSideStudyShadow,
   mergeShadowBooks,
   parseShadowBook,
   serializeShadowBook,
@@ -154,7 +166,7 @@ function previewRowPass(
     marked: applied.marked,
     closed: applied.closed,
     researchOpened: 0,
-    changed: applied.marked > 0,
+    changed: applied.changed,
   };
 }
 
@@ -162,11 +174,13 @@ function applyRowMarks(
   book: ShadowBook,
   quotes: ReadonlyMap<string, { mid: number | null; bid: number | null }>,
   now: Date,
-): { records: ShadowTrade[]; marked: number; closed: number } {
+): { records: ShadowTrade[]; marked: number; closed: number; changed: boolean } {
   let marked = 0;
   let closed = 0;
+  let changed = false;
   const nowMs = now.getTime();
   const records = book.records.map((shadow) => {
+    if (shadow.cohort === "time-60") return shadow;
     if (shadow.status === "closed") {
       if (!shadowPathStillNeeded(shadow, now) || markedTooRecently(shadow, nowMs)) return shadow;
       const quote = quotes.get(contractKey(shadow));
@@ -174,6 +188,7 @@ function applyRowMarks(
       const updated = appendShadowPathMark(shadow, quote, now);
       if (updated === shadow) return shadow;
       marked += 1;
+      changed = true;
       return updated;
     }
     if (shadow.status !== "open") return shadow;
@@ -183,21 +198,27 @@ function applyRowMarks(
     const quote = quotes.get(contractKey(shadow));
     if (!quote) return shadow;
     const updated = applyShadowQuote(shadow, quote, now);
-    if (updated.lastMarkedAt !== nowMs) return shadow;
-    marked += 1;
-    if (updated.status === "closed") closed += 1;
+    if (updated.lastMarkedAt !== nowMs && updated === shadow) return shadow;
+    if (updated === shadow) return shadow;
+    changed = true;
+    if (!isSideStudyShadow(shadow)) {
+      marked += 1;
+      if (updated.status === "closed") closed += 1;
+    }
     return updated;
   });
-  return { records, marked, closed };
+  const synced = syncTimeStops(records, now);
+  if (synced.some((row, index) => row !== records[index])) changed = true;
+  return { records: synced, marked, closed, changed };
 }
 
 export async function openMissingShadows(): Promise<{ opened: number; saved: boolean }> {
   const [alertBook, currentText] = await Promise.all([loadAlertBook(), readShadowBookText()]);
-  const synced = addMissingShadows(parseShadowBook(currentText), alertBook.records);
-  if (synced.opened === 0) return { opened: 0, saved: true };
+  const synced = withNewTimeStops(parseShadowBook(currentText), alertBook.records);
+  if (synced.opened === 0 && synced.timeStops === 0) return { opened: 0, saved: true };
   const saved = await updateShadowBook((current) => {
     const latest = parseShadowBook(current);
-    const again = addMissingShadows(latest, alertBook.records);
+    const again = withNewTimeStops(latest, alertBook.records);
     return serializeShadowBook({
       version: 1,
       records: attachMissingFeatures(again.book.records, alertBook.records),
@@ -221,7 +242,7 @@ export async function runShadowPass(
 ): Promise<ShadowPassResult> {
   const [alertBook, currentText] = await Promise.all([loadAlertBook(), readShadowBookText()]);
   const parsed = parseShadowBook(currentText);
-  const synced = addMissingShadows(parsed, alertBook.records);
+  const synced = withNewTimeStops(parsed, alertBook.records);
   const withFeatures = attachMissingFeatures(synced.book.records, alertBook.records);
   const researchAdded = addResearchTracks(synced.book.research ?? [], candidates, alertBook.records, now);
   const featured: ShadowBook = { version: 1, records: withFeatures, research: researchAdded.tracks };
@@ -231,7 +252,8 @@ export async function runShadowPass(
   const dueIds = new Set(due.map((row) => row.id));
   const quotes = await quoteContractMarks(due.map(asQuotable));
   const quotedIds = new Set<string>();
-  const nextRecords = featured.records.map((row) => {
+  const quotedRecords = featured.records.map((row) => {
+    if (row.cohort === "time-60") return row;
     if (row.status === "closed") {
       if (!dueIds.has(row.id)) return row;
       const quote = quotes[row.id] ?? null;
@@ -244,6 +266,7 @@ export async function runShadowPass(
     if (quote) quotedIds.add(contractKey(row));
     return applyShadowQuote(row, quote, now);
   });
+  const nextRecords = await priceTimeStops(syncTimeStops(quotedRecords, now), now);
   const quoted = quotedIds.size;
   const researchPass = await markResearchTracks(researchAdded.tracks);
   const edited: ShadowBook = { version: 1, records: nextRecords, research: researchPass.tracks };
@@ -313,6 +336,90 @@ export async function recordExperimentalShadows(
   return { opened: saved ? opened : 0, saved };
 }
 
+function withNewTimeStops(
+  book: ShadowBook,
+  alerts: Parameters<typeof addMissingShadows>[1],
+): { book: ShadowBook; opened: number; timeStops: number } {
+  const synced = addMissingShadows(book, alerts);
+  const timed = addTimeStopShadows(synced.book.records, synced.added);
+  if (timed.opened === 0) return { book: synced.book, opened: synced.opened, timeStops: 0 };
+  const extra = timed.records.slice(synced.book.records.length);
+  return { book: addShadowRecords(synced.book, extra), opened: synced.opened, timeStops: extra.length };
+}
+
+/** After the hour, stored 1-minute option candles can replace the live 60-minute price. */
+async function priceTimeStops(records: readonly ShadowTrade[], now: Date): Promise<ShadowTrade[]> {
+  const due = timeStopsNeedingCandles(records, now).slice(0, 20);
+  if (due.length === 0) return records.slice();
+  let series: Map<string, CandleBar[]>;
+  try {
+    series = await loadCandleSeries(due.map((row) => contractKey(row)));
+  } catch {
+    return records.slice();
+  }
+  if (series.size === 0) return records.slice();
+  return records.map((row) => {
+    const bars = series.get(contractKey(row));
+    if (!bars || row.cohort !== "time-60") return row;
+    return refineTimeStop(row, bars, now, true);
+  });
+}
+
+const CORE_TICKERS = new Set<string>(CORE_FLOW_WATCHLIST);
+
+/**
+ * Paper VWAP puts from contracts this scan already scored.
+ * One Tastytrade candle read for the core names. No Schwab call is added, and nothing is sent.
+ */
+export async function recordVwapRejectionPuts(
+  rows: readonly FlowRow[],
+  now: Date,
+): Promise<{ opened: number; saved: boolean }> {
+  if (!isChicagoMarketHours(now) || !tastytradeCandleConfigured()) return { opened: 0, saved: true };
+  const tickers: string[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < rows.length; i++) {
+    const ticker = rows[i].ticker;
+    if (!CORE_TICKERS.has(ticker) || seen.has(ticker)) continue;
+    seen.add(ticker);
+    tickers.push(ticker);
+  }
+  if (tickers.length === 0) return { opened: 0, saved: true };
+  let candles: Map<string, CandleBar[]>;
+  try {
+    candles = await fetchCoreUnderlyingMinutes(tickers, now);
+  } catch {
+    return { opened: 0, saved: true };
+  }
+  return saveVwapPuts(rows, candles, now);
+}
+
+/** Save paper puts from candles the caller already has. Tests use this directly. */
+export async function saveVwapPuts(
+  rows: readonly FlowRow[],
+  candles: ReadonlyMap<string, readonly CandleBar[]>,
+  now: Date,
+): Promise<{ opened: number; saved: boolean }> {
+  const current = parseShadowBook(await readShadowBookText());
+  if (chooseVwapPuts({ rows, candles, now, existing: current.records }).length === 0) {
+    return { opened: 0, saved: true };
+  }
+  let opened = 0;
+  const saved = await updateShadowBook((text) => {
+    const latest = parseShadowBook(text);
+    const picks = chooseVwapPuts({ rows, candles, now, existing: latest.records });
+    const added: ShadowTrade[] = [];
+    for (let i = 0; i < picks.length; i++) {
+      const shadow = vwapPutShadow(picks[i], now);
+      if (shadow) added.push(shadow);
+    }
+    opened = added.length;
+    if (added.length === 0) return serializeShadowBook(latest);
+    return serializeShadowBook(addShadowRecords(latest, added));
+  });
+  return { opened: saved ? opened : 0, saved };
+}
+
 /**
  * Paper shadows for contracts the earnings downgrade kept out of A and B.
  * Saved A and B alerts are opened by openMissingShadows and are not duplicated here.
@@ -342,6 +449,47 @@ export async function recordEarningsWindowShadows(
     return serializeShadowBook(addShadowRecords(latest, added));
   });
   return { opened: saved ? opened : 0, saved };
+}
+
+export async function fetchCoreUnderlyingMinutes(
+  tickers: readonly string[],
+  now: Date,
+): Promise<Map<string, CandleBar[]>> {
+  const open = chicagoWallTimeMs(chicagoDate(now), 8, 30);
+  if (open == null) return new Map();
+  const coverUntil = Math.max(open, now.getTime() - 60_000);
+  const fetched = await fetchOptionCandles(tickers.map((ticker) => ({
+    streamer: ticker,
+    fromTime: open,
+    period: "1m" as const,
+    coverFrom: open,
+    coverUntil,
+  })), { timeoutMs: 12_000, quietMs: 700, emptyWaitMs: 2_500 });
+  return fetched.candles;
+}
+
+/** Price 60-minute rows from candles just stored. A and B rows are not changed. */
+export async function refineStoredTimeStops(
+  pairs: readonly { key: string; bars: readonly CandleBar[] }[],
+  now: Date,
+): Promise<void> {
+  if (pairs.length === 0) return;
+  const byKey = new Map<string, readonly CandleBar[]>();
+  for (let i = 0; i < pairs.length; i++) byKey.set(pairs[i].key, pairs[i].bars);
+  await updateShadowBook((text) => {
+    const book = parseShadowBook(text);
+    let changed = false;
+    const records = book.records.map((row) => {
+      if (row.cohort !== "time-60") return row;
+      const bars = byKey.get(contractKey(row));
+      if (!bars || bars.length === 0) return row;
+      const next = refineTimeStop(row, bars, now, true);
+      if (next !== row) changed = true;
+      return next;
+    });
+    if (!changed) return text ?? serializeShadowBook(book);
+    return serializeShadowBook({ version: 1, records, research: book.research });
+  });
 }
 
 function paperAlertIds(tradeText: string | null): Set<string> {
@@ -388,7 +536,7 @@ function countClosed(before: readonly ShadowTrade[], after: readonly ShadowTrade
   }
   let closed = 0;
   for (let i = 0; i < after.length; i++) {
-    if (wasOpen.has(after[i].id) && after[i].status === "closed") closed += 1;
+    if (wasOpen.has(after[i].id) && after[i].status === "closed" && !isSideStudyShadow(after[i])) closed += 1;
   }
   return closed;
 }

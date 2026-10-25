@@ -194,6 +194,35 @@ export const EARNINGS_WINDOW = {
   opensPerDay: 4,
 } as const;
 
+/**
+ * Paper puts after a 1-minute close back under session VWAP.
+ * Not a grade, not a Telegram alert, and not part of the 14–42 day rule.
+ * Quotes, when one is still needed, come from the leftover test slots inside the existing cap.
+ */
+export const VWAP_PUT_TEST = {
+  label: "Test: VWAP rejection puts",
+  minTrust: 30,
+  /** Nearest expiration still this many calendar days out. */
+  minDte: 7,
+  /** Ask below this is skipped. */
+  minAsk: 0.5,
+  /** New paper puts written on one cron run. */
+  opensPerRun: 2,
+  /** New paper puts written on one Chicago day. */
+  opensPerDay: 4,
+} as const;
+
+/**
+ * A second result for each saved A or B.
+ * The live scorecard exit is unchanged. This row exits at +40%, -25%, or 60 minutes.
+ * It is not a grade and it is not sent. It does not add a quote.
+ */
+export const TIME_STOP_60 = {
+  label: "Test: 60-minute time stop",
+  minTrust: 30,
+  minutes: 60,
+} as const;
+
 export type FlowPremiumFit = "below-b" | "below-a" | "ok";
 
 /** Below the B floor cannot be an A or a B. Between the floors can be a B, not an A. */

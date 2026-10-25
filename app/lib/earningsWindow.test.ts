@@ -404,18 +404,18 @@ describe("earnings in window", () => {
     const opened = await openMissingShadows();
     expect(opened.opened).toBe(1);
     const shadows = parseShadowBook(await readShadowBookText());
-    expect(shadows.records).toHaveLength(1);
-    expect(shadows.records[0]?.cohort).toBe("experiment-earnings");
-    expect(shadows.records[0]?.grade).toBe("B");
+    expect(shadows.records.filter((row) => row.cohort === "experiment-earnings")).toHaveLength(1);
+    expect(shadows.records.filter((row) => row.cohort === "time-60")).toHaveLength(1);
+    expect(shadows.records.find((row) => row.cohort === "experiment-earnings")?.grade).toBe("B");
 
     const paper = await recordEarningsWindowShadows([heldRow(), knockedRow()], null, NOW, dates);
     expect(paper).toEqual({ opened: 1, saved: true });
     const again = await recordEarningsWindowShadows([heldRow(), knockedRow()], null, NOW, dates);
     expect(again).toEqual({ opened: 0, saved: true });
     const both = parseShadowBook(await readShadowBookText());
-    expect(both.records).toHaveLength(2);
     expect(both.records.filter((row) => row.grade === "test" && row.cohort === "experiment-earnings")).toHaveLength(1);
-    expect(both.records.filter((row) => row.grade === "B")).toHaveLength(1);
+    expect(both.records.filter((row) => row.grade === "B" && row.cohort === "experiment-earnings")).toHaveLength(1);
+    expect(both.records.filter((row) => row.cohort === "time-60")).toHaveLength(1);
   });
 
   it("learns the group apart from the main results and from the 43-60 test", () => {

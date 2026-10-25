@@ -96,6 +96,8 @@ interface Scorecard {
   experimental?: Experiment;
   experimentalShort?: Experiment;
   experimentalEarnings?: Experiment;
+  vwapPuts?: Experiment;
+  timeStop60?: Experiment;
 }
 
 export default function ScorecardPage() {
@@ -202,6 +204,20 @@ export default function ScorecardPage() {
                 section={page.experimentalEarnings}
                 empty="No rows yet. A saved A or B is tracked here when earnings are 1 to 14 calendar days ahead and still inside the hold, before the last week. A contract the earnings downgrade kept out of A and B can be tracked here on paper. Nothing in this group is a new alert."
                 fallbackLabel="Earnings in window"
+              />
+            )}
+            {page.vwapPuts && (
+              <ExperimentPanel
+                section={page.vwapPuts}
+                empty="No paper puts yet. A core ticker that trades above its session VWAP and then closes a minute back below it is recorded here."
+                fallbackLabel="Test: VWAP rejection puts"
+              />
+            )}
+            {page.timeStop60 && (
+              <ExperimentPanel
+                section={page.timeStop60}
+                empty="No 60-minute shadows yet. Each saved A or B gets one row here. The A and B result above stays on its own exits."
+                fallbackLabel="Test: 60-minute time stop"
               />
             )}
 

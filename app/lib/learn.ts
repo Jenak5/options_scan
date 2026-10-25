@@ -10,7 +10,7 @@ import { calendarDaysBetween, newYorkDate } from "@/app/lib/flow";
 import { likelySideFromEstimate, likelySideText, openingLabel } from "@/app/lib/quoteSide";
 import { MAX_BID_ASK_SPREAD_OF_MID, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import { chicagoClock } from "@/app/lib/marketHours";
-import { SHADOW_MIN_TRUST, excludedFromMainTotals, isExperimentShadow, shadowExitLabel, type ShadowTrade } from "@/app/lib/shadow";
+import { SHADOW_MIN_TRUST, excludedFromMainTotals, isExperimentShadow, isSideStudyShadow, shadowExitLabel, type ShadowTrade } from "@/app/lib/shadow";
 import type { CandleBar } from "@/app/lib/candleTypes";
 import { whatIfFromShadows, type WhatIfReport } from "@/app/lib/exitWhatIf";
 import { analyzeShadowRule, type ShadowRuleReport } from "@/app/lib/candidateRule";
@@ -290,6 +290,7 @@ function buildTrades(input: LearnInput): { trades: LearnTrade[]; omittedShadows:
   const usedPaper = new Set<string>();
   for (let i = 0; i < input.shadows.length; i++) {
     const shadow = input.shadows[i];
+    if (isSideStudyShadow(shadow)) continue;
     if (shadow.status !== "closed" || shadow.pnlDollars == null || shadow.exitPrice == null) continue;
     const paper = closedPaper.get(shadow.alertId);
     if (paper) {
@@ -1108,7 +1109,7 @@ function tally(rows: readonly LearnTrade[]): { count: number; wins: number; loss
 function countOpenTests(shadows: readonly ShadowTrade[]): number {
   let open = 0;
   for (let i = 0; i < shadows.length; i++) {
-    if (shadows[i].status === "open" && excludedFromMainTotals(shadows[i])) open += 1;
+    if (shadows[i].status === "open" && excludedFromMainTotals(shadows[i]) && !isSideStudyShadow(shadows[i])) open += 1;
   }
   return open;
 }

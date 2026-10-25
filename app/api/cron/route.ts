@@ -15,7 +15,7 @@ import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv, typ
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import type { ResearchCandidate } from "@/app/lib/researchTrack";
 import { earningsDateMapForRows, windowEarningsDateForContract } from "@/app/lib/earningsWindow";
-import { openMissingShadows, openScanTickers, recordEarningsWindowShadows, recordExperimentalShadows, runShadowPass } from "@/app/lib/shadowStore";
+import { openMissingShadows, openScanTickers, recordEarningsWindowShadows, recordExperimentalShadows, recordVwapRejectionPuts, runShadowPass } from "@/app/lib/shadowStore";
 import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow, isMarketDay } from "@/app/lib/marketHours";
 import { preferredDataSource } from "@/app/lib/dataSourcePref";
 import { isFatalSchwabError, isSchwabBackupMiss, rethrowIfSchwabOnly } from "@/app/lib/marketData";
@@ -304,6 +304,14 @@ async function handleCron(request: NextRequest) {
     } catch (err) {
       rethrowIfSchwabOnly(err);
       log.push("Test shadow update failed");
+    }
+
+    try {
+      const vwap = await recordVwapRejectionPuts(scan.rows, now);
+      log.push(`VWAP rejection puts: ${vwap.opened} new (paper only, not alerted)`);
+    } catch (err) {
+      rethrowIfSchwabOnly(err);
+      log.push("VWAP rejection put update failed");
     }
 
     const minPremium = alertScanMinPremium(process.env.ALERT_MIN_PREMIUM);
