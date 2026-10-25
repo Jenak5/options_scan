@@ -1,8 +1,9 @@
-import { EXPERIMENT_DTE, EXPERIMENT_SHORT_DTE, OUTCOME_RULES, TIME_STOP_60, TRADE_RULES, VWAP_PUT_TEST } from "@/app/lib/alertConfig";
+import { EARNINGS_WINDOW, EXPERIMENT_DTE, EXPERIMENT_SHORT_DTE, OUTCOME_RULES, TIME_STOP_60, TRADE_RULES, VWAP_PUT_TEST } from "@/app/lib/alertConfig";
 import { parseRulesVersion } from "@/app/lib/rulesVersion";
 import type { ShadowMark } from "@/app/lib/exitWhatIf";
 import { backfillFeatures, parseFeatureSnapshot, type AlertFeatureSnapshot } from "@/app/lib/alertFeatures";
 import type { StoredAlert } from "@/app/lib/alertBook";
+import { EARNINGS_SECTION_NOTE, alertInEarningsWindow, earningsWindowTrustNote } from "@/app/lib/earningsWindow";
 import { EXPERIMENT_SECTION_NOTE, EXPERIMENT_SHORT_SECTION_NOTE, experimentShortTrustNote, experimentTrustNote } from "@/app/lib/experiment";
 import { planExits } from "@/app/lib/exits";
 import { calendarDaysBetween, newYorkDate, SHADOW_QUOTES_PER_RUN } from "@/app/lib/flow";
@@ -38,7 +39,7 @@ export const SHADOW_ESTIMATE_NOTE =
 export type ShadowExitReason = "profit" | "stop" | "flat" | "expiration";
 export type ShadowQuoteSource = "mid" | "bid";
 export type ShadowGrade = "A" | "B" | "test";
-export type ShadowCohort = "ab" | "experiment" | "experiment-short" | "vwap-put" | "time-60";
+export type ShadowCohort = "ab" | "experiment" | "experiment-short" | "experiment-earnings" | "vwap-put" | "time-60";
 /** Where a 60-minute paper result got its price. Missing on every other row. */
 export type StudySource = "live" | "1m";
 
@@ -199,6 +200,8 @@ export interface ShadowScorecard {
   experimental: ExperimentSection;
   /** 1–13 day test. Left out of the totals above and out of the 43–60 section. */
   experimentalShort: ExperimentSection;
+  /** Earnings 1–14 days ahead and inside the hold. Left out of the totals above. */
+  experimentalEarnings: ExperimentSection;
   /** VWAP rejection puts. Left out of the totals above and out of the DTE tests. */
   vwapPuts: ExperimentSection;
   /** 60-minute time stop beside each saved A or B. The A or B result is unchanged. */
@@ -253,6 +256,7 @@ export function shadowFromAlert(alert: StoredAlert): ShadowTrade | null {
   if (alert.grade !== "A" && alert.grade !== "B") return null;
   if (!Number.isFinite(alert.ask) || !(alert.ask > 0)) return null;
   if (!alert.id || !ID_PATTERN.test(alert.id)) return null;
+  const earningsWindow = alertInEarningsWindow(alert);
   const row: ShadowTrade = {
     id: alert.id,
     alertId: alert.id,
@@ -262,8 +266,8 @@ export function shadowFromAlert(alert: StoredAlert): ShadowTrade | null {
     strike: alert.strike,
     expiration: alert.expiration,
     grade: alert.grade,
-    cohort: "ab",
-    experimentLabel: null,
+    cohort: earningsWindow ? "experiment-earnings" : "ab",
+    experimentLabel: earningsWindow ? EARNINGS_WINDOW.label : null,
     probeGrade: null,
     features: alert.features ?? backfillFeatures(alert),
     rulesVersion: alert.rulesVersion ?? null,
@@ -299,7 +303,7 @@ export function isShortExperimentShadow(row: Pick<ShadowTrade, "cohort">): boole
   return row.cohort === "experiment-short";
 }
 
-/** DTE tests and the two paper studies. Never an A or a B, never sent, and left out of the 30-trade trust count. */
+/** DTE tests, VWAP puts, the 60-minute row, and any row stored with grade "test". A saved Earnings in window A or B is not this. */
 export function isExperimentShadow(row: Pick<ShadowTrade, "cohort" | "grade">): boolean {
   return row.cohort === "experiment"
     || row.cohort === "experiment-short"
@@ -311,6 +315,14 @@ export function isExperimentShadow(row: Pick<ShadowTrade, "cohort" | "grade">): 
 /** VWAP rejection puts and the 60-minute time stop. Not the 43–60 or 1–13 day tests. */
 export function isSideStudyShadow(row: Pick<ShadowTrade, "cohort">): boolean {
   return row.cohort === "vwap-put" || row.cohort === "time-60";
+}
+
+/**
+ * Scorecard rows that stay out of the A/B totals.
+ * Earnings in window includes a saved A or B, so grade alone is not enough.
+ */
+export function excludedFromMainTotals(row: Pick<ShadowTrade, "cohort" | "grade">): boolean {
+  return row.cohort === "experiment-earnings" || isExperimentShadow(row);
 }
 
 /** Append rows and keep the same book cap the A/B shadows already use. */
@@ -432,7 +444,8 @@ export function contractKey(row: Pick<ShadowTrade, "ticker" | "expiration" | "st
 
 /**
  * Open shadows to quote this run. Extra contracts past the cap wait for a later run.
- * A/B shadows are quoted first. The DTE tests and VWAP puts share the leftover slots, and at most
+ * A/B shadows are quoted first, including a saved A or B in Earnings in window.
+ * DTE tests, paper Earnings in window rows, and VWAP puts share the leftover slots, and at most
  * EXPERIMENT_DTE.quotesPerRun of them together, so the run stays inside the existing quote cap.
  * The 60-minute row is not quoted. It uses the A or B quote already fetched.
  */
@@ -513,6 +526,7 @@ export function summarizeShadows(
   const overall = emptyBucket("all");
   const testOverall = emptyBucket("test");
   const shortOverall = emptyBucket("test-short");
+  const earningsOverall = emptyBucket("test-earnings");
   const vwapOverall = emptyBucket("vwap");
   const timeOverall = emptyBucket("time60");
   let open = 0;
@@ -520,6 +534,7 @@ export function summarizeShadows(
   let unpriced = 0;
   let testOpen = 0;
   let shortOpen = 0;
+  let earningsOpen = 0;
   let vwapOpen = 0;
   let timeOpen = 0;
 
@@ -531,6 +546,7 @@ export function summarizeShadows(
       if (row.status === "open") {
         if (!paper) {
           if (section === "short") shortOpen += 1;
+          else if (section === "earnings") earningsOpen += 1;
           else if (section === "vwap") vwapOpen += 1;
           else if (section === "time60") timeOpen += 1;
           else testOpen += 1;
@@ -541,11 +557,13 @@ export function summarizeShadows(
       if (row.pnlDollars == null || row.exitPrice == null) continue;
       const bucket = section === "short"
         ? shortOverall
-        : section === "vwap"
-          ? vwapOverall
-          : section === "time60"
-            ? timeOverall
-            : testOverall;
+        : section === "earnings"
+          ? earningsOverall
+          : section === "vwap"
+            ? vwapOverall
+            : section === "time60"
+              ? timeOverall
+              : testOverall;
       addBucket([bucket], bucket.key, row.pnlDollars, resultOf(row.pnlDollars));
       continue;
     }
@@ -605,6 +623,15 @@ export function summarizeShadows(
       shortOpen,
       EXPERIMENT_SHORT_DTE.minTrust,
       experimentRows(records, paperAlertIds, now, "short"),
+    ),
+    experimentalEarnings: experimentSection(
+      EARNINGS_WINDOW.label,
+      EARNINGS_SECTION_NOTE,
+      earningsWindowTrustNote(earningsOverall.closed),
+      earningsOverall,
+      earningsOpen,
+      EARNINGS_WINDOW.minTrust,
+      experimentRows(records, paperAlertIds, now, "earnings"),
     ),
     vwapPuts: experimentSection(
       VWAP_PUT_TEST.label,
@@ -667,7 +694,7 @@ export function shadowsToCsv(
   const lines = [header.join(",")];
   for (let i = 0; i < records.length; i++) {
     const row = records[i];
-    const counted = row.status === "closed" && row.pnlDollars != null && !paperAlertIds.has(row.alertId) && !isExperimentShadow(row);
+    const counted = row.status === "closed" && row.pnlDollars != null && !paperAlertIds.has(row.alertId) && !excludedFromMainTotals(row);
     lines.push([
       row.id,
       row.ticker,
@@ -854,7 +881,7 @@ function closeShadow(row: ShadowTrade, decision: ExitDecision, now: Date): Shado
 }
 
 function recentRows(records: readonly ShadowTrade[], paperAlertIds: ReadonlySet<string>, now: Date): ShadowListItem[] {
-  const main = records.filter((row) => !isExperimentShadow(row));
+  const main = records.filter((row) => !excludedFromMainTotals(row));
   const open = main.filter((row) => row.status === "open").slice().sort((a, b) => b.openedAt - a.openedAt);
   const closed = main.filter((row) => row.status === "closed").slice().sort((a, b) => (b.closedAt ?? 0) - (a.closedAt ?? 0));
   const picked = open.concat(closed).slice(0, RECENT_LIMIT);
@@ -865,7 +892,7 @@ function experimentRows(
   records: readonly ShadowTrade[],
   paperAlertIds: ReadonlySet<string>,
   now: Date,
-  section: "long" | "short" | "vwap" | "time60",
+  section: "long" | "short" | "earnings" | "vwap" | "time60",
 ): ShadowListItem[] {
   const tests = records.filter((row) => experimentSectionKind(row) === section);
   const open = tests.filter((row) => row.status === "open").slice().sort((a, b) => b.openedAt - a.openedAt);
@@ -914,27 +941,41 @@ function toListItem(row: ShadowTrade, paperAlertIds: ReadonlySet<string>, now: D
 }
 
 function listedCohort(row: Pick<ShadowTrade, "cohort" | "grade">): ShadowCohort {
-  if (row.cohort === "experiment-short" || row.cohort === "vwap-put" || row.cohort === "time-60") return row.cohort;
+  if (
+    row.cohort === "experiment-earnings"
+    || row.cohort === "experiment-short"
+    || row.cohort === "vwap-put"
+    || row.cohort === "time-60"
+  ) return row.cohort;
   if (isExperimentShadow(row)) return "experiment";
   return "ab";
 }
 
-function csvCohort(row: Pick<ShadowTrade, "cohort" | "grade">): string {
-  if (row.cohort === "experiment-short" || row.cohort === "vwap-put" || row.cohort === "time-60") return row.cohort;
-  return isExperimentShadow(row) ? "experiment" : "ab";
-}
-
-function experimentSectionKind(row: Pick<ShadowTrade, "cohort" | "grade">): "long" | "short" | "vwap" | "time60" | null {
+function experimentSectionKind(row: Pick<ShadowTrade, "cohort" | "grade">): "long" | "short" | "earnings" | "vwap" | "time60" | null {
   if (row.cohort === "vwap-put") return "vwap";
   if (row.cohort === "time-60") return "time60";
+  if (row.cohort === "experiment-earnings") return "earnings";
   if (row.cohort === "experiment-short") return "short";
   if (row.cohort === "experiment" || row.grade === "test") return "long";
   return null;
 }
 
+function csvCohort(row: Pick<ShadowTrade, "cohort" | "grade">): ShadowCohort {
+  return listedCohort(row);
+}
+
 function probeNote(row: ShadowTrade): string | null {
   if (row.cohort === "vwap-put") return "Paper put after a minute closed back under session VWAP. This is not an A or a B.";
   if (row.cohort === "time-60") return "Same entry as the saved alert. This 60-minute result is not the scorecard exit.";
+  if (row.cohort === "experiment-earnings") {
+    if (row.grade === "A" || row.grade === "B") {
+      return `Saved as ${row.grade}. Earnings fall inside the hold, so this row is left out of the totals above.`;
+    }
+    if (row.probeGrade === "A" || row.probeGrade === "B") {
+      return `The other rules would say ${row.probeGrade}. The earnings downgrade kept it out of A and B. This is not sent.`;
+    }
+    return "Earnings fall inside the hold. This is not sent.";
+  }
   if (!isExperimentShadow(row)) return null;
   if (row.probeGrade === "A" || row.probeGrade === "B") {
     return `The other rules would say ${row.probeGrade}. This is not an A or a B.`;
@@ -1068,16 +1109,19 @@ function parseShadow(value: unknown): ShadowTrade | null {
   if (!DATE_PATTERN.test(expiration)) return null;
   const grade: ShadowGrade | null = row.grade === "A" || row.grade === "B" || row.grade === "test" ? row.grade : null;
   if (!grade) return null;
-  const cohort: ShadowCohort = row.cohort === "experiment-short"
-    ? "experiment-short"
-    : row.cohort === "vwap-put"
-      ? "vwap-put"
-      : row.cohort === "time-60"
-        ? "time-60"
-        : row.cohort === "experiment" || grade === "test"
-          ? "experiment"
-          : "ab";
-  if (cohort !== "ab" && grade !== "test") return null;
+  const cohort: ShadowCohort = row.cohort === "experiment-earnings"
+    ? "experiment-earnings"
+    : row.cohort === "experiment-short"
+      ? "experiment-short"
+      : row.cohort === "vwap-put"
+        ? "vwap-put"
+        : row.cohort === "time-60"
+          ? "time-60"
+          : row.cohort === "experiment" || grade === "test"
+            ? "experiment"
+            : "ab";
+  if (cohort === "experiment-earnings" && grade !== "test" && grade !== "A" && grade !== "B") return null;
+  if ((cohort === "experiment" || cohort === "experiment-short" || cohort === "vwap-put" || cohort === "time-60") && grade !== "test") return null;
   if (cohort === "ab" && grade === "test") return null;
   const probeGrade = row.probeGrade === "A" || row.probeGrade === "B" ? row.probeGrade : null;
   if (row.contracts !== 1) return null;
@@ -1151,8 +1195,9 @@ function experimentLabelOf(value: unknown, cohort: ShadowCohort): string | null 
   if (cohort === "time-60") {
     return typeof value === "string" && value.trim() ? value.trim().slice(0, 80) : TIME_STOP_60.label;
   }
-  if (cohort !== "experiment" && cohort !== "experiment-short") return null;
+  if (cohort !== "experiment" && cohort !== "experiment-short" && cohort !== "experiment-earnings") return null;
   if (typeof value === "string" && value.trim()) return value.trim().slice(0, 80);
+  if (cohort === "experiment-earnings") return EARNINGS_WINDOW.label;
   return cohort === "experiment-short" ? EXPERIMENT_SHORT_DTE.label : EXPERIMENT_DTE.label;
 }
 

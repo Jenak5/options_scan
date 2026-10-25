@@ -14,7 +14,8 @@ import { hasValidBearer } from "@/app/lib/auth";
 import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import type { ResearchCandidate } from "@/app/lib/researchTrack";
-import { openMissingShadows, openScanTickers, recordExperimentalShadows, recordVwapRejectionPuts, runShadowPass } from "@/app/lib/shadowStore";
+import { earningsDateMapForRows, windowEarningsDateForContract } from "@/app/lib/earningsWindow";
+import { openMissingShadows, openScanTickers, recordEarningsWindowShadows, recordExperimentalShadows, recordVwapRejectionPuts, runShadowPass } from "@/app/lib/shadowStore";
 import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow, isMarketDay } from "@/app/lib/marketHours";
 import { preferredDataSource } from "@/app/lib/dataSourcePref";
 import { isFatalSchwabError, isSchwabBackupMiss, rethrowIfSchwabOnly } from "@/app/lib/marketData";
@@ -288,6 +289,7 @@ async function handleCron(request: NextRequest) {
       log.push(`Chain errors: ${scan.errors.map((item) => item.ticker).join(", ")}`);
     }
     log.push(`Scored ${scan.rows.length} contracts across ${scan.watchlist.length} tickers${scan.cached ? " (cached)" : ""}`);
+    const earningsDates = await earningsDateMapForRows(scan.rows, now);
     try {
       const checked = await recordOpeningChecks(scan.chainInterest, now);
       log.push(`Opening check: ${checked} alert${checked === 1 ? "" : "s"} updated from this chain`);
@@ -394,7 +396,13 @@ async function handleCron(request: NextRequest) {
       log.push(`${row.ticker}: Grok clean — ${reason}`);
 
       const alertId = `${now.getTime()}-${row.id}`;
-      const saved = await rememberSentAlert(row, verdict, now);
+      const windowDate = windowEarningsDateForContract({
+        ticker: row.ticker,
+        expiration: row.expiration,
+        now,
+        dates: earningsDates,
+      });
+      const saved = await rememberSentAlert(row, verdict, now, windowDate);
       if (saved) summary.alertsSaved += 1;
       if (saved) {
         handledContractIds.add(dayKey(tradingDay, row.id));
@@ -415,6 +423,14 @@ async function handleCron(request: NextRequest) {
     try {
       const openedLate = await openMissingShadows();
       noteShadows(summary, openedLate.opened, 0, 0, openedLate.saved);
+      try {
+        const earningsWindow = await recordEarningsWindowShadows(scan.rows, losses, now, earningsDates);
+        const noun = earningsWindow.opened === 1 ? "shadow" : "shadows";
+        log.push(`Earnings in window: ${earningsWindow.opened} new paper ${noun} (not alerted)`);
+      } catch (err) {
+        rethrowIfSchwabOnly(err);
+        log.push("Earnings in window update failed");
+      }
       if (openedLate.opened > 0 && openedLate.saved) shadowAt = now.getTime();
       const shadow = await markShadows(now, log, graded.map((item) => ({ row: item.row, grade: item.verdict.grade })));
       noteShadows(summary, shadow.opened, shadow.quoted, shadow.closed, shadow.saved);

@@ -56,6 +56,12 @@ export interface StoredAlert {
   /** Earnings and macro line at send time. Null on alerts saved before this field existed. */
   eventLine: string | null;
   /**
+   * Earnings date used only to place this alert in the scorecard group.
+   * Tastytrade first, Yahoo when that date is missing. Absent on older alerts.
+   * It does not change the grade or the event line.
+   */
+  windowEarningsDate?: string | null;
+  /**
    * Grading inputs at send time.
    * Missing on alerts saved before learning mode. Those are backfilled only from fields already stored.
    */
@@ -531,6 +537,9 @@ function parseAlert(value: unknown): StoredAlert | null {
     outcome: "pending",
   };
   if (row.trackQuotes === true) alert.trackQuotes = true;
+  if (typeof row.windowEarningsDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(row.windowEarningsDate)) {
+    alert.windowEarningsDate = row.windowEarningsDate;
+  }
   alert.outcome = gradeOutcome(alert);
   return alert;
 }

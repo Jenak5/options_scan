@@ -53,7 +53,7 @@ export function timeStopSourceId(id: string): string | null {
 /** Turn a just-opened A or B shadow into its 60-minute paper row. */
 export function timeStopFromShadow(base: ShadowTrade): ShadowTrade | null {
   if (base.grade !== "A" && base.grade !== "B") return null;
-  if (base.cohort !== "ab") return null;
+  if (base.cohort !== "ab" && base.cohort !== "experiment-earnings") return null;
   const id = timeStopId(base.alertId);
   if (!id) return null;
   return {

@@ -1,4 +1,4 @@
-import { ALERT_RULES, EXPERIMENT_DTE, EXPERIMENT_SHORT_DTE, TRADE_RULES } from "@/app/lib/alertConfig";
+import { ALERT_RULES, EARNINGS_WINDOW, EXPERIMENT_DTE, EXPERIMENT_SHORT_DTE, TRADE_RULES } from "@/app/lib/alertConfig";
 import {
   emptyFeatures,
   featuresForAlert,
@@ -10,7 +10,7 @@ import { calendarDaysBetween, newYorkDate } from "@/app/lib/flow";
 import { likelySideFromEstimate, likelySideText, openingLabel } from "@/app/lib/quoteSide";
 import { MAX_BID_ASK_SPREAD_OF_MID, MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import { chicagoClock } from "@/app/lib/marketHours";
-import { SHADOW_MIN_TRUST, isExperimentShadow, isSideStudyShadow, shadowExitLabel, type ShadowTrade } from "@/app/lib/shadow";
+import { SHADOW_MIN_TRUST, excludedFromMainTotals, isExperimentShadow, isSideStudyShadow, shadowExitLabel, type ShadowTrade } from "@/app/lib/shadow";
 import type { CandleBar } from "@/app/lib/candleTypes";
 import { whatIfFromShadows, type WhatIfReport } from "@/app/lib/exitWhatIf";
 import { analyzeShadowRule, type ShadowRuleReport } from "@/app/lib/candidateRule";
@@ -69,7 +69,7 @@ export interface LearnTrade {
   strike: number;
   expiration: string;
   gradeLabel: string;
-  cohort: "ab" | "experiment" | "experiment-short" | "paper";
+  cohort: "ab" | "experiment" | "experiment-short" | "experiment-earnings" | "paper";
   exitReason: string;
   exitDetail: string;
   pnlDollars: number;
@@ -306,7 +306,7 @@ function buildTrades(input: LearnInput): { trades: LearnTrade[]; omittedShadows:
     if (metrics.pnlDollars == null || metrics.result == null) continue;
     if (trade.alertId && usedPaper.has(trade.alertId)) continue;
     const shadow = findShadow(input.shadows, trade.alertId);
-    if (shadow && shadow.status === "closed" && shadow.pnlDollars != null && !isExperimentShadow(shadow)) {
+    if (shadow && shadow.status === "closed" && shadow.pnlDollars != null && !excludedFromMainTotals(shadow)) {
       // The shadow was omitted above. This paper trade is the one result.
     }
     const alert = trade.alertId ? alerts.get(trade.alertId) ?? null : null;
@@ -319,7 +319,8 @@ function buildTrades(input: LearnInput): { trades: LearnTrade[]; omittedShadows:
 }
 
 function fromShadow(shadow: ShadowTrade, alert: StoredAlert | null): LearnTrade {
-  const test = isExperimentShadow(shadow);
+  const earnings = shadow.cohort === "experiment-earnings";
+  const test = excludedFromMainTotals(shadow);
   const short = shadow.cohort === "experiment-short";
   const marks = marksOf(shadow, alert);
   const features = resolveFeatures(shadow, alert, null);
@@ -330,8 +331,8 @@ function fromShadow(shadow: ShadowTrade, alert: StoredAlert | null): LearnTrade 
     putCall: shadow.putCall,
     strike: shadow.strike,
     expiration: shadow.expiration,
-    gradeLabel: short ? EXPERIMENT_SHORT_DTE.label : test ? EXPERIMENT_DTE.label : shadow.grade,
-    cohort: short ? "experiment-short" : test ? "experiment" : "ab",
+    gradeLabel: earnings ? EARNINGS_WINDOW.label : short ? EXPERIMENT_SHORT_DTE.label : test ? EXPERIMENT_DTE.label : shadow.grade,
+    cohort: earnings ? "experiment-earnings" : short ? "experiment-short" : test ? "experiment" : "ab",
     exitReason: shadow.exitReason ?? "unknown",
     exitDetail: shadowExitLabel(shadow.exitReason, shadow.cohort) || "Exit reason was not stored.",
     pnlDollars: shadow.pnlDollars ?? 0,
@@ -562,9 +563,9 @@ function factorSpecs(): FactorSpec[] {
     {
       id: "dte",
       label: "Days to expiry",
-      cuts: `${dteMin}–${dteMax} is the A/B window, split at 27 so the two halves can be compared. ${EXPERIMENT_SHORT_DTE.min}–${EXPERIMENT_SHORT_DTE.max} and ${EXPERIMENT_DTE.min}–${EXPERIMENT_DTE.max} are tests. That split is not a new rule.`,
+      cuts: `${dteMin}–${dteMax} is the A/B window, split at 27 so the two halves can be compared. ${EXPERIMENT_SHORT_DTE.min}–${EXPERIMENT_SHORT_DTE.max} and ${EXPERIMENT_DTE.min}–${EXPERIMENT_DTE.max} are tests. Earnings in window is its own group. That split is not a new rule.`,
       includeTest: true,
-      order: ["1-13 days (test)", "Under 14 days", "14–27 days", "28–42 days", "43–60 days (test)", "Over 60 days"],
+      order: ["1-13 days (test)", "Under 14 days", "14–27 days", "28–42 days", "43–60 days (test)", "Earnings in window", "Over 60 days"],
       bucketOf: dteBucket,
     },
     {
@@ -799,38 +800,49 @@ function dteSentence(factor: LearnFactor, testResolved: number): string {
   const test = factor.buckets.find((bucket) => bucket.key === "43–60 days (test)");
   const early = factor.buckets.find((bucket) => bucket.key === "14–27 days");
   const late = factor.buckets.find((bucket) => bucket.key === "28–42 days");
+  const short = factor.buckets.find((bucket) => bucket.key === "1-13 days (test)");
+  const earnings = factor.buckets.find((bucket) => bucket.key === "Earnings in window");
   const window = mergeBuckets(early, late);
-  const testText = test && test.count > 0
+  const sideGroups = (short?.count ?? 0) + (earnings?.count ?? 0);
+  const longCount = test?.count ?? (sideGroups > 0 ? 0 : testResolved);
+  const testText = longCount > 0 && test
     ? `Test 43–60 DTE is ${forCount(test)}`
-    : `Test 43–60 DTE has ${testResolved} resolved results`;
+    : `Test 43–60 DTE has ${longCount} resolved results`;
   const windowText = window.count > 0
     ? `The 14–42 day window is ${forCount(window)}`
     : "The 14–42 day window has no resolved results in that split yet";
-  const trust = (test?.count ?? testResolved) < EXPERIMENT_DTE.minTrust
+  const trust = longCount < EXPERIMENT_DTE.minTrust
     ? ` Fewer than ${EXPERIMENT_DTE.minTrust} test results is too few to consider widening that window.`
     : " That is enough test results to describe, and it is still not a reason to change the rule.";
   let text = `${testText}. ${windowText}.${trust} The 14–42 day rule is unchanged.`;
-  const short = factor.buckets.find((bucket) => bucket.key === "1-13 days (test)");
   if (short && short.count > 0) {
     const shortTrust = short.count < EXPERIMENT_SHORT_DTE.minTrust
       ? ` Fewer than ${EXPERIMENT_SHORT_DTE.minTrust} of those results is too few to consider a shorter window.`
       : " That is enough to describe, and it is still not a reason to change the rule.";
     text += ` Test 1–13 DTE is ${forCount(short)}.${shortTrust} The 14–42 day rule is unchanged.`;
   }
+  if (earnings && earnings.count > 0) {
+    const earningsTrust = earnings.count < EARNINGS_WINDOW.minTrust
+      ? ` Fewer than ${EARNINGS_WINDOW.minTrust} of those results is too few to reconsider the earnings downgrade.`
+      : " That is enough to describe, and it is still not a reason to change the earnings downgrade.";
+    text += ` Earnings in window is ${forCount(earnings)}.${earningsTrust} The earnings downgrade is unchanged.`;
+  }
   return text;
 }
 
 function testCohortSentence(report: LearnReport): string {
   const dte = report.factors.find((factor) => factor.id === "dte");
-  const long = dte?.buckets.find((bucket) => bucket.key === "43–60 days (test)")?.count ?? report.testResolved;
+  const long = dte?.buckets.find((bucket) => bucket.key === "43–60 days (test)")?.count ?? 0;
   const short = dte?.buckets.find((bucket) => bucket.key === "1-13 days (test)")?.count ?? 0;
+  const earnings = dte?.buckets.find((bucket) => bucket.key === "Earnings in window")?.count ?? 0;
   const parts = [`${long} resolved test shadows (43–60 days)`];
   if (short > 0) parts.push(`${short} resolved test shadows (1–13 days)`);
+  if (earnings > 0) parts.push(`${earnings} resolved in Earnings in window`);
   return `${parts.join(". ")}.`;
 }
 
 function isLearnTest(row: LearnTrade): boolean {
-  return row.cohort === "experiment" || row.cohort === "experiment-short";
+  return row.cohort === "experiment" || row.cohort === "experiment-short" || row.cohort === "experiment-earnings";
 }
 
 function gapSentence(factor: LearnFactor): string {
@@ -871,6 +883,9 @@ function suggestionLines(factors: readonly LearnFactor[]): string[] {
     if (item.factor.id === "dte" && (item.bucket.key.includes("43") || item.bucket.key.includes("1-13"))) {
       line += " The 14–42 day rule is unchanged.";
     }
+    if (item.factor.id === "dte" && item.bucket.key === "Earnings in window") {
+      line += " The earnings downgrade is unchanged.";
+    }
     lines.push(line);
   }
   if (lines.length === 0) {
@@ -880,6 +895,7 @@ function suggestionLines(factors: readonly LearnFactor[]): string[] {
 }
 
 function dteBucket(row: LearnTrade): string | null {
+  if (row.cohort === "experiment-earnings") return "Earnings in window";
   if (row.cohort === "experiment-short") return "1-13 days (test)";
   if (row.cohort === "experiment") return "43–60 days (test)";
   const dte = row.features.dte;
@@ -1093,7 +1109,7 @@ function tally(rows: readonly LearnTrade[]): { count: number; wins: number; loss
 function countOpenTests(shadows: readonly ShadowTrade[]): number {
   let open = 0;
   for (let i = 0; i < shadows.length; i++) {
-    if (shadows[i].status === "open" && isExperimentShadow(shadows[i]) && !isSideStudyShadow(shadows[i])) open += 1;
+    if (shadows[i].status === "open" && excludedFromMainTotals(shadows[i]) && !isSideStudyShadow(shadows[i])) open += 1;
   }
   return open;
 }
