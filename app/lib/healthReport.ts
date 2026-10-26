@@ -12,6 +12,10 @@ import { excludedFromMainTotals, type ShadowTrade } from "@/app/lib/shadow";
 export interface HealthReport {
   lastScanAt: string | null;
   lastScanOutcome: ScanOutcome | null;
+  /** How many tickers the last scan did not read. */
+  skippedTickers: number;
+  /** Those tickers. Empty when the last scan skipped none. */
+  skippedTickerList: string[];
   lastCronAt: string | null;
   lastCronOutcome: ScanOutcome | null;
   lastBrowserScanAt: string | null;
@@ -72,6 +76,8 @@ export function buildHealthReport(input: {
   return {
     lastScanAt: iso(latest.at),
     lastScanOutcome: latest.outcome,
+    skippedTickers: latest.skippedTickers.length,
+    skippedTickerList: latest.skippedTickers,
     lastCronAt: iso(input.health.lastRunAt),
     lastCronOutcome: input.health.lastOutcome,
     lastBrowserScanAt: iso(input.health.lastBrowserScanAt),

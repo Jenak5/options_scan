@@ -26,7 +26,7 @@ export function scanSlotKey(ms: number): string {
   return `${date.getUTCFullYear()}-${date.getUTCMonth() + 1}-${date.getUTCDate()}-${date.getUTCHours()}-${minute}`;
 }
 
-export type ScanOutcome = "success" | "skipped" | "failed";
+export type ScanOutcome = "success" | "partial" | "skipped" | "failed";
 export type ScanSlot = "ok" | "busy" | "recent";
 
 export interface ScanHealth {
@@ -41,7 +41,16 @@ export interface ScanHealth {
    * This does not claim the cron slot. A page load must not block the scheduled scan.
    */
   lastBrowserScanAt: number | null;
+  /**
+   * Outcome of the Flow page or manual alert scan recorded in lastBrowserScanAt.
+   * Null on rows saved before this field existed. Those still read as success.
+   */
+  lastBrowserOutcome: ScanOutcome | null;
+  /** Tickers that Flow page or manual scan did not read. */
+  lastBrowserSkippedTickers: string[];
   lastOutcome: ScanOutcome | null;
+  /** Tickers the scheduled scan did not read. Empty unless lastOutcome is partial. */
+  lastSkippedTickers: string[];
   lastReason: string | null;
   skipNotifiedAt: number | null;
   tastytradeOk: boolean | null;
@@ -51,7 +60,7 @@ export interface ScanHealth {
 }
 
 export interface ScanRunSummary {
-  outcome: "success" | "skipped" | "failed" | "unauthorized";
+  outcome: "success" | "partial" | "skipped" | "failed" | "unauthorized";
   tickers: number;
   alertsSaved: number;
   shadowsOpened: number;
@@ -79,7 +88,10 @@ export function emptyScanHealth(): ScanHealth {
     runStartedAt: null,
     lastShadowAt: null,
     lastBrowserScanAt: null,
+    lastBrowserOutcome: null,
+    lastBrowserSkippedTickers: [],
     lastOutcome: null,
+    lastSkippedTickers: [],
     lastReason: null,
     skipNotifiedAt: null,
     tastytradeOk: null,
@@ -93,16 +105,17 @@ export function parseScanHealth(value: unknown): ScanHealth {
   const empty = emptyScanHealth();
   if (!value || typeof value !== "object" || Array.isArray(value)) return empty;
   const row = value as Partial<ScanHealth>;
-  const outcome = row.lastOutcome === "success" || row.lastOutcome === "skipped" || row.lastOutcome === "failed"
-    ? row.lastOutcome
-    : null;
+  const outcome = knownOutcome(row.lastOutcome);
   return {
     lastSuccessAt: timeOrNull(row.lastSuccessAt),
     lastRunAt: timeOrNull(row.lastRunAt),
     runStartedAt: timeOrNull(row.runStartedAt),
     lastShadowAt: timeOrNull(row.lastShadowAt),
     lastBrowserScanAt: timeOrNull(row.lastBrowserScanAt),
+    lastBrowserOutcome: knownOutcome(row.lastBrowserOutcome),
+    lastBrowserSkippedTickers: normalizeSkippedTickers(row.lastBrowserSkippedTickers),
     lastOutcome: outcome,
+    lastSkippedTickers: normalizeSkippedTickers(row.lastSkippedTickers),
     lastReason: clip(row.lastReason),
     skipNotifiedAt: timeOrNull(row.skipNotifiedAt),
     tastytradeOk: row.tastytradeOk === true ? true : row.tastytradeOk === false ? false : null,
@@ -115,7 +128,7 @@ export function parseScanHealth(value: unknown): ScanHealth {
 /**
  * One Schwab pass at a time. A run that started and has not finished holds the slot
  * until SCAN_IN_PROGRESS_MS, which is longer than the 5-minute cadence.
- * A finished success holds the same UTC 5-minute slot, and also the next
+ * A finished success or partial run holds the same UTC 5-minute slot, and also the next
  * SCAN_RECENT_SUCCESS_MS, so a retry cannot double-read the chains.
  * The next scheduled slot is a different key and is outside that window, so it runs.
  */
@@ -145,13 +158,50 @@ export function formatScanRunLine(summary: ScanRunSummary): string {
 }
 
 /** The newer of the scheduled scan and a Flow page load. */
-export function latestScan(health: ScanHealth): { at: number | null; outcome: ScanOutcome | null } {
+export function latestScan(health: ScanHealth): {
+  at: number | null;
+  outcome: ScanOutcome | null;
+  skippedTickers: string[];
+} {
   const browser = health.lastBrowserScanAt;
   const cron = health.lastRunAt;
   if (browser != null && (cron == null || browser > cron)) {
-    return { at: browser, outcome: "success" };
+    const skipped = normalizeSkippedTickers(health.lastBrowserSkippedTickers);
+    const outcome = health.lastBrowserOutcome ?? (skipped.length > 0 ? "partial" : "success");
+    return {
+      at: browser,
+      outcome,
+      skippedTickers: outcome === "partial" ? skipped : [],
+    };
   }
-  return { at: cron, outcome: health.lastOutcome };
+  const skipped = normalizeSkippedTickers(health.lastSkippedTickers);
+  return {
+    at: cron,
+    outcome: health.lastOutcome,
+    skippedTickers: health.lastOutcome === "partial" ? skipped : [],
+  };
+}
+
+const SKIPPED_TICKER = /^[A-Z][A-Z0-9.\-]{0,9}$/;
+const MAX_SKIPPED_TICKERS = 48;
+
+/** Tickers only. Drops duplicates and anything that is not a symbol. */
+export function normalizeSkippedTickers(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < value.length && out.length < MAX_SKIPPED_TICKERS; i++) {
+    if (typeof value[i] !== "string") continue;
+    const ticker = value[i].trim().toUpperCase();
+    if (!SKIPPED_TICKER.test(ticker) || seen.has(ticker)) continue;
+    seen.add(ticker);
+    out.push(ticker);
+  }
+  return out;
+}
+
+function knownOutcome(value: unknown): ScanOutcome | null {
+  return value === "success" || value === "partial" || value === "skipped" || value === "failed" ? value : null;
 }
 
 export function scanFreshness(health: ScanHealth): ScanFreshness {

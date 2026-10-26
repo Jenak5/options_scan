@@ -11,19 +11,18 @@ import {
 import { currentDailyLoss, loadAlertBook, recordOpeningChecks, rememberSentAlert } from "@/app/lib/alertStore";
 import { lastAlertBookWriteError, noteAlertSentUnsaved, readScanHealth, withBlobReadCache, writeScanHealth } from "@/app/lib/schwabStore";
 import { hasValidBearer } from "@/app/lib/auth";
-import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
+import { TICKER_GROUP_PAUSE_MS, flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import type { ResearchCandidate } from "@/app/lib/researchTrack";
 import { earningsDateMapForRows, windowEarningsDateForContract } from "@/app/lib/earningsWindow";
 import { openMissingShadows, openScanTickers, recordEarningsWindowShadows, recordExperimentalShadows, recordVwapRejectionPuts, runShadowPass } from "@/app/lib/shadowStore";
 import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow, isMarketDay } from "@/app/lib/marketHours";
 import { preferredDataSource } from "@/app/lib/dataSourcePref";
-import { isFatalSchwabError, isSchwabBackupMiss, rethrowIfSchwabOnly } from "@/app/lib/marketData";
-import { emptyScanHealth, formatScanRunLine, scanSlotDecision, skipNotifyDue, skipTelegramText, skipWarning, type ScanHealth, type ScanRunSummary } from "@/app/lib/scanHealth";
-import { sendTelegramAlert } from "@/app/lib/telegram";
+import { BothSourcesFailedError, isFatalSchwabError, isSchwabBackupMiss, rethrowIfSchwabOnly } from "@/app/lib/marketData";
+import { emptyScanHealth, formatScanRunLine, normalizeSkippedTickers, scanSlotDecision, skipNotifyDue, skipTelegramText, skipWarning, type ScanHealth, type ScanRunSummary } from "@/app/lib/scanHealth";
 import { probeTastytrade, tastytradeEnabled } from "@/app/lib/tastytrade";
 import { planExitsForAsk } from "@/app/lib/exits";
-import { formatVerdictHtml, paperTradeLinkHtml } from "@/app/lib/telegram";
+import { formatVerdictHtml, paperTradeLinkHtml, sendTelegramAlert } from "@/app/lib/telegram";
 import type { AlertVerdict } from "@/app/lib/verdict";
 import { formatVolArbSummary, type VolArbReading, type VolSignal } from "@/app/lib/volArb";
 import { scanVolArb } from "@/app/lib/volScan";
@@ -53,7 +52,6 @@ export const maxDuration = 300;
 // ═══════════════════════════════════════════════════════════════════════════
 
 const XAI_API = "https://api.x.ai/v1/chat/completions";
-const TG_API  = (token: string) => `https://api.telegram.org/bot${token}`;
 
 // Best-effort dedupe for this process. The alert book is the record that survives a cold start.
 // A contract is marked handled only after it is saved, or after Grok flags it.
@@ -183,22 +181,6 @@ function mergeDayKeys(tradingDay: string, fromBook: ReadonlySet<string>, memory:
   return merged;
 }
 
-async function sendTelegram(message: string): Promise<boolean> {
-  const token  = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = process.env.TELEGRAM_CHAT_ID;
-  if (!token || !chatId) return false;
-  try {
-    const res = await fetch(`${TG_API(token)}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text: message, parse_mode: "HTML" }),
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
 // ── Main handler ──────────────────────────────────────────────────────────
 export async function GET(request: NextRequest) {
   return withBlobReadCache(() => handleCron(request));
@@ -284,9 +266,11 @@ async function handleCron(request: NextRequest) {
     log.push(flowCronSliceNote(plan, watchlist.length, process.env.FLOW_WATCHLIST));
     const scan = await scanEstimatedFlow({
       tickers: plan.tickers,
+      groupPauseMs: TICKER_GROUP_PAUSE_MS,
     });
-    if (scan.errors.length > 0) {
-      log.push(`Chain errors: ${scan.errors.map((item) => item.ticker).join(", ")}`);
+    const skippedNames = normalizeSkippedTickers(scan.errors.map((item) => item.ticker));
+    if (skippedNames.length > 0) {
+      log.push(`Chain errors: ${skippedNames.join(", ")}`);
     }
     log.push(`Scored ${scan.rows.length} contracts across ${scan.watchlist.length} tickers${scan.cached ? " (cached)" : ""}`);
     const earningsDates = await earningsDateMapForRows(scan.rows, now);
@@ -408,7 +392,7 @@ async function handleCron(request: NextRequest) {
         handledContractIds.add(dayKey(tradingDay, row.id));
         handledSetupKeys.add(dayKey(tradingDay, setup));
       }
-      const delivered = await sendTelegram(formatAlert(row, volSummary, signal, reason, verdict, alertId, saved));
+      const delivered = await sendTelegramAlert(formatAlert(row, volSummary, signal, reason, verdict, alertId, saved));
       if (delivered) alertsSent++;
       if (saved && delivered) {
         log.push(`${row.ticker}: Telegram alert sent and saved (${verdict.verdictLabel} ${verdict.grade})`);
@@ -439,8 +423,9 @@ async function handleCron(request: NextRequest) {
       rethrowIfSchwabOnly(err);
       log.push("Shadow alert update failed");
     }
-    summary.outcome = "success";
-    await rememberScan("success", now, null, shadowAt);
+    const outcome = skippedNames.length > 0 ? "partial" : "success";
+    summary.outcome = outcome;
+    await rememberScan(outcome, now, null, shadowAt, skippedNames);
   } catch (err) {
     if (isFatalSchwabError(err) && err instanceof Error) {
       console.warn(skipWarning(err.message));
@@ -455,8 +440,10 @@ async function handleCron(request: NextRequest) {
       const line = err instanceof Error ? err.message.slice(0, 180) : "ticker skipped";
       console.warn(line);
       log.push(line);
-      summary.outcome = "success";
-      await rememberScan("success", now, null, shadowAt);
+      const skipped = normalizeSkippedTickers(err instanceof BothSourcesFailedError ? [err.label] : []);
+      const outcome = skipped.length > 0 ? "partial" : "success";
+      summary.outcome = outcome;
+      await rememberScan(outcome, now, null, shadowAt, skipped);
       console.info(formatScanRunLine(summary));
       return NextResponse.json({ alertsSent, alertsSaved: summary.alertsSaved, log });
     }
@@ -548,10 +535,11 @@ async function claimScanSlot(now: number, manual: boolean): Promise<"ok" | "busy
 }
 
 async function rememberScan(
-  outcome: "success" | "skipped" | "failed",
+  outcome: "success" | "partial" | "skipped" | "failed",
   now: Date,
   reason: string | null,
   shadowAt: number | null,
+  skippedTickers: readonly string[] = [],
 ): Promise<void> {
   try {
     const current = await readScanHealth().catch(() => emptyScanHealth());
@@ -563,12 +551,15 @@ async function rememberScan(
         tasty = null;
       }
     }
+    const named = normalizeSkippedTickers(skippedTickers);
+    const storedOutcome = outcome === "partial" && named.length === 0 ? "success" : outcome;
     const next: ScanHealth = {
       ...current,
       lastRunAt: now.getTime(),
-      lastOutcome: outcome,
+      lastOutcome: storedOutcome,
       lastReason: reason,
-      lastSuccessAt: outcome === "success" ? now.getTime() : current.lastSuccessAt,
+      lastSkippedTickers: storedOutcome === "partial" ? named : [],
+      lastSuccessAt: storedOutcome === "success" || storedOutcome === "partial" ? now.getTime() : current.lastSuccessAt,
       lastShadowAt: shadowAt ?? current.lastShadowAt,
       tastytradeOk: tastytradeEnabled() ? (tasty ? tasty.ok : current.tastytradeOk) : null,
       tastytradeStatus: tastytradeEnabled() ? (tasty ? tasty.status : current.tastytradeStatus) : null,

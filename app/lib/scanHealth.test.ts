@@ -5,6 +5,9 @@ import {
   SCHWAB_BACKUP_NOTE,
   formatChicagoStamp,
   formatScanRunLine,
+  latestScan,
+  normalizeSkippedTickers,
+  parseScanHealth,
   refreshCountdown,
   scanFreshness,
   scanIsStale,
@@ -239,5 +242,29 @@ describe("scan log line", () => {
     }));
     expect(browser.lastScan).toContain("success");
     expect(browser.lastScanAt).toBe(Date.parse("2026-10-06T18:05:00Z"));
+  });
+});
+
+describe("skipped tickers", () => {
+  it("keeps a partial run and only real tickers", () => {
+    expect(normalizeSkippedTickers(["xlf", "XLF", "not a ticker", "GLD", ""])).toEqual(["XLF", "GLD"]);
+    const parsed = parseScanHealth({
+      lastOutcome: "partial",
+      lastSkippedTickers: ["XLF", "bearer secret"],
+      lastBrowserOutcome: "partial",
+      lastBrowserSkippedTickers: ["tlt"],
+    });
+    expect(parsed.lastOutcome).toBe("partial");
+    expect(parsed.lastSkippedTickers).toEqual(["XLF"]);
+    expect(parsed.lastBrowserSkippedTickers).toEqual(["TLT"]);
+    expect(JSON.stringify(parsed)).not.toContain("secret");
+    expect(latestScan(parsed).skippedTickers).toEqual(["XLF"]);
+    const page = latestScan({
+      ...parsed,
+      lastRunAt: 1,
+      lastBrowserScanAt: 2,
+    });
+    expect(page.outcome).toBe("partial");
+    expect(page.skippedTickers).toEqual(["TLT"]);
   });
 });

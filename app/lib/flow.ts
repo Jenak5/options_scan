@@ -117,6 +117,19 @@ export const FLOW_FUNCTION_BUDGET_MS = 300_000;
 
 export const FLOW_CACHE_MS = 60_000;
 
+/**
+ * The Flow page reuses one ticker's chain when a scan fetched it inside this window.
+ * A fresh pull still uses that copy. The scheduled scan fetches again.
+ */
+export const FLOW_CHAIN_REUSE_MS = 5 * 60 * 1000;
+
+/** Wait between ticker groups so Tastytrade is not burst right after a login. */
+export const TICKER_GROUP_PAUSE_MS = 1_500;
+
+export function pauseBetweenTickerGroups(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, TICKER_GROUP_PAUSE_MS));
+}
+
 export const SIDE_NOTE =
   "Estimate from the last price versus the bid and ask. Not a trade print and not a sweep.";
 

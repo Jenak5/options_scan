@@ -15,6 +15,7 @@ import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import { preferredDataSource } from "@/app/lib/dataSourcePref";
 import { BothSourcesFailedError, isSchwabBackupMiss } from "@/app/lib/marketData";
 import { noteBrowserScan } from "@/app/lib/pageScan";
+import { normalizeSkippedTickers } from "@/app/lib/scanHealth";
 import { earningsDateMapForRows, windowEarningsDateForContract } from "@/app/lib/earningsWindow";
 import { markShadowsFromRows, openMissingShadows, openScanTickers } from "@/app/lib/shadowStore";
 import { chicagoDate, isMarketDay } from "@/app/lib/marketHours";
@@ -119,7 +120,13 @@ export async function GET(request: NextRequest) {
             graded.map((item) => ({ row: item.row, grade: item.verdict.grade })),
           );
           const touched = (opened.saved && opened.opened > 0) || (marks.saved && (marks.marked > 0 || marks.closed > 0));
-          await noteBrowserScan(now, touched ? now.getTime() : null);
+          const skippedNames = normalizeSkippedTickers(scan.errors.map((item) => item.ticker));
+          await noteBrowserScan(
+            now,
+            touched ? now.getTime() : null,
+            skippedNames.length > 0 ? "partial" : "success",
+            skippedNames,
+          );
           log.push(`Shadows: ${opened.opened} opened, ${marks.marked} marked from this scan`);
         } catch {
           log.push("Shadow update failed");
