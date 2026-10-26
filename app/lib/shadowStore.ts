@@ -7,16 +7,35 @@ import { loadCandleSeries } from "@/app/lib/candleStore";
 import type { CandleBar } from "@/app/lib/candleTypes";
 import { chooseEarningsWindow, earningsWindowShadow } from "@/app/lib/earningsWindow";
 import { chooseExperimental, experimentalShadow } from "@/app/lib/experiment";
-import { CORE_FLOW_WATCHLIST, type FlowRow } from "@/app/lib/flow";
-import { chicagoDate, chicagoWallTimeMs, isChicagoMarketHours } from "@/app/lib/marketHours";
-import { fetchOptionCandles, tastytradeCandleConfigured } from "@/app/lib/tastytradeCandles";
+import { addCalendarDays, newYorkDate, type FlowRow } from "@/app/lib/flow";
+import { chicagoDate, chicagoWallTimeMs, previousChicagoTradingDay } from "@/app/lib/marketHours";
+import { getOptionChain, rethrowIfSchwabOnly } from "@/app/lib/marketData";
+import { tastytradeStreamerSymbol } from "@/app/lib/optionStreamer";
+import { CANDLE_SUBSCRIPTION_LIMIT, fetchOptionCandles, tastytradeCandleConfigured } from "@/app/lib/tastytradeCandles";
 import {
   addTimeStopShadows,
   refineTimeStop,
   syncTimeStops,
   timeStopsNeedingCandles,
 } from "@/app/lib/timeStop60";
-import { chooseVwapPuts, vwapPutShadow } from "@/app/lib/vwapPut";
+import {
+  advancePaperRows,
+  buildPaperRows,
+  chainPutsFromRows,
+  collectSignals,
+  paperExpirations,
+  paperRowDue,
+  premarketHighFromBars,
+  VWAP_PAPER_RULE,
+  VWAP_PAPER_SOURCES,
+  VWAP_SIGNALS_PER_RUN,
+  VWAP_STRIKE_WALK,
+  vwapPaperEntriesOpen,
+  vwapSameDayCloseMs,
+  walkStrikes,
+  type ChainPut,
+  type VwapPaperSignal,
+} from "@/app/lib/vwapPut";
 import {
   addResearchTracks,
   type ResearchCandidate,
@@ -65,6 +84,8 @@ export interface ShadowPassResult {
   researchOpened: number;
   researchQuoted: number;
   researchSkipped: number;
+  /** Backtested VWAP paper rows whose exit or SPY-day flag changed. */
+  paperUpdated: number;
 }
 
 export interface ShadowPage extends ShadowScorecard {
@@ -180,7 +201,7 @@ function applyRowMarks(
   let changed = false;
   const nowMs = now.getTime();
   const records = book.records.map((shadow) => {
-    if (shadow.cohort === "time-60") return shadow;
+    if (shadow.cohort === "time-60" || shadow.paperRuleVersion === VWAP_PAPER_RULE) return shadow;
     if (shadow.status === "closed") {
       if (!shadowPathStillNeeded(shadow, now) || markedTooRecently(shadow, nowMs)) return shadow;
       const quote = quotes.get(contractKey(shadow));
@@ -253,7 +274,7 @@ export async function runShadowPass(
   const quotes = await quoteContractMarks(due.map(asQuotable));
   const quotedIds = new Set<string>();
   const quotedRecords = featured.records.map((row) => {
-    if (row.cohort === "time-60") return row;
+    if (row.cohort === "time-60" || row.paperRuleVersion === VWAP_PAPER_RULE) return row;
     if (row.status === "closed") {
       if (!dueIds.has(row.id)) return row;
       const quote = quotes[row.id] ?? null;
@@ -281,6 +302,7 @@ export async function runShadowPass(
       researchOpened: 0,
       researchQuoted: researchPass.quoted,
       researchSkipped: researchPass.skipped,
+      paperUpdated: await safePaperUpdate(now),
     };
   }
   const saved = await updateShadowBook((current) => {
@@ -295,6 +317,7 @@ export async function runShadowPass(
     researchOpened: saved ? researchAdded.opened : 0,
     researchQuoted: researchPass.quoted,
     researchSkipped: researchPass.skipped,
+    paperUpdated: await safePaperUpdate(now),
   };
 }
 
@@ -365,54 +388,95 @@ async function priceTimeStops(records: readonly ShadowTrade[], now: Date): Promi
   });
 }
 
-const CORE_TICKERS = new Set<string>(CORE_FLOW_WATCHLIST);
-
 /**
- * Paper VWAP puts from contracts this scan already scored.
- * One Tastytrade candle read for the core names. No Schwab call is added, and nothing is sent.
+ * Paper log for the backtested VWAP rejection put.
+ * Reads regular-hours 1-minute candles, then a chain only when a signal is ready.
+ * Nothing here sends an alert or places an order. New rows stop at 3:00 PM Central.
  */
 export async function recordVwapRejectionPuts(
   rows: readonly FlowRow[],
   now: Date,
 ): Promise<{ opened: number; saved: boolean }> {
-  if (!isChicagoMarketHours(now) || !tastytradeCandleConfigured()) return { opened: 0, saved: true };
-  const tickers: string[] = [];
-  const seen = new Set<string>();
-  for (let i = 0; i < rows.length; i++) {
-    const ticker = rows[i].ticker;
-    if (!CORE_TICKERS.has(ticker) || seen.has(ticker)) continue;
-    seen.add(ticker);
-    tickers.push(ticker);
-  }
-  if (tickers.length === 0) return { opened: 0, saved: true };
+  if (!vwapPaperEntriesOpen(now) || !tastytradeCandleConfigured()) return { opened: 0, saved: true };
+  const day = chicagoDate(now);
+  const prior = previousChicagoTradingDay(day);
+  const from = chicagoWallTimeMs(prior ?? day, 8, 30);
+  if (from == null) return { opened: 0, saved: true };
+  const coverUntil = Math.max(from, now.getTime() - 60_000);
   let candles: Map<string, CandleBar[]>;
   try {
-    candles = await fetchCoreUnderlyingMinutes(tickers, now);
+    const fetched = await fetchOptionCandles(VWAP_PAPER_SOURCES.map((ticker) => ({
+      streamer: ticker,
+      fromTime: from,
+      period: "1m" as const,
+      regularHours: true,
+      coverFrom: from,
+      coverUntil,
+    })), { timeoutMs: 18_000, quietMs: 700, emptyWaitMs: 2_500 });
+    candles = fetched.candles;
   } catch {
     return { opened: 0, saved: true };
   }
-  return saveVwapPuts(rows, candles, now);
+  const existing = parseShadowBook(await readShadowBookText()).records;
+  const preview = collectSignals({ candles, now, existing });
+  if (preview.length === 0) return { opened: 0, saved: true };
+  const premarketHigh = await fetchPremarketHighs(preview, now);
+  return saveVwapPuts(rows, candles, now, { fetchChains: true, premarketHigh });
 }
 
-/** Save paper puts from candles the caller already has. Tests use this directly. */
+/**
+ * Save paper puts from candles the caller already has.
+ * `fetchChains` defaults to false so a test can pass strikes and option candles itself.
+ */
 export async function saveVwapPuts(
   rows: readonly FlowRow[],
   candles: ReadonlyMap<string, readonly CandleBar[]>,
   now: Date,
+  context?: {
+    fetchChains?: boolean;
+    premarketHigh?: ReadonlyMap<string, number>;
+    optionBars?: ReadonlyMap<string, readonly CandleBar[]>;
+    puts?: readonly ChainPut[];
+    spots?: ReadonlyMap<string, number>;
+  },
 ): Promise<{ opened: number; saved: boolean }> {
+  if (!vwapPaperEntriesOpen(now)) return { opened: 0, saved: true };
+  const fetchChains = context?.fetchChains === true;
   const current = parseShadowBook(await readShadowBookText());
-  if (chooseVwapPuts({ rows, candles, now, existing: current.records }).length === 0) {
-    return { opened: 0, saved: true };
-  }
+  const preview = collectSignals({
+    candles,
+    now,
+    existing: current.records,
+    premarketHigh: context?.premarketHigh,
+  });
+  if (preview.length === 0) return { opened: 0, saved: true };
+  const batch = fetchChains ? preview.slice(0, VWAP_SIGNALS_PER_RUN) : preview;
+  const loaded = await loadPaperContracts(batch, rows, fetchChains, context?.optionBars, context?.puts, context?.spots);
   let opened = 0;
   const saved = await updateShadowBook((text) => {
     const latest = parseShadowBook(text);
-    const picks = chooseVwapPuts({ rows, candles, now, existing: latest.records });
-    const added: ShadowTrade[] = [];
-    for (let i = 0; i < picks.length; i++) {
-      const shadow = vwapPutShadow(picks[i], now);
-      if (shadow) added.push(shadow);
-    }
+    const signals = collectSignals({
+      candles,
+      now,
+      existing: latest.records,
+      premarketHigh: context?.premarketHigh,
+    });
+    const limited = fetchChains ? signals.slice(0, VWAP_SIGNALS_PER_RUN) : signals;
+    const ready = limited.map((signal) => {
+      if (signal.spot != null && signal.spot > 0) return signal;
+      const spot = loaded.spots.get(signal.ticker);
+      if (spot != null && spot > 0) return { ...signal, spot };
+      return signal;
+    });
+    const built = buildPaperRows({
+      signals: ready,
+      puts: loaded.puts,
+      optionBars: loaded.optionBars,
+      retryRoots: loaded.retryRoots,
+      now,
+    });
+    const have = new Set(latest.records.map((row) => row.id));
+    const added = built.filter((row) => !have.has(row.id));
     opened = added.length;
     if (added.length === 0) return serializeShadowBook(latest);
     return serializeShadowBook(addShadowRecords(latest, added));
@@ -449,23 +513,6 @@ export async function recordEarningsWindowShadows(
     return serializeShadowBook(addShadowRecords(latest, added));
   });
   return { opened: saved ? opened : 0, saved };
-}
-
-export async function fetchCoreUnderlyingMinutes(
-  tickers: readonly string[],
-  now: Date,
-): Promise<Map<string, CandleBar[]>> {
-  const open = chicagoWallTimeMs(chicagoDate(now), 8, 30);
-  if (open == null) return new Map();
-  const coverUntil = Math.max(open, now.getTime() - 60_000);
-  const fetched = await fetchOptionCandles(tickers.map((ticker) => ({
-    streamer: ticker,
-    fromTime: open,
-    period: "1m" as const,
-    coverFrom: open,
-    coverUntil,
-  })), { timeoutMs: 12_000, quietMs: 700, emptyWaitMs: 2_500 });
-  return fetched.candles;
 }
 
 /** Price 60-minute rows from candles just stored. A and B rows are not changed. */
@@ -539,6 +586,237 @@ function countClosed(before: readonly ShadowTrade[], after: readonly ShadowTrade
     if (wasOpen.has(after[i].id) && after[i].status === "closed" && !isSideStudyShadow(after[i])) closed += 1;
   }
   return closed;
+}
+
+async function safePaperUpdate(now: Date): Promise<number> {
+  try {
+    return (await updateVwapPaperExits(now)).updated;
+  } catch {
+    return 0;
+  }
+}
+
+/** Fill 60-minute and flat exits, and SPY's up or down day, from 1-minute candles. */
+export async function updateVwapPaperExits(now: Date): Promise<{ updated: number; saved: boolean }> {
+  if (!tastytradeCandleConfigured()) return { updated: 0, saved: true };
+  const current = parseShadowBook(await readShadowBookText());
+  const due = current.records.filter((row) => paperRowDue(row, now));
+  if (due.length === 0) return { updated: 0, saved: true };
+  const optionDue = due.filter((row) => (
+    !row.noContract && row.status === "open" && row.optionStreamer && (row.exit60 == null || row.exitFlat == null)
+  )).slice(0, 40);
+  const needSpy = due.some((row) => row.spyDay == null);
+  const optionBars = new Map<string, CandleBar[]>();
+  let spyBars: CandleBar[] = [];
+  try {
+    if (optionDue.length > 0) {
+      const fetched = await fetchOptionCandles(optionDue.map((row) => {
+        const from = row.entryAt ?? row.openedAt;
+        const flatAt = vwapSameDayCloseMs(from) ?? now.getTime();
+        const until = Math.max(from, Math.min(now.getTime(), flatAt) - 60_000);
+        return {
+          streamer: row.optionStreamer as string,
+          fromTime: from,
+          period: "1m" as const,
+          regularHours: true,
+          coverFrom: from,
+          coverUntil: until,
+        };
+      }), { timeoutMs: 12_000, quietMs: 700, emptyWaitMs: 2_500 });
+      fetched.candles.forEach((bars, symbol) => optionBars.set(symbol, bars));
+    }
+    if (needSpy) {
+      const day = chicagoDate(now);
+      const prior = previousChicagoTradingDay(day);
+      const from = chicagoWallTimeMs(prior ?? day, 8, 30);
+      if (from != null) {
+        const fetched = await fetchOptionCandles([{
+          streamer: "SPY",
+          fromTime: from,
+          period: "1m" as const,
+          regularHours: true,
+          coverFrom: from,
+          coverUntil: Math.max(from, now.getTime() - 60_000),
+        }], { timeoutMs: 12_000, quietMs: 700, emptyWaitMs: 2_500 });
+        spyBars = fetched.candles.get("SPY") ?? [];
+      }
+    }
+  } catch {
+    return { updated: 0, saved: true };
+  }
+  if (optionBars.size === 0 && spyBars.length === 0) return { updated: 0, saved: true };
+  let updated = 0;
+  const saved = await updateShadowBook((text) => {
+    const book = parseShadowBook(text);
+    const advanced = advancePaperRows(book.records, optionBars, spyBars, now);
+    updated = advanced.updated;
+    if (advanced.updated === 0) return text ?? serializeShadowBook(book);
+    return serializeShadowBook({ version: 1, records: advanced.records, research: book.research });
+  });
+  return { updated: saved ? updated : 0, saved };
+}
+
+async function fetchPremarketHighs(signals: readonly VwapPaperSignal[], now: Date): Promise<Map<string, number>> {
+  const highs = new Map<string, number>();
+  const day = chicagoDate(now);
+  const from = chicagoWallTimeMs(day, 3, 0);
+  const until = chicagoWallTimeMs(day, 8, 30);
+  if (from == null || until == null) return highs;
+  const sources: string[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < signals.length; i++) {
+    const source = signals[i].source;
+    if (seen.has(source)) continue;
+    seen.add(source);
+    sources.push(source);
+  }
+  try {
+    const fetched = await fetchOptionCandles(sources.map((ticker) => ({
+      streamer: ticker,
+      fromTime: from,
+      period: "5m" as const,
+      coverFrom: from,
+      coverUntil: Math.max(from, until - 60_000),
+    })), { timeoutMs: 12_000, quietMs: 700, emptyWaitMs: 2_500 });
+    const today = newYorkDate(now);
+    fetched.candles.forEach((bars, symbol) => {
+      const high = premarketHighFromBars(bars, today);
+      if (high != null) highs.set(symbol, high);
+    });
+  } catch {
+    return highs;
+  }
+  return highs;
+}
+
+async function loadPaperContracts(
+  signals: readonly VwapPaperSignal[],
+  rows: readonly FlowRow[],
+  fetchChains: boolean,
+  optionBars: ReadonlyMap<string, readonly CandleBar[]> | undefined,
+  extraPuts: readonly ChainPut[] | undefined,
+  extraSpots: ReadonlyMap<string, number> | undefined,
+): Promise<{ puts: ChainPut[]; optionBars: Map<string, CandleBar[]>; spots: Map<string, number>; retryRoots: Set<string> }> {
+  const puts: ChainPut[] = [];
+  const spots = new Map<string, number>();
+  const retryRoots = new Set<string>();
+  const seen = new Set<string>();
+  if (extraSpots) extraSpots.forEach((price, ticker) => spots.set(ticker, price));
+  if (!fetchChains) {
+    for (let i = 0; i < signals.length; i++) {
+      const found = chainPutsFromRows(rows, signals[i].root);
+      for (let j = 0; j < found.length; j++) addPaperPut(puts, seen, found[j]);
+    }
+    if (extraPuts) {
+      for (let i = 0; i < extraPuts.length; i++) addPaperPut(puts, seen, extraPuts[i]);
+    }
+    const bars = new Map<string, CandleBar[]>();
+    if (optionBars) optionBars.forEach((value, key) => bars.set(key, value.slice()));
+    return { puts, optionBars: bars, spots, retryRoots };
+  }
+
+  for (let i = 0; i < signals.length; i++) {
+    const signal = signals[i];
+    const fromRows = chainPutsFromRows(rows, signal.root);
+    let chain: Awaited<ReturnType<typeof getOptionChain>> | null = null;
+    let threw = false;
+    try {
+      chain = await getOptionChain({
+        symbol: signal.root,
+        contractType: "PUT",
+        fromDate: signal.sessionDay,
+        toDate: addCalendarDays(signal.sessionDay, 14),
+        strikeCount: 40,
+      });
+    } catch (err) {
+      rethrowIfSchwabOnly(err);
+      threw = true;
+    }
+    if (threw && fromRows.length === 0) {
+      retryRoots.add(signal.root);
+      continue;
+    }
+    if (chain?.underlyingPrice != null && chain.underlyingPrice > 0 && (signal.ticker === "SPX" || signal.ticker === "XSP")) {
+      spots.set(signal.ticker, chain.underlyingPrice);
+    }
+    const contracts = chain?.contracts ?? [];
+    let added = 0;
+    for (let j = 0; j < contracts.length; j++) {
+      const contract = contracts[j];
+      if (contract.putCall !== "put" || !(contract.strike > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(contract.expiration)) continue;
+      addPaperPut(puts, seen, { root: signal.root, expiration: contract.expiration, strike: contract.strike });
+      added += 1;
+    }
+    if (added === 0) {
+      for (let j = 0; j < fromRows.length; j++) addPaperPut(puts, seen, fromRows[j]);
+    }
+  }
+
+  const subs: { streamer: string; root: string; fromTime: number }[] = [];
+  let used = 0;
+  for (let i = 0; i < signals.length; i++) {
+    const signal = signals[i];
+    if (retryRoots.has(signal.root)) continue;
+    const spot = signal.spot ?? spots.get(signal.ticker) ?? null;
+    if (spot == null || !(spot > 0)) continue;
+    const expirations = paperExpirations(signal.sessionDay);
+    const wanted: { streamer: string; fromTime: number }[] = [];
+    for (let j = 0; j < expirations.length; j++) {
+      const expiration = expirations[j].expiration;
+      const strikes = puts.filter((put) => put.root === signal.root && put.expiration === expiration).map((put) => put.strike);
+      const walk = walkStrikes(strikes, spot, VWAP_STRIKE_WALK);
+      for (let k = 0; k < walk.length; k++) {
+        const streamer = tastytradeStreamerSymbol({
+          ticker: signal.root,
+          expiration,
+          strike: walk[k],
+          putCall: "put",
+        });
+        if (!streamer || wanted.some((item) => item.streamer === streamer)) continue;
+        wanted.push({ streamer, fromTime: signal.entryAt });
+      }
+    }
+    if (wanted.length === 0) continue;
+    if (used + wanted.length > CANDLE_SUBSCRIPTION_LIMIT) {
+      retryRoots.add(signal.root);
+      continue;
+    }
+    used += wanted.length;
+    for (let j = 0; j < wanted.length; j++) subs.push({ ...wanted[j], root: signal.root });
+  }
+
+  const bars = new Map<string, CandleBar[]>();
+  if (subs.length === 0) return { puts, optionBars: bars, spots, retryRoots };
+  let fetched: { candles: Map<string, CandleBar[]>; errors: string[] };
+  try {
+    fetched = await fetchOptionCandles(subs.map((sub) => ({
+      streamer: sub.streamer,
+      fromTime: sub.fromTime,
+      period: "1m" as const,
+      regularHours: true,
+      coverFrom: sub.fromTime,
+      coverUntil: sub.fromTime,
+    })), { timeoutMs: 12_000, quietMs: 700, emptyWaitMs: 2_500 });
+  } catch {
+    for (let i = 0; i < subs.length; i++) retryRoots.add(subs[i].root);
+    return { puts, optionBars: bars, spots, retryRoots };
+  }
+  fetched.candles.forEach((value, key) => bars.set(key, value));
+  if (fetched.errors.length > 0 && fetched.candles.size === 0) {
+    for (let i = 0; i < subs.length; i++) retryRoots.add(subs[i].root);
+  } else if (fetched.errors.length > 0) {
+    for (let i = 0; i < subs.length; i++) {
+      if (!fetched.candles.has(subs[i].streamer)) retryRoots.add(subs[i].root);
+    }
+  }
+  return { puts, optionBars: bars, spots, retryRoots };
+}
+
+function addPaperPut(puts: ChainPut[], seen: Set<string>, put: ChainPut): void {
+  const key = `${put.root}|${put.expiration}|${put.strike}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  puts.push(put);
 }
 
 export { emptyShadowBook };

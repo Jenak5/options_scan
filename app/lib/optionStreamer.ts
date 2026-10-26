@@ -26,10 +26,17 @@ export function tastytradeStreamerSymbol(input: {
   return `.${root}${date[1].slice(2)}${date[2]}${date[3]}${side}${strike}`;
 }
 
-/** Candle subscription symbol. The streamer symbol is unchanged aside from the suffix. */
-export function candleSubscriptionSymbol(streamer: string, period: CandlePeriod = "1m"): string {
+/**
+ * Candle subscription symbol.
+ * `regularHours` adds dxFeed `tho=true`, which keeps the regular session only.
+ */
+export function candleSubscriptionSymbol(
+  streamer: string,
+  period: CandlePeriod = "1m",
+  regularHours = false,
+): string {
   const base = streamerSymbolKey(streamer);
-  return `${base}{=${period}}`;
+  return regularHours ? `${base}{=${period},tho=true}` : `${base}{=${period}}`;
 }
 
 /** DXLink candle periods this app requests. Option paths use 1m; the feature backfill uses 5m and 1d on the underlying. */

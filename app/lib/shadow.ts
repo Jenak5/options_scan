@@ -11,7 +11,15 @@ import { chicagoCloseBeforeExpirationMs, chicagoDate, chicagoTradingDaysElapsed 
 import { parseSpyTrend, spyTrendFromDirection, type IndexDirection } from "@/app/lib/marketContext";
 import { mergeResearchTracks, parseResearchTracks, type ResearchTrack } from "@/app/lib/researchTrack";
 import { liveTimeStopExit, TIME_STOP_SECTION_NOTE, timeStopTrustNote } from "@/app/lib/timeStop60";
-import { VWAP_PUT_SECTION_NOTE, vwapPutTrustNote, vwapSameDayCloseMs } from "@/app/lib/vwapPut";
+import {
+  VWAP_PAPER_ROW_CAP,
+  VWAP_PAPER_RULE,
+  VWAP_PUT_SECTION_NOTE,
+  vwapPaperBuckets,
+  vwapPutTrustNote,
+  vwapSameDayCloseMs,
+  type VwapPaperBucket,
+} from "@/app/lib/vwapPut";
 
 /**
  * Shadow outcome for an A or B alert.
@@ -42,6 +50,14 @@ export type ShadowGrade = "A" | "B" | "test";
 export type ShadowCohort = "ab" | "experiment" | "experiment-short" | "experiment-earnings" | "vwap-put" | "time-60";
 /** Where a 60-minute paper result got its price. Missing on every other row. */
 export type StudySource = "live" | "1m";
+
+/** One scored exit on a backtested VWAP paper row. `time` is the 60-minute variant. */
+export interface VwapVariantResult {
+  reason: "profit" | "stop" | "time" | "flat";
+  at: number;
+  price: number;
+  pnlDollars: number;
+}
 
 export interface ShadowTrade {
   id: string;
@@ -103,6 +119,20 @@ export interface ShadowTrade {
    * The live A or B row does not use this field.
    */
   studySource?: StudySource;
+  /** 2 on a backtested VWAP paper row. Older cross-down rows omit it. */
+  paperRuleVersion?: number | null;
+  expiryType?: "0DTE" | "1DTE" | "weekly" | null;
+  levelLinedUp?: boolean | null;
+  entryWindow?: "9:30-10" | "10-11:30" | "11:30-2" | "2-close" | null;
+  /** SPY's session, filled after 3:00 PM Central. Null until then. */
+  spyDay?: "up" | "down" | "flat" | null;
+  signalAt?: number | null;
+  entryAt?: number | null;
+  signalVwap?: number | null;
+  noContract?: boolean;
+  optionStreamer?: string | null;
+  exit60?: VwapVariantResult | null;
+  exitFlat?: VwapVariantResult | null;
 }
 
 export interface ShadowBook {
@@ -144,6 +174,9 @@ export interface ExperimentSection {
   averageLoss: number | null;
   totalPnl: number;
   rows: ShadowListItem[];
+  /** Backtested VWAP paper rows. Headline totals stay the flat exit. */
+  byExpiry?: VwapPaperBucket[];
+  byLevel?: VwapPaperBucket[];
 }
 
 export interface ShadowListItem {
@@ -175,6 +208,13 @@ export interface ShadowListItem {
   countNote: string | null;
   /** Next-day open-interest label, when the alert recorded one. */
   openingLabel?: string | null;
+  expiryType?: "0DTE" | "1DTE" | "weekly" | null;
+  entryWindow?: "9:30-10" | "10-11:30" | "11:30-2" | "2-close" | null;
+  levelLinedUp?: boolean | null;
+  spyDay?: "up" | "down" | "flat" | null;
+  noContract?: boolean;
+  pnl60?: number | null;
+  pnlFlat?: number | null;
 }
 
 export interface ShadowScorecard {
@@ -202,7 +242,7 @@ export interface ShadowScorecard {
   experimentalShort: ExperimentSection;
   /** Earnings 1–14 days ahead and inside the hold. Left out of the totals above. */
   experimentalEarnings: ExperimentSection;
-  /** VWAP rejection puts. Left out of the totals above and out of the DTE tests. */
+  /** Backtested VWAP rejection puts. Left out of the totals above and out of the DTE tests. */
   vwapPuts: ExperimentSection;
   /** 60-minute time stop beside each saved A or B. The A or B result is unchanged. */
   timeStop60: ExperimentSection;
@@ -456,7 +496,7 @@ export function shadowsToQuote(
 ): ShadowTrade[] {
   const open = rows.filter((row) => row.status === "open").slice().sort(byMarkAge);
   const primary = open.filter((row) => !isExperimentShadow(row));
-  const tests = open.filter((row) => isExperimentShadow(row) && row.cohort !== "time-60");
+  const tests = open.filter((row) => isExperimentShadow(row) && row.cohort !== "time-60" && row.paperRuleVersion !== VWAP_PAPER_RULE);
   const seen = new Set<string>();
   const out: ShadowTrade[] = [];
   takeQuotes(primary, out, seen, limit);
@@ -543,6 +583,7 @@ export function summarizeShadows(
     const section = experimentSectionKind(row);
     if (section) {
       const paper = paperAlertIds.has(row.alertId);
+      if (section === "vwap" && (row.paperRuleVersion !== VWAP_PAPER_RULE || row.noContract)) continue;
       if (row.status === "open") {
         if (!paper) {
           if (section === "short") shortOpen += 1;
@@ -633,7 +674,7 @@ export function summarizeShadows(
       EARNINGS_WINDOW.minTrust,
       experimentRows(records, paperAlertIds, now, "earnings"),
     ),
-    vwapPuts: experimentSection(
+    vwapPuts: withVwapBuckets(experimentSection(
       VWAP_PUT_TEST.label,
       VWAP_PUT_SECTION_NOTE,
       vwapPutTrustNote(vwapOverall.closed),
@@ -641,7 +682,7 @@ export function summarizeShadows(
       vwapOpen,
       VWAP_PUT_TEST.minTrust,
       experimentRows(records, paperAlertIds, now, "vwap"),
-    ),
+    ), records),
     timeStop60: experimentSection(
       TIME_STOP_60.label,
       TIME_STOP_SECTION_NOTE,
@@ -679,6 +720,12 @@ function experimentSection(
     totalPnl: bucket.pnlDollars,
     rows,
   };
+}
+
+function withVwapBuckets(section: ExperimentSection, records: readonly ShadowTrade[]): ExperimentSection {
+  const rows = records.filter((row) => row.cohort === "vwap-put" && row.paperRuleVersion === VWAP_PAPER_RULE);
+  const buckets = vwapPaperBuckets(rows);
+  return { ...section, byExpiry: buckets.byExpiry, byLevel: buckets.byLevel };
 }
 
 export function shadowsToCsv(
@@ -815,6 +862,7 @@ function decideVwapPut(
   marked: { price: number; source: ShadowQuoteSource } | null,
   now: Date,
 ): ExitDecision | null {
+  if (row.paperRuleVersion === VWAP_PAPER_RULE) return null;
   const plan = planExits({ premium: row.entryPrice, contracts: 1, structure: "single" });
   if (!plan) return null;
   if (marked) {
@@ -894,7 +942,11 @@ function experimentRows(
   now: Date,
   section: "long" | "short" | "earnings" | "vwap" | "time60",
 ): ShadowListItem[] {
-  const tests = records.filter((row) => experimentSectionKind(row) === section);
+  const tests = records.filter((row) => {
+    if (experimentSectionKind(row) !== section) return false;
+    if (section === "vwap" && row.paperRuleVersion !== VWAP_PAPER_RULE) return false;
+    return true;
+  });
   const open = tests.filter((row) => row.status === "open").slice().sort((a, b) => b.openedAt - a.openedAt);
   const closed = tests.filter((row) => row.status === "closed").slice().sort((a, b) => (b.closedAt ?? 0) - (a.closedAt ?? 0));
   return open.concat(closed).slice(0, RECENT_LIMIT).map((row) => toListItem(row, paperAlertIds, now));
@@ -909,7 +961,7 @@ function toListItem(row: ShadowTrade, paperAlertIds: ReadonlySet<string>, now: D
   let countNote: string | null = null;
   if (paper) countNote = "Already a paper trade, so it is left out of these totals.";
   else if (row.status === "closed" && row.pnlDollars == null) countNote = "Closed with no quote, so it is left out of the win rate.";
-  return {
+  const item: ShadowListItem = {
     id: row.id,
     ticker: row.ticker,
     putCall: row.putCall,
@@ -921,7 +973,7 @@ function toListItem(row: ShadowTrade, paperAlertIds: ReadonlySet<string>, now: D
     expiration: row.expiration,
     status: row.status,
     exitReason: row.exitReason,
-    exitLabel: shadowExitLabel(row.exitReason, row.cohort),
+    exitLabel: row.noContract ? "No contract." : shadowExitLabel(row.exitReason, row.cohort),
     exitPrice: row.exitPrice,
     exitQuote: row.exitQuote,
     exitStale: row.exitStale,
@@ -938,6 +990,15 @@ function toListItem(row: ShadowTrade, paperAlertIds: ReadonlySet<string>, now: D
     counted,
     countNote,
   };
+  if (row.paperRuleVersion !== VWAP_PAPER_RULE) return item;
+  item.expiryType = row.expiryType ?? null;
+  item.entryWindow = row.entryWindow ?? null;
+  item.levelLinedUp = row.levelLinedUp === true;
+  item.spyDay = row.spyDay ?? null;
+  item.noContract = row.noContract === true;
+  item.pnl60 = row.exit60?.pnlDollars ?? null;
+  item.pnlFlat = row.exitFlat?.pnlDollars ?? row.pnlDollars;
+  return item;
 }
 
 function listedCohort(row: Pick<ShadowTrade, "cohort" | "grade">): ShadowCohort {
@@ -965,6 +1026,9 @@ function csvCohort(row: Pick<ShadowTrade, "cohort" | "grade">): ShadowCohort {
 }
 
 function probeNote(row: ShadowTrade): string | null {
+  if (row.cohort === "vwap-put" && row.paperRuleVersion === VWAP_PAPER_RULE) {
+    return "Paper put from the backtested VWAP rejection. This is not an A or a B.";
+  }
   if (row.cohort === "vwap-put") return "Paper put after a minute closed back under session VWAP. This is not an A or a B.";
   if (row.cohort === "time-60") return "Same entry as the saved alert. This 60-minute result is not the scorecard exit.";
   if (row.cohort === "experiment-earnings") {
@@ -1057,7 +1121,19 @@ function addBucket(
 }
 
 function trimShadows(records: ShadowTrade[]): ShadowTrade[] {
-  const max = OUTCOME_RULES.maxStoredAlerts;
+  const paper = records.filter(isStoredPaperRule);
+  const rest = records.filter((row) => !isStoredPaperRule(row));
+  const trimmedRest = trimCohort(rest, OUTCOME_RULES.maxStoredAlerts);
+  const trimmedPaper = trimCohort(paper, VWAP_PAPER_ROW_CAP);
+  if (trimmedRest.length === rest.length && trimmedPaper.length === paper.length) return records;
+  return trimmedRest.concat(trimmedPaper);
+}
+
+function isStoredPaperRule(row: ShadowTrade): boolean {
+  return row.cohort === "vwap-put" && row.paperRuleVersion === VWAP_PAPER_RULE;
+}
+
+function trimCohort(records: ShadowTrade[], max: number): ShadowTrade[] {
   if (records.length <= max) return records;
   const drop = new Set<string>();
   let extra = records.length - max;
@@ -1103,7 +1179,8 @@ function parseShadow(value: unknown): ShadowTrade | null {
   if (!TICKER_PATTERN.test(ticker)) return null;
   const putCall = row.putCall === "put" ? "put" : row.putCall === "call" ? "call" : null;
   if (!putCall) return null;
-  const strike = asPositive(row.strike);
+  const paperNoContract = row.noContract === true && row.paperRuleVersion === VWAP_PAPER_RULE;
+  const strike = paperNoContract && row.strike === 0 ? 0 : asPositive(row.strike);
   if (strike == null) return null;
   const expiration = typeof row.expiration === "string" ? row.expiration : "";
   if (!DATE_PATTERN.test(expiration)) return null;
@@ -1125,7 +1202,7 @@ function parseShadow(value: unknown): ShadowTrade | null {
   if (cohort === "ab" && grade === "test") return null;
   const probeGrade = row.probeGrade === "A" || row.probeGrade === "B" ? row.probeGrade : null;
   if (row.contracts !== 1) return null;
-  const entryPrice = asPositive(row.entryPrice);
+  const entryPrice = paperNoContract && row.entryPrice === 0 ? 0 : asPositive(row.entryPrice);
   if (entryPrice == null) return null;
   const status = row.status === "closed" ? "closed" : row.status === "open" ? "open" : null;
   if (!status) return null;
@@ -1185,7 +1262,58 @@ function parseShadow(value: unknown): ShadowTrade | null {
   if (cohort === "time-60" && (row.studySource === "live" || row.studySource === "1m")) {
     trade.studySource = row.studySource;
   }
+  if (cohort === "vwap-put") attachPaperFields(trade, row);
   return trade;
+}
+
+const OPTION_STREAMER_PATTERN = /^\.[A-Z0-9.]{1,48}$/;
+
+function attachPaperFields(trade: ShadowTrade, row: Record<string, unknown>): void {
+  if (row.paperRuleVersion !== VWAP_PAPER_RULE) return;
+  trade.paperRuleVersion = VWAP_PAPER_RULE;
+  if (row.expiryType === "0DTE" || row.expiryType === "1DTE" || row.expiryType === "weekly") {
+    trade.expiryType = row.expiryType;
+  }
+  if (typeof row.levelLinedUp === "boolean") trade.levelLinedUp = row.levelLinedUp;
+  if (
+    row.entryWindow === "9:30-10"
+    || row.entryWindow === "10-11:30"
+    || row.entryWindow === "11:30-2"
+    || row.entryWindow === "2-close"
+  ) {
+    trade.entryWindow = row.entryWindow;
+  }
+  if (row.spyDay === "up" || row.spyDay === "down" || row.spyDay === "flat") trade.spyDay = row.spyDay;
+  else trade.spyDay = null;
+  const signalAt = asTime(row.signalAt);
+  if (signalAt != null) trade.signalAt = signalAt;
+  const entryAt = asTime(row.entryAt);
+  if (entryAt != null) trade.entryAt = entryAt;
+  const signalVwap = asPositive(row.signalVwap);
+  if (signalVwap != null) trade.signalVwap = signalVwap;
+  trade.noContract = row.noContract === true;
+  const streamer = typeof row.optionStreamer === "string" ? row.optionStreamer.trim() : "";
+  trade.optionStreamer = OPTION_STREAMER_PATTERN.test(streamer) ? streamer : null;
+  if (row.entryUnderlying == null) trade.entryUnderlying = null;
+  else {
+    const underlying = asPositive(row.entryUnderlying);
+    if (underlying != null) trade.entryUnderlying = underlying;
+  }
+  trade.exit60 = parseVariant(row.exit60);
+  trade.exitFlat = parseVariant(row.exitFlat);
+}
+
+function parseVariant(value: unknown): VwapVariantResult | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  const reason = row.reason === "profit" || row.reason === "stop" || row.reason === "time" || row.reason === "flat"
+    ? row.reason
+    : null;
+  const at = asTime(row.at);
+  const price = asPositive(row.price);
+  const pnlDollars = asFinite(row.pnlDollars);
+  if (!reason || at == null || price == null || pnlDollars == null) return null;
+  return { reason, at, price, pnlDollars };
 }
 
 function experimentLabelOf(value: unknown, cohort: ShadowCohort): string | null {

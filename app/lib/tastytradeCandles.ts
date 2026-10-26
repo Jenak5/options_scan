@@ -34,6 +34,8 @@ export interface CandleSubscription {
   fromTime: number;
   /** Defaults to 1m. Underlying (non-option) symbols must set a period. */
   period?: CandlePeriod;
+  /** Regular session only (`tho=true`). Off leaves the feed's default, which includes extended hours. */
+  regularHours?: boolean;
   /**
    * Optional. When every subscription in a batch has a bar at or before coverFrom and a bar at or
    * after coverUntil, the batch stops at once instead of waiting for the feed to go quiet.
@@ -387,7 +389,7 @@ export function feedMessages(subs: readonly CandleSubscription[]): object[] {
       channel: 1,
       add: subs.map((sub) => ({
         type: "Candle",
-        symbol: candleSubscriptionSymbol(sub.streamer, sub.period ?? "1m"),
+        symbol: candleSubscriptionSymbol(sub.streamer, sub.period ?? "1m", sub.regularHours === true),
         fromTime: Math.floor(sub.fromTime),
       })),
     },

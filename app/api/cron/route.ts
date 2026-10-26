@@ -308,10 +308,10 @@ async function handleCron(request: NextRequest) {
 
     try {
       const vwap = await recordVwapRejectionPuts(scan.rows, now);
-      log.push(`VWAP rejection puts: ${vwap.opened} new (paper only, not alerted)`);
+      log.push(`VWAP paper: ${vwap.opened} new (backtested rule, not alerted)`);
     } catch (err) {
       rethrowIfSchwabOnly(err);
-      log.push("VWAP rejection put update failed");
+      log.push("VWAP paper update failed");
     }
 
     const minPremium = alertScanMinPremium(process.env.ALERT_MIN_PREMIUM);
@@ -508,8 +508,8 @@ function noteShadows(
   summary.shadowsClosed += closed;
 }
 
-function shadowTouched(shadow: { opened: number; quoted: number; closed: number; saved: boolean }): boolean {
-  return shadow.saved && (shadow.opened > 0 || shadow.quoted > 0 || shadow.closed > 0);
+function shadowTouched(shadow: { opened: number; quoted: number; closed: number; saved: boolean; paperUpdated?: number }): boolean {
+  return shadow.saved && (shadow.opened > 0 || shadow.quoted > 0 || shadow.closed > 0 || (shadow.paperUpdated ?? 0) > 0);
 }
 
 async function markShadows(
@@ -520,6 +520,7 @@ async function markShadows(
   const shadow = await runShadowPass(now, candidates);
   const saved = shadow.saved ? "saved" : "not saved";
   log.push(`Shadow alerts: ${shadow.opened} opened, ${shadow.quoted} quoted, ${shadow.closed} closed (${saved})`);
+  if (shadow.paperUpdated > 0) log.push(`VWAP paper exits: ${shadow.paperUpdated} updated`);
   if (shadow.researchOpened > 0 || shadow.researchQuoted > 0 || shadow.researchSkipped > 0) {
     log.push(`Research tracks: ${shadow.researchOpened} opened, ${shadow.researchQuoted} quoted, ${shadow.researchSkipped} skipped`);
   }
