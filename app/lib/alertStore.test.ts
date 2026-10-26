@@ -30,7 +30,7 @@ import {
 } from "@/app/lib/schwabStore";
 import { loadTradePage } from "@/app/lib/tradeStore";
 import type { StoredTokens } from "@/app/lib/schwabParse";
-import { gradeFlowRow } from "@/app/lib/verdict";
+import { gradeFlowRow, type AlertVerdict } from "@/app/lib/verdict";
 
 const ENV_KEYS = [
   "KV_REST_API_URL",
@@ -110,8 +110,8 @@ afterEach(() => {
 describe("alert book store", () => {
   it("saves a sent alert, a same-day loss count, and a later mid in memory", async () => {
     const verdict = gradeFlowRow(row(), null);
-    expect(await rememberSentAlert(row(), verdict, NOW)).toBe(true);
-    expect(await rememberSentAlert(row(), verdict, NOW)).toBe(true);
+    expect((await rememberSentAlert(row(), verdict, NOW)).send).toBe(true);
+    expect((await rememberSentAlert(row(), verdict, NOW)).send).toBe(false);
     const book = await loadAlertBook();
     expect(book.records).toHaveLength(1);
     expect(book.records[0].verdict).toBe("TAKE");
@@ -143,7 +143,7 @@ describe("alert book store", () => {
     process.env.NODE_ENV = "production";
     delete process.env.VERCEL;
     const verdict = gradeFlowRow(row(), null);
-    expect(await rememberSentAlert(row(), verdict, NOW)).toBe(false);
+    expect((await rememberSentAlert(row(), verdict, NOW)).send).toBe(false);
     expect((await loadAlertBook()).records).toEqual([]);
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
@@ -163,7 +163,7 @@ describe("alert book store", () => {
     const tokenBody = mock.files.get(SCHWAB_BLOB_TOKEN_PATH)?.body;
 
     const verdict = gradeFlowRow(row(), null);
-    expect(await rememberSentAlert(row(), verdict, NOW)).toBe(true);
+    expect((await rememberSentAlert(row(), verdict, NOW)).send).toBe(true);
     expect(await readTokens()).toEqual(tokens);
     expect(mock.files.get(SCHWAB_BLOB_TOKEN_PATH)?.body).toBe(tokenBody);
 
@@ -187,7 +187,7 @@ describe("alert book store", () => {
   it("shows a record saved today in the report and the trade-log dropdown", async () => {
     const now = new Date("2026-10-02T17:45:00Z");
     const verdict = gradeFlowRow(row({ id: "QQQ|2026-10-16|500|put", ticker: "QQQ", putCall: "put", strike: 500 }), null);
-    expect(await rememberSentAlert(row({ id: "QQQ|2026-10-16|500|put", ticker: "QQQ", putCall: "put", strike: 500 }), verdict, now)).toBe(true);
+    expect((await rememberSentAlert(row({ id: "QQQ|2026-10-16|500|put", ticker: "QQQ", putCall: "put", strike: 500 }), verdict, now)).send).toBe(true);
     const book = await loadAlertBook();
     expect(book.records.map((item) => item.tradingDay)).toEqual(["2026-10-02"]);
     const report = await loadAlertReport();
@@ -204,9 +204,9 @@ describe("alert book blob etag", () => {
     setSchwabBlobClientForTests(mock.client);
     const first = gradeFlowRow(row(), null);
     const second = gradeFlowRow(row({ id: "QQQ|2026-10-16|500|put", ticker: "QQQ", putCall: "put", strike: 500 }), null);
-    expect(await rememberSentAlert(row(), first, NOW)).toBe(true);
+    expect((await rememberSentAlert(row(), first, NOW)).send).toBe(true);
     const strong = mock.strongEtag;
-    expect(await rememberSentAlert(row({ id: "QQQ|2026-10-16|500|put", ticker: "QQQ", putCall: "put", strike: 500 }), second, new Date("2026-10-02T17:45:00Z"))).toBe(true);
+    expect((await rememberSentAlert(row({ id: "QQQ|2026-10-16|500|put", ticker: "QQQ", putCall: "put", strike: 500 }), second, new Date("2026-10-02T17:45:00Z"))).send).toBe(true);
     const book = await loadAlertBook();
     expect(book.records.map((item) => item.ticker).sort()).toEqual(["QQQ", "SPY"]);
     const puts = mock.put.mock.calls.filter((call) => call[0] === SCHWAB_BLOB_ALERT_BOOK_PATH);
@@ -221,7 +221,7 @@ describe("alert book blob etag", () => {
     const mock = mismatchedHeadClient();
     setSchwabBlobClientForTests(mock.client);
     const verdict = gradeFlowRow(row(), null);
-    expect(await rememberSentAlert(row(), verdict, NOW)).toBe(true);
+    expect((await rememberSentAlert(row(), verdict, NOW)).send).toBe(true);
     const body = mock.files.get(SCHWAB_BLOB_ALERT_BOOK_PATH)?.body ?? "";
     expect(body).toContain("SPY");
     const bookPuts = mock.put.mock.calls.filter((call) => call[0] === SCHWAB_BLOB_ALERT_BOOK_PATH);
@@ -235,7 +235,7 @@ describe("alert book blob etag", () => {
     mock.files.set(SCHWAB_BLOB_ALERT_BOOK_PATH, { body: "not-json{{{", etag: '"strong-existing"' });
     setSchwabBlobClientForTests(mock.client);
     const verdict = gradeFlowRow(row(), null);
-    expect(await rememberSentAlert(row(), verdict, NOW)).toBe(false);
+    expect((await rememberSentAlert(row(), verdict, NOW)).send).toBe(false);
     expect(mock.files.get(SCHWAB_BLOB_ALERT_BOOK_PATH)?.body).toBe("not-json{{{");
     const notice = await readAlertBookNotice();
     expect(notice.problem).toBe("write");
@@ -252,7 +252,7 @@ describe("alert book blob etag", () => {
     ));
     setSchwabBlobClientForTests(mock.client);
     const verdict = gradeFlowRow(row(), null);
-    expect(await rememberSentAlert(row(), verdict, NOW)).toBe(false);
+    expect((await rememberSentAlert(row(), verdict, NOW)).send).toBe(false);
     const failure = await lastAlertBookWriteError();
     expect(failure?.status).toBe(403);
     expect(failure?.message).toContain("[token]");
@@ -274,6 +274,91 @@ describe("alert book blob etag", () => {
     expect(notice.empty).toBe(true);
     expect(notice.alertsSentUnsaved).toBe(true);
     expect(alertBookNoticeSentence(notice)).toContain("Telegram alerts were sent, but the alert book is empty.");
+  });
+});
+
+describe("durable contract dedupe", () => {
+  function nflx(premium: number, id = "NFLX|2026-11-20|64|call", strike = 64): FlowRow {
+    return row({
+      id,
+      ticker: "NFLX",
+      strike,
+      expiration: "2026-11-20",
+      putCall: "call",
+      notionalPremium: premium,
+      volume: 1_000,
+      mid: premium / 100_000,
+    });
+  }
+
+  function asGrade(sample: FlowRow, grade: "A" | "B"): AlertVerdict {
+    const verdict = gradeFlowRow(sample, null, NOW);
+    return { ...verdict, grade };
+  }
+
+  it("does not send the same contract again from a later call with no in-memory set", async () => {
+    const sample = nflx(265_000);
+    const verdict = asGrade(sample, "B");
+    expect((await rememberSentAlert(sample, verdict, NOW)).send).toBe(true);
+    const again = await rememberSentAlert(
+      nflx(265_000, "NFLX|2026-11-20|64.0|call"),
+      verdict,
+      new Date(NOW.getTime() + 5 * 60 * 1000),
+    );
+    expect(again.send).toBe(false);
+    expect(again.reasons).toEqual([]);
+    expect((await loadAlertBook()).records).toHaveLength(1);
+  });
+
+  it("sends a different strike of the same ticker and expiration", async () => {
+    const first = nflx(265_000);
+    expect((await rememberSentAlert(first, asGrade(first, "B"), NOW)).send).toBe(true);
+    const other = nflx(265_000, "NFLX|2026-11-20|65|call", 65);
+    expect((await rememberSentAlert(other, asGrade(other, "B"), NOW)).send).toBe(true);
+    expect((await loadAlertBook()).records).toHaveLength(2);
+  });
+
+  it("re-alerts when the grade rises and says why", async () => {
+    const sample = nflx(265_000);
+    expect((await rememberSentAlert(sample, asGrade(sample, "B"), NOW)).send).toBe(true);
+    const later = new Date(NOW.getTime() + 5 * 60 * 1000);
+    const claim = await rememberSentAlert(sample, asGrade(sample, "A"), later);
+    expect(claim.send).toBe(true);
+    expect(claim.reasons).toEqual(["Upgraded B→A"]);
+    const book = await loadAlertBook();
+    expect(book.records).toHaveLength(2);
+    expect(book.records[1].realertReasons).toEqual(["Upgraded B→A"]);
+  });
+
+  it("re-alerts when premium at least doubles and grows by $100K", async () => {
+    const first = nflx(265_000);
+    expect((await rememberSentAlert(first, asGrade(first, "B"), NOW)).send).toBe(true);
+    const grown = nflx(610_000);
+    const claim = await rememberSentAlert(grown, asGrade(grown, "B"), new Date(NOW.getTime() + 60_000));
+    expect(claim.send).toBe(true);
+    expect(claim.reasons).toEqual(["Flow grew $265K→$610K"]);
+  });
+
+  it("does not re-alert on a double that is under $100K, or a $100K gain under 2x", async () => {
+    const small = nflx(40_000);
+    expect((await rememberSentAlert(small, asGrade(small, "B"), NOW)).send).toBe(true);
+    const doubled = await rememberSentAlert(nflx(80_000), asGrade(nflx(80_000), "B"), new Date(NOW.getTime() + 60_000));
+    expect(doubled.send).toBe(false);
+
+    clearMemoryStoreForTests();
+    const base = nflx(200_000);
+    expect((await rememberSentAlert(base, asGrade(base, "B"), NOW)).send).toBe(true);
+    const added = await rememberSentAlert(nflx(310_000), asGrade(nflx(310_000), "B"), new Date(NOW.getTime() + 60_000));
+    expect(added.send).toBe(false);
+    expect((await loadAlertBook()).records).toHaveLength(1);
+  });
+
+  it("includes both reasons when the grade and the premium both qualify", async () => {
+    const first = nflx(265_000);
+    expect((await rememberSentAlert(first, asGrade(first, "B"), NOW)).send).toBe(true);
+    const next = nflx(610_000);
+    const claim = await rememberSentAlert(next, asGrade(next, "A"), new Date(NOW.getTime() + 60_000));
+    expect(claim.reasons).toEqual(["Upgraded B→A", "Flow grew $265K→$610K"]);
   });
 });
 

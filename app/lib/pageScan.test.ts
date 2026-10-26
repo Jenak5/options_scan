@@ -6,6 +6,7 @@ import type { FlowRow } from "@/app/lib/flow";
 import { isChicagoMarketHours, isMarketDay } from "@/app/lib/marketHours";
 import { chainInterestFromContracts } from "@/app/lib/openingCheck";
 import { recordDisplayedAlerts, recordFlowPageSession } from "@/app/lib/pageScan";
+import * as telegram from "@/app/lib/telegram";
 import { EMPTY_PRINTS } from "@/app/lib/prints";
 import { clearMemoryStoreForTests } from "@/app/lib/schwabStore";
 import { loadShadowPage } from "@/app/lib/shadowStore";
@@ -112,6 +113,26 @@ describe("Flow page alerts", () => {
     expect(again.opened).toBe(0);
     expect(again.marked).toBe(0);
     expect((await loadAlertBook()).records).toHaveLength(1);
+  });
+
+  it("sends again only when the stored contract's premium grows enough, and says why", async () => {
+    const send = vi.spyOn(telegram, "sendTelegramAlert").mockResolvedValue(true);
+    const first = await recordDisplayedAlerts([row({ notionalPremium: 265_000 })], null, NOW);
+    expect(first.saved).toBe(1);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(String(send.mock.calls[0][0])).not.toContain("Flow grew");
+
+    const grown = await recordDisplayedAlerts([row({ notionalPremium: 610_000 })], null, NOW);
+    expect(grown.saved).toBe(1);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(String(send.mock.calls[1][0])).toContain("Flow grew $265K→$610K");
+
+    const same = await recordDisplayedAlerts([row({ notionalPremium: 610_000 })], null, NOW);
+    expect(same.saved).toBe(0);
+    expect(send).toHaveBeenCalledTimes(2);
+    const book = await loadAlertBook();
+    expect(book.records).toHaveLength(2);
+    expect(book.records[1].realertReasons).toContain("Flow grew $265K→$610K");
   });
 
   it("does not save, mark, or check open interest after the Central close", async () => {

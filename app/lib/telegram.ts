@@ -184,9 +184,12 @@ export function formatFlowAlert(flow: {
   saved?: boolean;
   /** Display labels such as "$3M+ flow" or "repeat". Labels only; they change nothing else. */
   labels?: readonly string[];
+  /** Why this contract was sent again today. Empty on the first alert. */
+  realertReasons?: readonly string[];
 }): string {
   const emoji = flow.putCall === "call" ? "🟢" : "🔴";
   const type = flow.putCall === "call" ? "CALL" : "PUT";
+  const realert = formatRealertHtml(flow.realertReasons ?? []);
   const premiumStr = formatFlowPremium(flow.notionalPremium);
   const flags = [
     flow.otm ? "OTM" : "",
@@ -201,6 +204,7 @@ export function formatFlowAlert(flow: {
 
   return [
     `${emoji} <b>${escapeHtml(flow.ticker)}</b> ${type}`,
+    realert,
     `<b>Estimated flow</b> from option volume/open interest, not a sweep.`,
     flow.verdict ? formatVerdictHtml(flow.verdict) : "",
     ``,
@@ -218,6 +222,11 @@ export function formatFlowAlert(flow: {
     ``,
     `⏰ ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZoneName: "short" })}`,
   ].filter(Boolean).join("\n");
+}
+
+export function formatRealertHtml(reasons: readonly string[]): string {
+  if (reasons.length === 0) return "";
+  return reasons.map((reason) => `<b>${escapeHtml(reason)}</b>`).join("\n");
 }
 
 function exitBlock(ask: number, maxContracts: number | null | undefined): string {

@@ -2,14 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { OUTCOME_RULES, alertScanMinPremium, alertsPerDayLimit, formatContractPriceLine, formatFlowPremium, isAlertGrade } from "@/app/lib/alertConfig";
 import { runAlertFollowUps } from "@/app/lib/alertFollowUp";
 import {
-  alertSetupKey,
+  alertContractKey,
   chooseAlerts,
   gradeAlertCandidates,
   indexSentAlerts,
+  realertReasons,
   screenQueueLimit,
+  storedAlertPremium,
 } from "@/app/lib/alertPolicy";
 import { currentDailyLoss, loadAlertBook, recordOpeningChecks, rememberSentAlert } from "@/app/lib/alertStore";
-import { lastAlertBookWriteError, noteAlertSentUnsaved, readScanHealth, withBlobReadCache, writeScanHealth } from "@/app/lib/schwabStore";
+import { lastAlertBookWriteError, readScanHealth, withBlobReadCache, writeScanHealth } from "@/app/lib/schwabStore";
 import { hasValidBearer } from "@/app/lib/auth";
 import { TICKER_GROUP_PAUSE_MS, flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv, type FlowRow } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
@@ -22,7 +24,7 @@ import { BothSourcesFailedError, isFatalSchwabError, isSchwabBackupMiss, rethrow
 import { emptyScanHealth, formatScanRunLine, normalizeSkippedTickers, scanSlotDecision, skipNotifyDue, skipTelegramText, skipWarning, type ScanHealth, type ScanRunSummary } from "@/app/lib/scanHealth";
 import { probeTastytrade, tastytradeEnabled } from "@/app/lib/tastytrade";
 import { planExitsForAsk } from "@/app/lib/exits";
-import { formatVerdictHtml, paperTradeLinkHtml, sendTelegramAlert } from "@/app/lib/telegram";
+import { formatRealertHtml, formatVerdictHtml, paperTradeLinkHtml, sendTelegramAlert } from "@/app/lib/telegram";
 import type { AlertVerdict } from "@/app/lib/verdict";
 import { formatVolArbSummary, type VolArbReading, type VolSignal } from "@/app/lib/volArb";
 import { scanVolArb } from "@/app/lib/volScan";
@@ -53,12 +55,9 @@ export const maxDuration = 300;
 
 const XAI_API = "https://api.x.ai/v1/chat/completions";
 
-// Best-effort dedupe for this process. The alert book is the record that survives a cold start.
-// A contract is marked handled only after it is saved, or after Grok flags it.
-// A failed save stays unmarked so this process can try again.
-// Keys are `${Chicago date}|${contract id}` and `${Chicago date}|${setup key}`.
-const handledContractIds = new Set<string>();
-const handledSetupKeys = new Set<string>();
+// Grok flags for this process only. The alert book decides whether Telegram sends.
+// A failed book write does not send, and a new instance does not remember this set.
+const flaggedContractIds = new Set<string>();
 
 const INDEX_ETFS = new Set(["SPY", "QQQ", "IWM", "DIA", "XSP", "SPXW", "SPX", "VIX", "NDX", "RUT"]);
 
@@ -124,17 +123,19 @@ function formatAlert(
   verdict: AlertVerdict,
   alertId: string,
   saved: boolean,
+  realertReasons: readonly string[] = [],
 ): string {
   const premStr = formatFlowPremium(row.notionalPremium);
   const typeEmoji = row.putCall === "call" ? "🟢" : "🔴";
   const conviction = convictionFor(row.ticker, signal);
+  const realert = formatRealertHtml(realertReasons);
 
   const iv = row.iv != null ? `${(row.iv * 100).toFixed(0)}%` : "—";
   const oi = Number.isFinite(row.openInterest) ? row.openInterest.toLocaleString() : "—";
   const ratio = row.volOiRatio != null ? `${row.volOiRatio.toFixed(2)}x vol/OI` : "vol/OI n/a";
 
   return `${typeEmoji} <b>${row.ticker} ${row.putCall.toUpperCase()}</b>
-${formatVerdictHtml(verdict)}
+${realert ? `${realert}\n` : ""}${formatVerdictHtml(verdict)}
 
 ${conviction.emoji} <b>${conviction.tier}</b>
 Estimated flow from option volume/open interest, not a sweep.
@@ -312,8 +313,9 @@ async function handleCron(request: NextRequest) {
     const room = Math.max(0, maxPerDay - sent.count);
     const queued = chooseAlerts({
       candidates: graded,
-      alreadySentContractKeys: mergeDayKeys(tradingDay, sent.contracts, handledContractIds),
-      alreadySentSetupKeys: mergeDayKeys(tradingDay, sent.setups, handledSetupKeys),
+      alreadySentContractKeys: mergeDayKeys(tradingDay, sent.contracts, flaggedContractIds),
+      alreadySentSetupKeys: sent.setups,
+      sentByContract: sent.byContract,
       limit: screenQueueLimit(room),
     });
 
@@ -350,16 +352,26 @@ async function handleCron(request: NextRequest) {
       }
       const row = item.row;
       const verdict = item.verdict;
-      const setup = alertSetupKey(row);
       const latest = indexSentAlerts((await loadAlertBook()).records, tradingDay);
-      const sentContracts = mergeDayKeys(tradingDay, latest.contracts, handledContractIds);
-      const sentSetups = mergeDayKeys(tradingDay, latest.setups, handledSetupKeys);
+      const sentContracts = mergeDayKeys(tradingDay, latest.contracts, flaggedContractIds);
       if (latest.count >= maxPerDay) {
         log.push("Daily alert cap reached");
         break;
       }
-      if (sentContracts.has(row.id) || sentSetups.has(setup)) {
-        log.push(`${row.ticker}: skipped — this ${row.putCall} expiring ${row.expiration} was already alerted today`);
+      if (flaggedContractIds.has(dayKey(tradingDay, row.id))) {
+        log.push(`${row.ticker}: skipped — Grok already flagged this contract`);
+        continue;
+      }
+      const prior = latest.byContract.get(alertContractKey(row)) ?? null;
+      const repeatReasons = prior
+        ? realertReasons(prior, { grade: verdict.grade, premium: storedAlertPremium({ alertedPremium: row.notionalPremium }) })
+        : [];
+      if (prior && repeatReasons.length === 0) {
+        log.push(`${row.ticker}: skipped — ${row.strike} ${row.putCall} expiring ${row.expiration} was already alerted today`);
+        continue;
+      }
+      if (!prior && (sentContracts.has(row.id) || sentContracts.has(alertContractKey(row)))) {
+        log.push(`${row.ticker}: skipped — ${row.strike} ${row.putCall} expiring ${row.expiration} was already alerted today`);
         continue;
       }
 
@@ -373,7 +385,7 @@ async function handleCron(request: NextRequest) {
       const { clean, reason } = await screenWithGrok(row, volSummary);
 
       if (!clean) {
-        handledContractIds.add(dayKey(tradingDay, row.id));
+        flaggedContractIds.add(dayKey(tradingDay, row.id));
         log.push(`${row.ticker}: Grok flagged — ${reason}`);
         continue;
       }
@@ -386,22 +398,32 @@ async function handleCron(request: NextRequest) {
         now,
         dates: earningsDates,
       });
-      const saved = await rememberSentAlert(row, verdict, now, windowDate);
-      if (saved) summary.alertsSaved += 1;
-      if (saved) {
-        handledContractIds.add(dayKey(tradingDay, row.id));
-        handledSetupKeys.add(dayKey(tradingDay, setup));
+      const claim = await rememberSentAlert(row, verdict, now, windowDate);
+      if (!claim.send) {
+        if (!claim.saved) {
+          const failure = await lastAlertBookWriteError();
+          log.push(`${row.ticker}: alert book was not saved, so Telegram was not sent${saveDetail(failure)}`);
+        } else {
+          log.push(`${row.ticker}: skipped — ${row.strike} ${row.putCall} expiring ${row.expiration} was already alerted today`);
+        }
+        continue;
       }
-      const delivered = await sendTelegramAlert(formatAlert(row, volSummary, signal, reason, verdict, alertId, saved));
+      summary.alertsSaved += 1;
+      const delivered = await sendTelegramAlert(formatAlert(
+        row,
+        volSummary,
+        signal,
+        reason,
+        verdict,
+        alertId,
+        true,
+        claim.reasons,
+      ));
       if (delivered) alertsSent++;
-      if (saved && delivered) {
+      if (delivered) {
         log.push(`${row.ticker}: Telegram alert sent and saved (${verdict.verdictLabel} ${verdict.grade})`);
-      } else if (saved) {
-        log.push(`${row.ticker}: saved in the alert book, but Telegram send failed — check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID`);
       } else {
-        const failure = await lastAlertBookWriteError();
-        if (delivered) await noteAlertSentUnsaved(now);
-        log.push(`${row.ticker}: Telegram alert ${delivered ? "sent" : "not sent"}, but the alert book was not saved${saveDetail(failure)}`);
+        log.push(`${row.ticker}: saved in the alert book, but Telegram send failed — check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID`);
       }
     }
     try {

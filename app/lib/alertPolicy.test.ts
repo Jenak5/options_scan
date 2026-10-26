@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { ALERT_POLICY, alertsPerDayLimit } from "@/app/lib/alertConfig";
 import {
+  alertContractKey,
   alertSetupKey,
   chooseAlerts,
   indexSentAlerts,
+  realertReasons,
   type AlertCandidate,
 } from "@/app/lib/alertPolicy";
 import type { FlowRow } from "@/app/lib/flow";
@@ -21,6 +23,7 @@ function candidate(over: {
   verdict?: "TAKE" | "WATCH" | "SKIP" | "STOP";
   liquidityPasses?: boolean;
   delayed?: boolean;
+  premium?: number;
 }): AlertCandidate {
   const ticker = over.ticker ?? "NVDA";
   const putCall = over.putCall ?? "call";
@@ -46,7 +49,7 @@ function candidate(over: {
     iv: null,
     delta: null,
     mid: 1.025,
-    notionalPremium: 50_000,
+    notionalPremium: over.premium ?? 50_000,
     volOiRatio: 1,
     volumeOiJump: null,
     volumeExceedsOi: false,
@@ -101,12 +104,12 @@ describe("alert delivery", () => {
     expect(picks.map((item) => item.row.id)).toEqual(["a", "b"]);
   });
 
-  it("stops at the daily room and does not repeat a ticker, direction, and expiration", () => {
-    const sameSetup = candidate({ id: "nvda-110", ticker: "NVDA", strike: 110, score: 40, grade: "A" });
+  it("stops at the daily room and keeps a different strike", () => {
+    const higherStrike = candidate({ id: "nvda-110", ticker: "NVDA", strike: 110, score: 40, grade: "A" });
     const picks = chooseAlerts({
       candidates: [
         candidate({ id: "nvda-100", ticker: "NVDA", strike: 100, score: 50, grade: "B" }),
-        sameSetup,
+        higherStrike,
         candidate({ id: "nvda-put", ticker: "NVDA", putCall: "put", strike: 90, score: 30, grade: "B" }),
         candidate({ id: "spy", ticker: "SPY", score: 10, grade: "B" }),
       ],
@@ -114,11 +117,12 @@ describe("alert delivery", () => {
       alreadySentSetupKeys: new Set(),
       limit: 2,
     });
-    expect(picks.map((item) => item.row.id)).toEqual(["nvda-110", "nvda-put"]);
-    expect(alertSetupKey(picks[0].row)).toBe(alertSetupKey(sameSetup.row));
+    expect(picks.map((item) => item.row.id)).toEqual(["nvda-110", "nvda-100"]);
+    expect(alertContractKey(picks[0].row)).not.toBe(alertContractKey(picks[1].row));
+    expect(alertSetupKey(picks[0].row)).toBe(alertSetupKey(higherStrike.row));
   });
 
-  it("skips a setup that was already saved today", () => {
+  it("skips a contract already saved today, including a differently formatted strike", () => {
     const indexed = indexSentAlerts([
       {
         tradingDay: "2026-05-14",
@@ -126,19 +130,72 @@ describe("alert delivery", () => {
         ticker: "NVDA",
         putCall: "call",
         expiration: "2026-06-04",
+        strike: 100,
+        grade: "B",
+        alertedPremium: 200_000,
       },
     ], "2026-05-14");
     expect(indexed.count).toBe(1);
     const picks = chooseAlerts({
       candidates: [
+        candidate({ id: "NVDA|2026-06-04|100.0|call", ticker: "NVDA", strike: 100, grade: "B", premium: 200_000 }),
         candidate({ id: "NVDA|2026-06-04|105|call", ticker: "NVDA", strike: 105, grade: "A" }),
-        candidate({ id: "QQQ|2026-06-04|400|call", ticker: "QQQ", grade: "B" }),
+        candidate({ id: "QQQ|2026-06-04|400|call", ticker: "QQQ", strike: 400, grade: "B" }),
       ],
       alreadySentContractKeys: indexed.contracts,
       alreadySentSetupKeys: indexed.setups,
+      sentByContract: indexed.byContract,
       limit: 5,
     });
-    expect(picks.map((item) => item.row.ticker)).toEqual(["QQQ"]);
+    expect(picks.map((item) => item.row.strike)).toEqual([105, 400]);
+  });
+
+  it("queues a re-alert only when the grade rises or premium doubles and adds $100K", () => {
+    const indexed = indexSentAlerts([
+      {
+        tradingDay: "2026-05-14",
+        contractKey: "NFLX|2026-11-20|64|call",
+        ticker: "NFLX",
+        putCall: "call",
+        expiration: "2026-11-20",
+        strike: 64,
+        grade: "B",
+        alertedPremium: 265_000,
+        sentAt: 1,
+      },
+    ], "2026-05-14");
+    const upgrade = candidate({
+      id: "NFLX|2026-11-20|64|call",
+      ticker: "NFLX",
+      strike: 64,
+      expiration: "2026-11-20",
+      grade: "A",
+      premium: 265_000,
+    });
+    expect(realertReasons(
+      { grade: "B", premium: 265_000 },
+      { grade: "A", premium: 265_000 },
+    )).toEqual(["Upgraded B→A"]);
+    expect(realertReasons(
+      { grade: "B", premium: 265_000 },
+      { grade: "B", premium: 610_000 },
+    )).toEqual(["Flow grew $265K→$610K"]);
+    expect(realertReasons(
+      { grade: "B", premium: 40_000 },
+      { grade: "B", premium: 80_000 },
+    )).toEqual([]);
+    expect(realertReasons(
+      { grade: "B", premium: 200_000 },
+      { grade: "B", premium: 310_000 },
+    )).toEqual([]);
+    const picks = chooseAlerts({
+      candidates: [upgrade],
+      alreadySentContractKeys: indexed.contracts,
+      alreadySentSetupKeys: indexed.setups,
+      sentByContract: indexed.byContract,
+      limit: 5,
+    });
+    expect(picks.map((item) => item.row.ticker)).toEqual(["NFLX"]);
   });
 
   it("reads the daily cap from the environment and falls back when it is unset or nonsense", () => {

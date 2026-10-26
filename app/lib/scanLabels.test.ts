@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ALERT_POLICY, TRADE_RULES } from "@/app/lib/alertConfig";
 import { chooseAlerts, type AlertCandidate } from "@/app/lib/alertPolicy";
 import { arrangeFlowCards } from "@/app/components/flowArrange";
-import { formatFlowAlert } from "@/app/lib/telegram";
+import { formatFlowAlert, formatRealertHtml } from "@/app/lib/telegram";
 import {
   alertLabels,
   big3mFirst,
@@ -127,5 +127,13 @@ describe("live behavior is unchanged", () => {
     expect(labeled).toContain("Suggested exit (label only");
     const stripTime = (s: string) => s.split("\n").filter((l) => !l.startsWith("⏰") && !l.startsWith("🔖") && !l.startsWith("Suggested exit")).join("\n");
     expect(stripTime(labeled)).toBe(stripTime(plain));
+    const repeated = formatFlowAlert({
+      ...base,
+      realertReasons: ["Upgraded B→A", "Flow grew $265K→$610K"],
+    });
+    expect(repeated).toContain(formatRealertHtml(["Upgraded B→A", "Flow grew $265K→$610K"]));
+    expect(repeated).toContain("<b>Upgraded B→A</b>");
+    expect(repeated).toContain("<b>Flow grew $265K→$610K</b>");
+    expect(plain).not.toContain("Upgraded");
   });
 });

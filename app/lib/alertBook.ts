@@ -2,7 +2,7 @@ import { OUTCOME_RULES, type LetterGrade } from "@/app/lib/alertConfig";
 import { parseFeatureSnapshot, snapshotFromFlow, type AlertFeatureSnapshot } from "@/app/lib/alertFeatures";
 import { parseRulesVersion, RULES_VERSION } from "@/app/lib/rulesVersion";
 import { chicagoClock, chicagoDate } from "@/app/lib/marketHours";
-import type { EstimatedSideLabel, FlowRow } from "@/app/lib/flow";
+import { notionalPremium, type EstimatedSideLabel, type FlowRow } from "@/app/lib/flow";
 import { parseOpeningCheck, pendingOpeningCheck, type OpeningCheck } from "@/app/lib/quoteSide";
 import type { StoredPriceLevels } from "@/app/lib/levels";
 import type { AlertVerdict, VerdictName } from "@/app/lib/verdict";
@@ -50,6 +50,10 @@ export interface StoredAlert {
   grade: LetterGrade;
   reasons: string[];
   note: string;
+  /** Flow premium (volume × mid × 100) at send time. Missing on alerts saved before this field. */
+  alertedPremium?: number | null;
+  /** Why this send repeated a contract already alerted today. Absent on the first send. */
+  realertReasons?: string[];
   /** Nearest support and resistance at send time. Null when history was missing. */
   levels: StoredPriceLevels | null;
   levelsNote: string | null;
@@ -174,6 +178,7 @@ export function buildStoredAlert(row: FlowRow, verdict: AlertVerdict, now: Date)
     grade: verdict.grade,
     reasons: verdict.reasons.slice(0, 4),
     note: verdict.note,
+    alertedPremium: alertedPremiumOf(row),
     levels: verdict.levels,
     levelsNote: verdict.levelsNote,
     eventLine: verdict.eventLine,
@@ -525,6 +530,8 @@ function parseAlert(value: unknown): StoredAlert | null {
     grade: row.grade,
     reasons,
     note: typeof row.note === "string" ? row.note.slice(0, 240) : "",
+    alertedPremium: optionalPremium(row.alertedPremium),
+    realertReasons: parseRealertReasons(row.realertReasons),
     levels: parseStoredLevels(row.levels),
     levelsNote: typeof row.levelsNote === "string" ? row.levelsNote.slice(0, 240) : null,
     eventLine: typeof row.eventLine === "string" && row.eventLine.trim()
@@ -610,6 +617,25 @@ function levelLabel(value: unknown): string | null {
   const text = value.trim();
   if (text.length < 2 || text.length > 40) return null;
   return text;
+}
+
+function alertedPremiumOf(row: FlowRow): number | null {
+  if (typeof row.notionalPremium === "number" && Number.isFinite(row.notionalPremium) && row.notionalPremium >= 0) {
+    return row.notionalPremium;
+  }
+  return notionalPremium(row.volume, row.mid);
+}
+
+function optionalPremium(value: unknown): number | null | undefined {
+  if (value == null) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return undefined;
+  return value;
+}
+
+function parseRealertReasons(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const reasons = value.filter((item): item is string => typeof item === "string" && item.length > 0 && item.length <= 80).slice(0, 4);
+  return reasons.length > 0 ? reasons : undefined;
 }
 
 function finiteLast(value: number): number | null {

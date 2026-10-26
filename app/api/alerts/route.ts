@@ -2,13 +2,15 @@ import { flowRowLabels, tickerSentToday } from "@/app/lib/scanLabels";
 import { NextRequest, NextResponse } from "next/server";
 import { alertScanMinPremium, alertsPerDayLimit } from "@/app/lib/alertConfig";
 import {
-  alertSetupKey,
+  alertContractKey,
   chooseAlerts,
   gradeAlertCandidates,
   indexSentAlerts,
+  realertReasons,
+  storedAlertPremium,
 } from "@/app/lib/alertPolicy";
 import { currentDailyLoss, loadAlertBook, recordOpeningChecks, rememberSentAlert } from "@/app/lib/alertStore";
-import { lastAlertBookWriteError, noteAlertSentUnsaved } from "@/app/lib/schwabStore";
+import { lastAlertBookWriteError } from "@/app/lib/schwabStore";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
@@ -67,6 +69,7 @@ export async function GET(request: NextRequest) {
           candidates: graded,
           alreadySentContractKeys: sent.contracts,
           alreadySentSetupKeys: sent.setups,
+          sentByContract: sent.byContract,
           limit: room,
         });
         let alertsSent = 0;
@@ -84,7 +87,15 @@ export async function GET(request: NextRequest) {
           const latestBook = (await loadAlertBook()).records;
           const latest = indexSentAlerts(latestBook, tradingDay);
           if (latest.count >= maxPerDay) break;
-          if (latest.contracts.has(item.row.id) || latest.setups.has(alertSetupKey(item.row))) continue;
+          const prior = latest.byContract.get(alertContractKey(item.row)) ?? null;
+          const repeatReasons = prior
+            ? realertReasons(prior, {
+              grade: item.verdict.grade,
+              premium: storedAlertPremium({ alertedPremium: item.row.notionalPremium }),
+            })
+            : [];
+          if (prior && repeatReasons.length === 0) continue;
+          if (!prior && (latest.contracts.has(item.row.id) || latest.contracts.has(alertContractKey(item.row)))) continue;
           const alertId = `${now.getTime()}-${item.row.id}`;
           const windowDate = windowEarningsDateForContract({
             ticker: item.row.ticker,
@@ -92,19 +103,29 @@ export async function GET(request: NextRequest) {
             now,
             dates: earningsDates,
           });
-          const saved = await rememberSentAlert(item.row, item.verdict, now, windowDate);
+          const claim = await rememberSentAlert(item.row, item.verdict, now, windowDate);
+          if (!claim.send) {
+            if (!claim.saved) {
+              const failure = await lastAlertBookWriteError();
+              const http = failure?.status == null ? "no HTTP status" : `HTTP ${failure.status}`;
+              const detail = failure ? ` (${http}: ${failure.message})` : "";
+              log.push(`${item.row.ticker}: alert book was not saved, so Telegram was not sent${detail}`);
+            }
+            continue;
+          }
           const labels: string[] = flowRowLabels(item.row, now.getTime());
           if (tickerSentToday(latestBook, item.row.ticker, tradingDay)) labels.splice(1, 0, "repeat");
-          const message = formatFlowAlert({ ...item.row, verdict: item.verdict, alertId, saved, labels });
+          const message = formatFlowAlert({
+            ...item.row,
+            verdict: item.verdict,
+            alertId,
+            saved: true,
+            labels,
+            realertReasons: claim.reasons,
+          });
           const delivered = await sendTelegramAlert(message);
           if (delivered) alertsSent++;
-          if (!saved) {
-            const failure = await lastAlertBookWriteError();
-            if (delivered) await noteAlertSentUnsaved(now);
-            const http = failure?.status == null ? "no HTTP status" : `HTTP ${failure.status}`;
-            const detail = failure ? ` (${http}: ${failure.message})` : "";
-            log.push(`${item.row.ticker}: alert book was not saved${detail}`);
-          } else if (!delivered) {
+          if (!delivered) {
             log.push(`${item.row.ticker}: saved in the alert book, but Telegram send failed`);
           } else {
             log.push(`${item.row.ticker}: Telegram alert sent and saved`);

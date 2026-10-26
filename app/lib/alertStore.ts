@@ -1,5 +1,5 @@
 import { OUTCOME_RULES, SMALL_SAMPLE_NOTE } from "@/app/lib/alertConfig";
-import { alertSetupKey } from "@/app/lib/alertPolicy";
+import { alertContractKey, realertReasons, storedAlertPremium } from "@/app/lib/alertPolicy";
 import {
   addRecord,
   alreadySentToday,
@@ -63,13 +63,23 @@ export async function wasSentToday(contractKey: string, now: Date): Promise<bool
   return alreadySentToday(book, contractKey, chicagoDate(now));
 }
 
-function setupAlreadySent(book: AlertBook, record: { ticker: string; putCall: string; expiration: string; tradingDay: string }): boolean {
-  const key = alertSetupKey(record);
+export interface SentAlertClaim {
+  /** True only when this call stored a new alert or an allowed re-alert. */
+  send: boolean;
+  saved: boolean;
+  reasons: string[];
+}
+
+function latestContractAlert(book: AlertBook, record: StoredAlert): StoredAlert | null {
+  const key = alertContractKey(record);
+  let found: StoredAlert | null = null;
   for (let i = 0; i < book.records.length; i++) {
     const row = book.records[i];
-    if (row.tradingDay === record.tradingDay && alertSetupKey(row) === key) return true;
+    if (row.tradingDay !== record.tradingDay) continue;
+    if (alertContractKey(row) !== key) continue;
+    if (!found || row.sentAt >= found.sentAt) found = row;
   }
-  return false;
+  return found;
 }
 
 export async function rememberSentAlert(
@@ -77,24 +87,43 @@ export async function rememberSentAlert(
   verdict: AlertVerdict,
   now: Date,
   windowEarningsDate?: string | null,
-): Promise<boolean> {
+): Promise<SentAlertClaim> {
   const record = buildStoredAlert(row, verdict, now);
   if (windowEarningsDate && /^\d{4}-\d{2}-\d{2}$/.test(windowEarningsDate)) {
     record.windowEarningsDate = windowEarningsDate;
   }
-  let kept = false;
+  let claim: SentAlertClaim = { send: false, saved: false, reasons: [] };
   const saved = await updateAlertBook((current) => {
     const book = parseAlertBook(current);
-    if (alreadySentToday(book, record.contractKey, record.tradingDay) || setupAlreadySent(book, record)) {
-      kept = true;
-      return JSON.stringify(book);
+    const prior = latestContractAlert(book, record);
+    if (prior) {
+      const reasons = realertReasons(
+        { grade: prior.grade, premium: storedAlertPremium(prior) },
+        { grade: record.grade, premium: storedAlertPremium(record) },
+      );
+      if (reasons.length === 0) {
+        claim = { send: false, saved: true, reasons: [] };
+        return current ?? JSON.stringify(book);
+      }
+      record.realertReasons = reasons;
+      const next = addRecord(book, record);
+      if (!next.records.some((item) => item.id === record.id)) {
+        claim = { send: false, saved: false, reasons: [] };
+        return null;
+      }
+      claim = { send: true, saved: true, reasons };
+      return JSON.stringify(next);
     }
     const next = addRecord(book, record);
-    kept = next.records.some((item) => item.id === record.id);
-    if (!kept) return null;
+    if (!next.records.some((item) => item.id === record.id)) {
+      claim = { send: false, saved: false, reasons: [] };
+      return null;
+    }
+    claim = { send: true, saved: true, reasons: [] };
     return JSON.stringify(next);
   });
-  return saved && kept;
+  if (!saved) return { send: false, saved: false, reasons: [] };
+  return claim;
 }
 
 /**
