@@ -40,6 +40,31 @@ interface ExperimentRow extends Omit<Row, "grade"> {
   grade: "A" | "B" | "test";
   experimentLabel: string | null;
   probeNote: string | null;
+  expiryType?: "0DTE" | "1DTE" | "weekly" | null;
+  entryWindow?: string | null;
+  levelLinedUp?: boolean | null;
+  spyDay?: "up" | "down" | "flat" | null;
+  noContract?: boolean;
+  pnl60?: number | null;
+  pnlFlat?: number | null;
+}
+
+interface PaperBucket {
+  key: string;
+  label: string;
+  trades: number;
+  open: number;
+  noContract: number;
+  closed60: number;
+  wins60: number;
+  losses60: number;
+  winRate60: number | null;
+  totalPnl60: number;
+  closedFlat: number;
+  winsFlat: number;
+  lossesFlat: number;
+  winRateFlat: number | null;
+  totalPnlFlat: number;
 }
 
 interface Experiment {
@@ -57,6 +82,8 @@ interface Experiment {
   averageLoss: number | null;
   totalPnl: number;
   rows: ExperimentRow[];
+  byExpiry?: PaperBucket[];
+  byLevel?: PaperBucket[];
 }
 
 interface Freshness {
@@ -209,8 +236,8 @@ export default function ScorecardPage() {
             {page.vwapPuts && (
               <ExperimentPanel
                 section={page.vwapPuts}
-                empty="No paper puts yet. A core ticker that trades above its session VWAP and then closes a minute back below it is recorded here."
-                fallbackLabel="Test: VWAP rejection puts"
+                empty="No paper puts yet. A name is recorded here after 15 completed minutes close below session VWAP and the next minute trades up to VWAP and closes back below it."
+                fallbackLabel="Paper - backtested VWAP put rule"
               />
             )}
             {page.timeStop60 && (
@@ -333,6 +360,7 @@ function money(value: number): string {
 }
 
 function ExperimentPanel({ section, empty, fallbackLabel }: { section: Experiment; empty: string; fallbackLabel: string }) {
+  const paper = section.byExpiry != null;
   return (
     <section style={{ ...cardStyle, borderColor: "rgba(251,191,36,0.45)", marginTop: 18 }}>
       <h2 style={{ ...heading, color: "#fbbf24" }}>{section.label}</h2>
@@ -349,10 +377,57 @@ function ExperimentPanel({ section, empty, fallbackLabel }: { section: Experimen
         losses={section.losses}
         flats={section.flats}
       />
+      {paper && section.byExpiry && (
+        <>
+          <h3 style={{ ...heading, margin: "14px 0 8px" }}>By expiry</h3>
+          <PaperBuckets buckets={section.byExpiry} />
+        </>
+      )}
+      {paper && section.byLevel && (
+        <>
+          <h3 style={{ ...heading, margin: "14px 0 8px" }}>By level</h3>
+          <PaperBuckets buckets={section.byLevel} />
+        </>
+      )}
       {section.rows.length === 0 && (
         <p style={{ color: "#94a3b8", fontSize: 15, margin: "10px 0 0" }}>{empty}</p>
       )}
-      {section.rows.length > 0 && (
+      {section.rows.length > 0 && paper && (
+        <div style={{ overflowX: "auto", marginTop: 10 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+            <thead>
+              <tr>
+                {["Ticker", "Expiry", "Window", "Level", "SPY day", "60-min P/L", "Flat P/L"].map((label) => (
+                  <th key={label} style={thStyle}>{label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {section.rows.map((row) => (
+                <tr key={row.id}>
+                  <td style={tdStyle}>
+                    {row.ticker}
+                    <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>
+                      {row.noContract ? "No contract" : `${row.strike} put`}
+                    </div>
+                  </td>
+                  <td style={tdStyle}>{expiryLabel(row.expiryType)}</td>
+                  <td style={tdStyle}>{row.entryWindow ?? "n/a"}</td>
+                  <td style={tdStyle}>{row.levelLinedUp ? "Yes" : "No"}</td>
+                  <td style={tdStyle}>{spyDayLabel(row.spyDay)}</td>
+                  <td style={{ ...tdStyle, color: pnlColor(row.noContract ? null : row.pnl60 ?? null) }}>
+                    {row.noContract || row.pnl60 == null ? "n/a" : signed(row.pnl60)}
+                  </td>
+                  <td style={{ ...tdStyle, color: pnlColor(row.noContract ? null : row.pnlFlat ?? null) }}>
+                    {row.noContract ? "No contract" : row.pnlFlat == null ? "n/a" : signed(row.pnlFlat)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {section.rows.length > 0 && !paper && (
         <div style={{ overflowX: "auto", marginTop: 10 }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
             <thead>
@@ -385,6 +460,41 @@ function ExperimentPanel({ section, empty, fallbackLabel }: { section: Experimen
       )}
     </section>
   );
+}
+
+function PaperBuckets({ buckets }: { buckets: PaperBucket[] }) {
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      {buckets.map((bucket) => (
+        <section key={bucket.key} style={{ ...cardStyle, marginBottom: 0 }}>
+          <h3 style={{ margin: "0 0 4px", fontSize: 16 }}>{bucket.label}</h3>
+          <Stat label="Trades" value={String(bucket.trades)} />
+          <Stat label="Open" value={String(bucket.open)} />
+          <Stat label="No contract" value={String(bucket.noContract)} />
+          <Stat label="60-min closed" value={String(bucket.closed60)} />
+          <Stat label="60-min win rate" value={bucket.winRate60 == null ? "n/a" : percent(bucket.winRate60)} />
+          <Stat label="60-min P/L" value={bucket.closed60 === 0 ? "n/a" : signed(bucket.totalPnl60)} />
+          <Stat label="Flat closed" value={String(bucket.closedFlat)} />
+          <Stat label="Flat win rate" value={bucket.winRateFlat == null ? "n/a" : percent(bucket.winRateFlat)} />
+          <Stat label="Flat P/L" value={bucket.closedFlat === 0 ? "n/a" : signed(bucket.totalPnlFlat)} />
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function expiryLabel(value: ExperimentRow["expiryType"]): string {
+  if (value === "0DTE") return "0DTE";
+  if (value === "1DTE") return "1DTE";
+  if (value === "weekly") return "Weekly 7d+";
+  return "n/a";
+}
+
+function spyDayLabel(value: ExperimentRow["spyDay"]): string {
+  if (value === "up") return "Up";
+  if (value === "down") return "Down";
+  if (value === "flat") return "Flat";
+  return "After close";
 }
 
 function signed(value: number): string {

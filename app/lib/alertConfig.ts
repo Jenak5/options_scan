@@ -195,20 +195,20 @@ export const EARNINGS_WINDOW = {
 } as const;
 
 /**
- * Paper puts after a 1-minute close back under session VWAP.
+ * Paper log for the backtested VWAP rejection put.
  * Not a grade, not a Telegram alert, and not part of the 14–42 day rule.
- * Quotes, when one is still needed, come from the leftover test slots inside the existing cap.
+ * The per-run caps below are unused. The logger writes one signal per ticker per day.
  */
 export const VWAP_PUT_TEST = {
-  label: "Test: VWAP rejection puts",
+  label: "Paper - backtested VWAP put rule",
   minTrust: 30,
-  /** Nearest expiration still this many calendar days out. */
+  /** Kept so older rows still parse. The backtested logger does not use this floor. */
   minDte: 7,
-  /** Ask below this is skipped. */
+  /** Kept so older rows still parse. The backtested logger uses $0.20. */
   minAsk: 0.5,
-  /** New paper puts written on one cron run. */
+  /** Unused by the backtested logger. */
   opensPerRun: 2,
-  /** New paper puts written on one Chicago day. */
+  /** Unused by the backtested logger. */
   opensPerDay: 4,
 } as const;
 

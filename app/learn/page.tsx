@@ -183,7 +183,7 @@ export default function LearnPage() {
               {page.summary.map((line) => <p key={line} style={prose}>{line}</p>)}
               {empty && (
                 <p style={prose}>
-                  An A or a B becomes a shadow after it is saved. A paper trade counts once it is closed. The 43–60 day test, the 1–13 day test, and Earnings in window are separate from the main totals. Earnings in window does not change a grade. The VWAP rejection puts and the 60-minute time stop stay on the scorecard and are not grades.
+                  An A or a B becomes a shadow after it is saved. A paper trade counts once it is closed. The 43–60 day test, the 1–13 day test, and Earnings in window are separate from the main totals. Earnings in window does not change a grade. The paper VWAP put rule and the 60-minute time stop stay on the scorecard and are not grades.
                 </p>
               )}
             </section>

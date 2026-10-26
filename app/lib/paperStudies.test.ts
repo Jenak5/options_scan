@@ -4,9 +4,9 @@ import { TIME_STOP_60, VWAP_PUT_TEST } from "@/app/lib/alertConfig";
 import type { CandleBar } from "@/app/lib/candleTypes";
 import { SHADOW_QUOTES_PER_RUN, type FlowRow } from "@/app/lib/flow";
 import { analyzeLearning } from "@/app/lib/learn";
-import { chicagoDate, isChicagoMarketHours } from "@/app/lib/marketHours";
+import { chicagoDate } from "@/app/lib/marketHours";
+import { tastytradeStreamerSymbol } from "@/app/lib/optionStreamer";
 import { EMPTY_PRINTS } from "@/app/lib/prints";
-import { MAX_LOSS_DOLLARS } from "@/app/lib/risk";
 import {
   clearMemoryStoreForTests,
   readShadowBookText,
@@ -34,10 +34,10 @@ import {
   TIME_STOP_MS,
 } from "@/app/lib/timeStop60";
 import {
-  chooseVwapPuts,
-  completedSessionMinutes,
-  vwapPutShadow,
-  vwapRejection,
+  advancePaperRows,
+  firstVwapReject,
+  VWAP_PAPER_RULE,
+  VWAP_PUT_SECTION_NOTE,
 } from "@/app/lib/vwapPut";
 
 /** Wednesday, 9:05 AM Central. Inside the regular session. */
@@ -76,79 +76,8 @@ afterEach(() => {
 });
 
 describe("VWAP rejection puts", () => {
-  it("fires on a completed minute that closes back under session VWAP", () => {
-    expect(isChicagoMarketHours(NOW)).toBe(true);
-    expect(vwapRejection(rejectionBars(), NOW.getTime())).toBe(true);
-    expect(vwapRejection(rejectionBars().slice(0, 1), NOW.getTime())).toBe(false);
-
-    const stayed = rejectionBars();
-    stayed[1] = { ...stayed[1], h: 103, l: 102, c: 102.5 };
-    expect(vwapRejection(stayed, NOW.getTime())).toBe(false);
-
-    const later = rejectionBars();
-    later.push({ t: SESSION_OPEN + 2 * MINUTE, o: 99, h: 100, l: 98, c: 98.5, v: 100 });
-    expect(vwapRejection(later, NOW.getTime())).toBe(false);
-
-    const forming = rejectionBars().slice(0, 1);
-    forming.push({ t: NOW.getTime() - 20_000, o: 90, h: 90, l: 89, c: 89, v: 100 });
-    expect(completedSessionMinutes(forming, NOW.getTime())).toHaveLength(1);
-    expect(vwapRejection(forming, NOW.getTime())).toBe(false);
-
-    const quiet = rejectionBars();
-    quiet[1] = { ...quiet[1], v: 0 };
-    expect(vwapRejection(quiet, NOW.getTime())).toBe(false);
-
-    const premarket = rejectionBars().map((bar) => ({ ...bar, t: bar.t - 3 * 60 * MINUTE }));
-    expect(vwapRejection(premarket, NOW.getTime())).toBe(false);
-  });
-
-  it("paper-buys the nearest put on a core ticker and skips the rest", () => {
-    const candles = new Map<string, CandleBar[]>([
-      ["SPY", rejectionBars()],
-      ["QQQ", rejectionBars()],
-      ["IWM", rejectionBars()],
-      ["HOOD", rejectionBars()],
-    ]);
-    const rows = [
-      putRow({ ticker: "HOOD", id: "HOOD|2026-11-20|40|put", strike: 40 }),
-      putRow({ ticker: "SPY", strike: 102, ask: 3, id: "SPY|2026-11-20|102|put" }),
-      putRow({ ticker: "SPY", strike: 98, ask: 1.5, dte: 6, expiration: "2026-10-27", id: "SPY|2026-10-27|98|put" }),
-      putRow({ ticker: "SPY", strike: 98, ask: 0.4, id: "SPY|2026-11-20|98|cheap" }),
-      putRow({ ticker: "SPY", strike: 99, ask: 9, id: "SPY|2026-11-20|99|rich" }),
-      putRow({ ticker: "SPY", strike: 99, ask: 2, dte: 21, id: "SPY|2026-11-11|99|put", expiration: "2026-11-11" }),
-      putRow({ ticker: "SPY", strike: 99, ask: 2.2, dte: 30, id: "SPY|2026-11-20|99|put" }),
-      putRow({ ticker: "QQQ", id: "QQQ|2026-11-20|100|put" }),
-      putRow({ ticker: "IWM", id: "IWM|2026-11-20|100|put" }),
-      putRow({ ticker: "SPY", putCall: "call", id: "SPY|2026-11-20|100|call" }),
-    ];
-    const picked = chooseVwapPuts({ rows, candles, now: NOW, existing: [] });
-    expect(picked.map((row) => row.ticker)).toEqual(["SPY", "QQQ"]);
-    expect(picked[0].id).toBe("SPY|2026-11-11|99|put");
-    expect(picked[0].ask * 100).toBeLessThanOrEqual(MAX_LOSS_DOLLARS);
-    expect(picked.every((row) => row.putCall === "put" && (row.dte ?? 0) >= VWAP_PUT_TEST.minDte)).toBe(true);
-
-    const closed = new Date("2026-10-21T20:30:00.000Z");
-    expect(isChicagoMarketHours(closed)).toBe(false);
-    expect(chooseVwapPuts({ rows, candles, now: closed, existing: [] })).toEqual([]);
-
-    const shadow = vwapPutShadow(picked[0], NOW);
-    expect(shadow?.cohort).toBe("vwap-put");
-    expect(shadow?.grade).toBe("test");
-    expect(shadow?.entryPrice).toBe(picked[0].ask);
-    expect(shadow?.entryPriceSource).toBe("ask");
-    const again = chooseVwapPuts({
-      rows,
-      candles,
-      now: NOW,
-      existing: shadow ? [shadow] : [],
-    });
-    expect(again.map((row) => row.ticker)).toEqual(["QQQ", "IWM"]);
-  });
-
-  it("stops, targets, and flats by the same Central close", () => {
-    const shadow = vwapPutShadow(putRow(), NOW);
-    expect(shadow).not.toBeNull();
-    if (!shadow) return;
+  it("keeps the older cross-down row on the live quote exit", () => {
+    const shadow = legacyVwap();
     const beforeClose = new Date("2026-10-21T19:00:00.000Z");
     const holding = applyShadowQuote(shadow, { mid: 2.2, bid: 2.1 }, beforeClose);
     expect(holding.status).toBe("open");
@@ -175,35 +104,100 @@ describe("VWAP rejection puts", () => {
     expect(nextDay.exitStale).toBe(true);
   });
 
-  it("saves a few paper puts and does not write a trade", async () => {
-    const candles = new Map<string, CandleBar[]>([
-      ["SPY", rejectionBars()],
-      ["QQQ", rejectionBars()],
-      ["IWM", rejectionBars()],
+  it("logs the backtested put once per name and leaves it out of the A and B totals", async () => {
+    const bars = rejectSession();
+    const signal = firstVwapReject(bars, NOW.getTime());
+    expect(signal).not.toBeNull();
+    if (!signal) return;
+    const rich = tastytradeStreamerSymbol({ ticker: "SPY", expiration: "2026-10-21", strike: 11, putCall: "put" });
+    const cheap = tastytradeStreamerSymbol({ ticker: "SPY", expiration: "2026-10-21", strike: 10, putCall: "put" });
+    expect(rich && cheap).toBeTruthy();
+    if (!rich || !cheap) return;
+    const candles = new Map<string, CandleBar[]>([["SPY", bars]]);
+    const optionBars = new Map<string, CandleBar[]>([
+      [rich, [{ t: signal.entryAt, o: 20, h: 20, l: 20, c: 20 }]],
+      [cheap, [{ t: signal.entryAt, o: 2, h: 2, l: 2, c: 2 }]],
     ]);
     const rows = [
-      putRow({ ticker: "SPY", id: "SPY|2026-11-20|100|put" }),
-      putRow({ ticker: "QQQ", id: "QQQ|2026-11-20|100|put" }),
-      putRow({ ticker: "IWM", id: "IWM|2026-11-20|100|put" }),
+      putRow({ ticker: "SPY", strike: 11, expiration: "2026-10-21", id: "SPY|2026-10-21|11|put" }),
+      putRow({ ticker: "SPY", strike: 10, expiration: "2026-10-21", id: "SPY|2026-10-21|10|put" }),
     ];
-    const savedPuts = await saveVwapPuts(rows, candles, NOW);
-    expect(savedPuts).toEqual({ opened: 2, saved: true });
+    const savedPuts = await saveVwapPuts(rows, candles, NOW, {
+      premarketHigh: new Map([["SPY", signal.vwap]]),
+      optionBars,
+    });
+    expect(savedPuts).toEqual({ opened: 9, saved: true });
     expect(await readTradeLogText()).toBeNull();
     const book = parseShadowBook(await readShadowBookText());
-    expect(book.records).toHaveLength(2);
-    expect(book.records.every((row) => row.cohort === "vwap-put" && row.grade === "test")).toBe(true);
+    expect(book.records).toHaveLength(9);
+    expect(book.records.every((row) => row.cohort === "vwap-put" && row.paperRuleVersion === VWAP_PAPER_RULE)).toBe(true);
+    const priced = book.records.find((row) => row.ticker === "SPY" && row.expiryType === "0DTE");
+    expect(priced?.strike).toBe(10);
+    expect(priced?.entryPrice).toBe(2);
+    expect(priced?.entryWindow).toBe("9:30-10");
+    expect(priced?.levelLinedUp).toBe(true);
+    expect(priced?.signalAt).toBe(signal.signalAt);
+    expect(priced?.entryAt).toBe(signal.entryAt);
+    expect(book.records.filter((row) => row.ticker === "SPY" && row.noContract)).toHaveLength(2);
+    expect(book.records.filter((row) => row.ticker === "SPX" && row.noContract)).toHaveLength(3);
+    expect(book.records.filter((row) => row.ticker === "XSP" && row.noContract)).toHaveLength(3);
+
     const card = summarizeShadows(book.records, new Set(), NOW);
-    expect(await saveVwapPuts(rows, candles, NOW)).toEqual({ opened: 1, saved: true });
-    expect(await saveVwapPuts(rows, candles, NOW)).toEqual({ opened: 0, saved: true });
-    const filled = parseShadowBook(await readShadowBookText());
-    expect(filled.records).toHaveLength(3);
-    expect(filled.records.map((row) => row.ticker).sort()).toEqual(["IWM", "QQQ", "SPY"]);
     expect(card.resolved).toBe(0);
     expect(card.open).toBe(0);
     expect(card.byGrade.every((bucket) => bucket.closed === 0)).toBe(true);
-    expect(card.vwapPuts.open).toBe(2);
-    expect(card.vwapPuts.label).toBe("Test: VWAP rejection puts");
+    expect(card.vwapPuts.label).toBe(VWAP_PUT_TEST.label);
+    expect(card.vwapPuts.label).toBe("Paper - backtested VWAP put rule");
+    expect(card.vwapPuts.note).toBe(VWAP_PUT_SECTION_NOTE);
+    expect(card.vwapPuts.open).toBe(1);
+    expect(card.vwapPuts.byExpiry?.find((bucket) => bucket.key === "0DTE")).toMatchObject({
+      trades: 1,
+      open: 1,
+      noContract: 2,
+    });
+    expect(card.vwapPuts.byExpiry?.find((bucket) => bucket.key === "1DTE")?.noContract).toBe(3);
+    expect(card.vwapPuts.byExpiry?.find((bucket) => bucket.key === "weekly")?.noContract).toBe(3);
+    expect(card.vwapPuts.byLevel?.find((bucket) => bucket.key === "lined")).toMatchObject({ trades: 1, noContract: 8 });
     expect(card.timeStop60.open).toBe(0);
+
+    expect(await saveVwapPuts(rows, candles, NOW, { optionBars })).toEqual({ opened: 0, saved: true });
+    expect(await saveVwapPuts(rows, candles, new Date("2026-10-21T20:30:00.000Z"), { optionBars })).toEqual({
+      opened: 0,
+      saved: true,
+    });
+
+    const holidayBars = bars.map((item) => ({
+      ...item,
+      t: item.t + (Date.parse("2026-11-26T14:30:00.000Z") - SESSION_OPEN),
+    }));
+    expect(await saveVwapPuts(rows, new Map([["SPY", holidayBars]]), new Date("2026-11-26T15:30:00.000Z"), {
+      optionBars,
+    })).toEqual({ opened: 0, saved: true });
+
+    const streamer = priced?.optionStreamer;
+    expect(streamer).toBe(cheap);
+    if (!streamer || priced?.entryAt == null) return;
+    const later = new Date("2026-10-21T20:30:00.000Z");
+    const advanced = advancePaperRows(book.records, new Map([[streamer, [{
+      t: priced.entryAt + 5 * MINUTE,
+      o: 2,
+      h: 2.8,
+      l: 2,
+      c: 2.8,
+    }]]]), [], later);
+    expect(advanced.updated).toBe(1);
+    const flat = advanced.records.find((row) => row.id === priced.id);
+    expect(flat?.exit60?.reason).toBe("profit");
+    expect(flat?.exitFlat?.reason).toBe("profit");
+    expect(flat?.pnlDollars).toBeCloseTo(70.06, 2);
+    const withLegacy = advanced.records.concat([vwapClosed()]);
+    const scored = summarizeShadows(withLegacy, new Set(), later);
+    expect(scored.resolved).toBe(0);
+    expect(scored.open).toBe(0);
+    expect(scored.vwapPuts.resolved).toBe(1);
+    expect(scored.vwapPuts.wins).toBe(1);
+    expect(scored.vwapPuts.totalPnl).toBeCloseTo(70.06, 2);
+    expect(scored.vwapPuts.rows.some((row) => row.id === "vwap-legacy-spy-0001")).toBe(false);
   });
 });
 
@@ -383,11 +377,14 @@ describe("paper studies stay beside the live book", () => {
   });
 });
 
-function rejectionBars(): CandleBar[] {
-  return [
-    { t: SESSION_OPEN, o: 100, h: 102, l: 100, c: 102, v: 100 },
-    { t: SESSION_OPEN + MINUTE, o: 101, h: 101, l: 99, c: 99, v: 100 },
-  ];
+function rejectSession(): CandleBar[] {
+  const bars: CandleBar[] = [{ t: SESSION_OPEN, o: 20, h: 20, l: 20, c: 20, v: 1 }];
+  for (let i = 1; i <= 15; i++) {
+    bars.push({ t: SESSION_OPEN + i * MINUTE, o: 10, h: 10, l: 10, c: 10, v: 1 });
+  }
+  bars.push({ t: SESSION_OPEN + 16 * MINUTE, o: 10, h: 30, l: 10, c: 10, v: 1 });
+  bars.push({ t: SESSION_OPEN + 17 * MINUTE, o: 10.5, h: 10.6, l: 10.4, c: 10.5, v: 1 });
+  return bars;
 }
 
 function putRow(over: Partial<FlowRow> = {}): FlowRow {
@@ -478,10 +475,45 @@ function marked(row: ShadowTrade, at: number, price: number): ShadowTrade {
   };
 }
 
+function legacyVwap(): ShadowTrade {
+  return {
+    id: "vwap-legacy-spy-0001",
+    alertId: "vwap-legacy-spy-0001",
+    openedAt: NOW.getTime(),
+    ticker: "SPY",
+    putCall: "put",
+    strike: 100,
+    expiration: "2026-11-20",
+    grade: "test",
+    cohort: "vwap-put",
+    experimentLabel: "Test: VWAP rejection puts",
+    probeGrade: null,
+    features: null,
+    rulesVersion: null,
+    marks: [],
+    maxFavorablePrice: null,
+    maxAdversePrice: null,
+    marksSeen: 0,
+    contracts: 1,
+    entryPrice: 2,
+    entryPriceSource: "ask",
+    status: "open",
+    closedAt: null,
+    exitPrice: null,
+    exitReason: null,
+    exitQuote: null,
+    exitStale: false,
+    pnlDollars: null,
+    pnlFraction: null,
+    tradingDaysHeld: null,
+    lastMark: null,
+    lastMarkSource: null,
+    lastMarkedAt: null,
+  };
+}
+
 function vwapOpen(): ShadowTrade {
-  const row = vwapPutShadow(putRow(), NOW);
-  if (!row) throw new Error("expected a paper put");
-  return row;
+  return legacyVwap();
 }
 
 function vwapClosed(): ShadowTrade {
