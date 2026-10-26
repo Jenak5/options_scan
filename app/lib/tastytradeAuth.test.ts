@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Limiter, mapLimit, resetTastytradeMarketForTests, tastytradePeakConcurrency, ttQuotes, withTastytradeAuth } from "@/app/lib/tastytradeMarket";
+import { Limiter, mapLimit, resetTastytradeMarketForTests, tastytradePeakConcurrency, ttQuotes, TT_MAX_CONCURRENT, withTastytradeAuth } from "@/app/lib/tastytradeMarket";
 
 const ENV = { TASTYTRADE_CLIENT_ID: "id", TASTYTRADE_CLIENT_SECRET: "secret", TASTYTRADE_REFRESH_TOKEN: "refresh" };
 
@@ -121,12 +121,12 @@ describe("Tastytrade auth", () => {
   });
 
   it("caps Tastytrade requests in flight across parallel tickers", async () => {
-    resetTastytradeMarketForTests({ sleep: async () => {}, maxConcurrent: 4 });
     const t = fakeTasty({ callDelayMs: 10 });
     const opts = Array.from({ length: 450 }, (_, i) => `SPY   261030C00${String(600 + i).padStart(3, "0")}000`);
     await Promise.all(["XLF", "GLD", "TLT", "SPY", "QQQ", "IWM"].map(() => ttQuotes({ options: opts }, t.fetchImpl)));
     expect(t.calls.length).toBe(30);
-    expect(tastytradePeakConcurrency()).toBe(4);
+    expect(tastytradePeakConcurrency()).toBe(TT_MAX_CONCURRENT);
+    expect(TT_MAX_CONCURRENT).toBe(2);
   });
 
   it("caps batches per ticker", async () => {

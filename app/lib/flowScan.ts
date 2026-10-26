@@ -1,7 +1,9 @@
 import {
   FLOW_BATCH_SIZE,
   FLOW_CACHE_MS,
+  FLOW_CHAIN_REUSE_MS,
   FLOW_MAX_REQUESTS_PER_MINUTE,
+  TICKER_GROUP_PAUSE_MS,
   flowChainRequest,
   flowContractKey,
   newYorkDate,
@@ -26,7 +28,9 @@ import { readFlowSnapshots, writeFlowSnapshots } from "@/app/lib/schwabStore";
 
 /**
  * Reads Schwab chains and scores them, then attaches cached price levels.
- * Chains and price history only. No orders. Chain results are cached for about 60 seconds.
+ * Chains and price history only. No orders. A repeated Flow request for the same
+ * ticker list is cached for about 60 seconds. The Flow page also reuses each
+ * ticker's chain for 5 minutes, including when it asks for a fresh pull.
  * A few active tickers are read again a couple of seconds later so a new last trade
  * can show up. That is still a quote, not a time-and-sales feed.
  * Earnings are read once per ticker and attached to every row from that chain.
@@ -56,8 +60,22 @@ interface CacheEntry {
 const cache = new Map<string, CacheEntry>();
 const requestTimes: number[] = [];
 
+interface CachedChain {
+  at: number;
+  levels: KeyLevels;
+  earnings: EarningsFact;
+  contracts: OptionContract[];
+  delayed: boolean;
+  underlyingPrice: number | null;
+  livePoints: Record<string, FlowQuotePoint[]>;
+}
+
+/** Per ticker, so a cron slice and a Flow page group can share a recent chain. */
+const tickerChains = new Map<string, CachedChain>();
+
 export function clearFlowScanCacheForTests(): void {
   cache.clear();
+  tickerChains.clear();
   requestTimes.length = 0;
 }
 
@@ -65,6 +83,10 @@ export async function scanEstimatedFlow(options?: {
   tickers?: string[];
   now?: number;
   bypassCache?: boolean;
+  /** Flow page only. A chain fetched inside FLOW_CHAIN_REUSE_MS is reused, even on a fresh pull. */
+  reuseRecentChains?: boolean;
+  /** Milliseconds between ticker groups. Defaults to TICKER_GROUP_PAUSE_MS. Zero skips the wait. */
+  groupPauseMs?: number;
 }): Promise<FlowScanResult> {
   const now = options?.now ?? Date.now();
   const tickers = (options?.tickers && options.tickers.length > 0
@@ -85,10 +107,20 @@ export async function scanEstimatedFlow(options?: {
   const errors: FlowScanError[] = [];
   const asOf = new Date(now);
   const passes: TickerPass[] = [];
+  const groupPauseMs = options?.groupPauseMs ?? TICKER_GROUP_PAUSE_MS;
+  const reuseRecent = options?.reuseRecentChains === true;
+  let networkFetches = 0;
 
   for (let i = 0; i < tickers.length; i += FLOW_BATCH_SIZE) {
+    if (i > 0 && groupPauseMs > 0) await sleep(groupPauseMs);
     const batch = tickers.slice(i, i + FLOW_BATCH_SIZE);
     await Promise.all(batch.map(async (ticker) => {
+      const recent = reuseRecent ? recentChain(ticker, now) : null;
+      if (recent) {
+        passes.push(recent);
+        return;
+      }
+      networkFetches += 1;
       await pace(Date.now());
       try {
         const chain = await getOptionChain(flowChainRequest(ticker, asOf));
@@ -109,6 +141,7 @@ export async function scanEstimatedFlow(options?: {
           underlyingPrice: chain.underlyingPrice,
           activity: activityScore(chain.contracts, previous[ticker] ?? null, asOf),
           livePoints: livePointsFromContracts(chain.contracts, sampledAt),
+          reused: false,
         });
       } catch (err) {
         rethrowIfSchwabOnly(err);
@@ -125,6 +158,7 @@ export async function scanEstimatedFlow(options?: {
     await sleep(PRINT_RULES.followUpGapMs);
     if (Date.now() - followStarted >= PRINT_RULES.followUpBudgetMs) break;
     for (let i = 0; i < follow.length; i += FLOW_BATCH_SIZE) {
+      if (i > 0 && groupPauseMs > 0) await sleep(groupPauseMs);
       const batch = follow.slice(i, i + FLOW_BATCH_SIZE);
       await Promise.all(batch.map(async (ticker) => {
         const pass = findPass(passes, ticker);
@@ -144,6 +178,20 @@ export async function scanEstimatedFlow(options?: {
     }
   }
 
+  for (let i = 0; i < passes.length; i++) {
+    const pass = passes[i];
+    if (pass.reused) continue;
+    tickerChains.set(pass.ticker, {
+      at: now,
+      levels: pass.levels,
+      earnings: pass.earnings,
+      contracts: pass.contracts.slice(),
+      delayed: pass.delayed,
+      underlyingPrice: pass.underlyingPrice,
+      livePoints: copyLivePoints(pass.livePoints),
+    });
+  }
+
   const rows: FlowRow[] = [];
   const updates: Record<string, FlowVolumeSnapshot> = {};
   const chainInterest = chainInterestFromContracts(passes);
@@ -161,6 +209,7 @@ export async function scanEstimatedFlow(options?: {
     }).map((row) => ({ ...row, levels: pass.levels, earnings: pass.earnings }));
     pass.contracts = [];
     rows.push(...scored);
+    if (pass.reused) continue;
     const snap = carryPriorSession(prior, snapshotFromRows(scored, now), asOf);
     snap.quotes = quotesForRows(scored, prior, pass.livePoints, asOf);
     updates[pass.ticker] = snap;
@@ -180,7 +229,7 @@ export async function scanEstimatedFlow(options?: {
   const result: FlowScanResult = {
     rows: withContext,
     scannedAt: now,
-    cached: false,
+    cached: tickers.length > 0 && networkFetches === 0,
     watchlist: tickers,
     errors,
     chainInterest,
@@ -213,6 +262,31 @@ interface TickerPass {
   /** Scored from the first chain, before follow-up reads replace it. */
   activity: number;
   livePoints: Record<string, FlowQuotePoint[]>;
+  /** True when this pass reused a chain fetched inside the last 5 minutes. */
+  reused: boolean;
+}
+
+function recentChain(ticker: string, now: number): TickerPass | null {
+  const hit = tickerChains.get(ticker);
+  if (!hit || now < hit.at || now - hit.at >= FLOW_CHAIN_REUSE_MS) return null;
+  return {
+    ticker,
+    levels: hit.levels,
+    earnings: hit.earnings,
+    contracts: hit.contracts.slice(),
+    delayed: hit.delayed,
+    underlyingPrice: hit.underlyingPrice,
+    activity: 0,
+    livePoints: copyLivePoints(hit.livePoints),
+    reused: true,
+  };
+}
+
+function copyLivePoints(points: Record<string, FlowQuotePoint[]>): Record<string, FlowQuotePoint[]> {
+  const out: Record<string, FlowQuotePoint[]> = {};
+  const keys = Object.keys(points);
+  for (let i = 0; i < keys.length; i++) out[keys[i]] = points[keys[i]].slice();
+  return out;
 }
 
 function findPass(passes: TickerPass[], ticker: string): TickerPass | null {

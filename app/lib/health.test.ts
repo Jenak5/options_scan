@@ -39,6 +39,8 @@ describe("health report", () => {
     expect(report).toEqual({
       lastScanAt: "2026-10-06T18:05:00.000Z",
       lastScanOutcome: "success",
+      skippedTickers: 0,
+      skippedTickerList: [],
       lastCronAt: "2026-10-06T17:00:00.000Z",
       lastCronOutcome: "skipped",
       lastBrowserScanAt: "2026-10-06T18:05:00.000Z",
@@ -101,6 +103,49 @@ describe("health report", () => {
     expect(report.candleErrors).toBe(1);
     expect(report.candleErrorSample).toBe("invalid_grant: refresh token is invalid");
     expect(report.resolvedShadows).toBe(2);
+  });
+
+  it("counts skipped tickers on the last scan and leaves an earlier cron list behind", () => {
+    const cronPartial = buildHealthReport({
+      health: {
+        ...emptyScanHealth(),
+        lastRunAt: Date.parse("2026-10-06T17:00:00Z"),
+        lastOutcome: "partial",
+        lastSkippedTickers: ["XLF", "GLD"],
+      },
+      schwabConnected: true,
+      tastytradeEnabled: false,
+      alerts: [],
+      openShadows: 0,
+      resolvedShadows: 0,
+      now: NOW,
+    });
+    expect(cronPartial.lastScanOutcome).toBe("partial");
+    expect(cronPartial.lastCronOutcome).toBe("partial");
+    expect(cronPartial.skippedTickers).toBe(2);
+    expect(cronPartial.skippedTickerList).toEqual(["XLF", "GLD"]);
+
+    const page = buildHealthReport({
+      health: {
+        ...emptyScanHealth(),
+        lastRunAt: Date.parse("2026-10-06T17:00:00Z"),
+        lastOutcome: "partial",
+        lastSkippedTickers: ["XLF"],
+        lastBrowserScanAt: Date.parse("2026-10-06T18:05:00Z"),
+        lastBrowserOutcome: "partial",
+        lastBrowserSkippedTickers: ["TLT"],
+      },
+      schwabConnected: true,
+      tastytradeEnabled: false,
+      alerts: [],
+      openShadows: 0,
+      resolvedShadows: 0,
+      now: NOW,
+    });
+    expect(page.lastScanOutcome).toBe("partial");
+    expect(page.lastCronOutcome).toBe("partial");
+    expect(page.skippedTickers).toBe(1);
+    expect(page.skippedTickerList).toEqual(["TLT"]);
   });
 
   it("counts open and resolved A/B shadows and skips the test book", () => {

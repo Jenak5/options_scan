@@ -142,12 +142,19 @@ async function saveNewAlert(
 }
 
 /** Remember a Flow page load without taking the scheduled scan's slot. */
-export async function noteBrowserScan(now: Date, shadowAt: number | null): Promise<void> {
+export async function noteBrowserScan(
+  now: Date,
+  shadowAt: number | null,
+  outcome: "success" | "partial" = "success",
+  skippedTickers: readonly string[] = [],
+): Promise<void> {
   try {
     const current = await readScanHealth().catch(() => emptyScanHealth());
     await writeScanHealth({
       ...current,
       lastBrowserScanAt: now.getTime(),
+      lastBrowserOutcome: outcome,
+      lastBrowserSkippedTickers: outcome === "partial" ? skippedTickers.slice() : [],
       lastShadowAt: shadowAt ?? current.lastShadowAt,
     });
   } catch {

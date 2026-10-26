@@ -53,8 +53,11 @@ const AUTH_RETRY_DELAY_MS = 250;
  */
 const RATE_LIMIT_BACKOFF_MS = [1500, 3000];
 const RATE_LIMIT_JITTER = 0.5;
-/** Tastytrade requests in flight at once per instance (one scan). */
-export const TT_MAX_CONCURRENT = 4;
+/**
+ * Tastytrade requests in flight at once per instance (one scan).
+ * Two, so a burst right after login does not come back as 401.
+ */
+export const TT_MAX_CONCURRENT = 2;
 /** Tastytrade requests in flight at once for one ticker's chain. */
 export const TT_MAX_PER_TICKER = 2;
 

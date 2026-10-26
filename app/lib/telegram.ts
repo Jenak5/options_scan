@@ -4,11 +4,23 @@ import { planExitsForAsk } from "@/app/lib/exits";
 import { formatLevelsSummary, type StoredPriceLevels } from "@/app/lib/levels";
 
 const TG_API = "https://api.telegram.org/bot";
+/** Telegram's retry_after is in seconds. Never wait longer than this on one 429. */
+export const TELEGRAM_RETRY_CAP_MS = 15_000;
 
 export function telegramConfigured(): boolean {
   const token = process.env.TELEGRAM_BOT_TOKEN?.trim() ?? "";
   const chatId = process.env.TELEGRAM_CHAT_ID?.trim() ?? "";
   return token.length > 0 && chatId.length > 0;
+}
+
+/**
+ * Milliseconds to wait after a Telegram 429.
+ * Uses parameters.retry_after, then the Retry-After header, and caps the wait.
+ */
+export function telegramRetryWaitMs(body: string, retryAfterHeader: string | null): number {
+  const seconds = retryAfterSeconds(body) ?? headerRetrySeconds(retryAfterHeader);
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return 1_000;
+  return Math.min(TELEGRAM_RETRY_CAP_MS, Math.round(seconds * 1000));
 }
 
 export async function sendTelegramAlert(message: string): Promise<boolean> {
@@ -20,28 +32,76 @@ export async function sendTelegramAlert(message: string): Promise<boolean> {
     return false;
   }
 
-  try {
-    const res = await fetch(`${TG_API}${token}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: message,
-        parse_mode: "HTML",
-        disable_web_page_preview: true,
-      }),
-    });
+  const body = JSON.stringify({
+    chat_id: chatId,
+    text: message,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+  });
 
+  try {
+    let res = await postTelegram(token, body);
+    if (res.status === 429) {
+      const text = await res.text();
+      const waitMs = telegramRetryWaitMs(text, res.headers.get("retry-after"));
+      console.info(`Telegram rate limited, retrying once after ${waitMs}ms`);
+      await sleep(waitMs);
+      res = await postTelegram(token, body);
+    }
     if (!res.ok) {
-      const err = await res.text();
+      const err = redactTelegram(await res.text(), token);
       console.error(`Telegram send failed (${res.status}): ${err}`);
       return false;
     }
     return true;
   } catch (err) {
-    console.error("Telegram send error:", err);
+    const messageText = err instanceof Error ? err.message : "unknown";
+    console.error(`Telegram send error: ${redactTelegram(messageText, token)}`);
     return false;
   }
+}
+
+function postTelegram(token: string, body: string): Promise<Response> {
+  return fetch(`${TG_API}${token}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+  });
+}
+
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function retryAfterSeconds(body: string): number | null {
+  try {
+    const parsed = JSON.parse(body) as { parameters?: { retry_after?: unknown } };
+    const value = parsed?.parameters?.retry_after;
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim() !== "") {
+      const parsedValue = Number(value);
+      if (Number.isFinite(parsedValue)) return parsedValue;
+    }
+  } catch {
+    // A non-JSON body can still name the wait in text.
+  }
+  const named = /retry after (\d+(?:\.\d+)?)/i.exec(body);
+  if (!named) return null;
+  const seconds = Number(named[1]);
+  return Number.isFinite(seconds) ? seconds : null;
+}
+
+function headerRetrySeconds(header: string | null): number | null {
+  if (!header) return null;
+  const seconds = Number(header.trim());
+  return Number.isFinite(seconds) ? seconds : null;
+}
+
+function redactTelegram(text: string, token: string): string {
+  const secret = token.trim();
+  if (!secret) return text;
+  return text.split(secret).join("[redacted]");
 }
 
 export function formatVerdictHtml(verdict: {

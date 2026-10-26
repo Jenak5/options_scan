@@ -5,8 +5,10 @@ import { denyIfUnauthorized } from "@/app/lib/auth";
 import {
   FLOW_DISCLAIMER,
   FLOW_LIQUIDITY_RULES,
+  TICKER_GROUP_PAUSE_MS,
   filterFlowRows,
   isFlowTicker,
+  pauseBetweenTickerGroups,
   watchlistChunk,
   watchlistFromEnv,
   watchlistOverrideNote,
@@ -17,7 +19,7 @@ import { preferredDataSource } from "@/app/lib/dataSourcePref";
 import { BothSourcesFailedError, isSchwabBackupMiss } from "@/app/lib/marketData";
 import { chicagoDate, isChicagoMarketHours, isMarketDay, isNyseHoliday } from "@/app/lib/marketHours";
 import { noteBrowserScan, recordFlowPageSession } from "@/app/lib/pageScan";
-import { formatScanRunLine } from "@/app/lib/scanHealth";
+import { formatScanRunLine, normalizeSkippedTickers } from "@/app/lib/scanHealth";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { withBlobReadCache } from "@/app/lib/schwabStore";
 import { gradeFlowRow } from "@/app/lib/verdict";
@@ -60,9 +62,18 @@ async function handleFlow(request: NextRequest) {
     nextOffset = chunk.nextOffset;
   }
 
+  if (!ticker && offset > 0) await pauseBetweenTickerGroups();
+
   try {
     const now = new Date();
-    const scan = await scanEstimatedFlow({ tickers, bypassCache: fresh });
+    const scan = await scanEstimatedFlow({
+      tickers,
+      bypassCache: fresh,
+      reuseRecentChains: true,
+      groupPauseMs: TICKER_GROUP_PAUSE_MS,
+    });
+    const skippedNames = normalizeSkippedTickers(scan.errors.map((item) => item.ticker));
+    const pageOutcome = skippedNames.length > 0 ? "partial" as const : "success" as const;
     const risk = await loadRiskStatus(now);
     const losses = risk.stop.consecutiveLosses;
     const graded = filterFlowRows(scan.rows, { minPremium, otmOnly, liquidOnly, limit })
@@ -73,9 +84,9 @@ async function handleFlow(request: NextRequest) {
       try {
         recorded = await recordFlowPageSession(scan.rows, scan.chainInterest, losses, now);
         const touched = recorded.opened > 0 || recorded.marked > 0 || recorded.closed > 0;
-        await noteBrowserScan(now, touched ? now.getTime() : null);
+        await noteBrowserScan(now, touched ? now.getTime() : null, pageOutcome, skippedNames);
         console.info(formatScanRunLine({
-          outcome: "success",
+          outcome: pageOutcome,
           tickers: scan.watchlist.length,
           alertsSaved: recorded.saved,
           shadowsOpened: recorded.opened,
@@ -96,7 +107,7 @@ async function handleFlow(request: NextRequest) {
       }
     } else {
       console.info(formatScanRunLine({
-        outcome: "success",
+        outcome: pageOutcome,
         tickers: scan.watchlist.length,
         alertsSaved: 0,
         shadowsOpened: 0,
@@ -127,7 +138,7 @@ async function handleFlow(request: NextRequest) {
       scanComplete,
       nextOffset,
       errors: scan.errors,
-      skipped: scan.errors.map((item) => item.ticker),
+      skipped: skippedNames,
       liquidity: { ...FLOW_LIQUIDITY_RULES, liquidOnly },
     });
   } catch (err) {

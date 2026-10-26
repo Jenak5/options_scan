@@ -1482,7 +1482,10 @@ function statusHasSharedData(status: PersistedStoreStatus): boolean {
     || scan.tastytradeOk != null
     || scan.tastytradeStatus != null
     || scan.tastytradeCheckedAt != null
-    || scan.tastytradeMessage != null;
+    || scan.tastytradeMessage != null
+    || scan.lastBrowserOutcome != null
+    || scan.lastSkippedTickers.length > 0
+    || scan.lastBrowserSkippedTickers.length > 0;
 }
 
 /**
