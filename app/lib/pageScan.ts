@@ -76,6 +76,7 @@ export async function recordDisplayedAlerts(
     candidates: graded,
     alreadySentContractKeys: sent.contracts,
     alreadySentSetupKeys: sent.setups,
+    sentByContract: sent.byContract,
     limit: room,
   });
   const earningsDates = queued.length === 0
@@ -92,7 +93,7 @@ export async function recordDisplayedAlerts(
       dates: earningsDates,
     });
     const created = await saveNewAlert(item.row, item.verdict, now, windowDate);
-    if (!created) continue;
+    if (!created.send) continue;
     saved += 1;
     const alertId = `${now.getTime()}-${item.row.id}`;
     const labels: string[] = flowRowLabels(item.row, now.getTime());
@@ -104,6 +105,7 @@ export async function recordDisplayedAlerts(
       alertId,
       saved: true,
       labels,
+      realertReasons: created.reasons,
     }));
   }
 
@@ -126,19 +128,10 @@ async function saveNewAlert(
   verdict: Parameters<typeof rememberSentAlert>[1],
   now: Date,
   windowEarningsDate: string | null,
-): Promise<boolean> {
-  const tradingDay = chicagoDate(now);
-  const sentAt = now.getTime();
-  const ok = await rememberSentAlert(row, verdict, now, windowEarningsDate);
-  if (!ok) return false;
-  const book = await loadAlertBook();
-  for (let i = 0; i < book.records.length; i++) {
-    const record = book.records[i];
-    if (record.contractKey === row.id && record.tradingDay === tradingDay && record.sentAt === sentAt) {
-      return true;
-    }
-  }
-  return false;
+): Promise<{ send: boolean; reasons: string[] }> {
+  const claim = await rememberSentAlert(row, verdict, now, windowEarningsDate);
+  if (!claim.send) return { send: false, reasons: [] };
+  return { send: true, reasons: claim.reasons };
 }
 
 /** Remember a Flow page load without taking the scheduled scan's slot. */

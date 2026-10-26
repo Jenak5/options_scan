@@ -53,7 +53,7 @@ afterEach(() => {
 describe("paper trade from an alert", () => {
   it("copies the contract, the ask, the grade, the flow premium, and the alert id", async () => {
     const verdict = { ...gradeFlowRow(row(), null), grade: "A" as const, verdict: "TAKE" as const };
-    expect(await rememberSentAlert(row(), verdict, NOW)).toBe(true);
+    expect((await rememberSentAlert(row(), verdict, NOW)).send).toBe(true);
     const alertId = `${NOW.getTime()}-SPY|2026-10-08|105|call`;
     const opened = await openPaperLoggedTrade({ alertId }, NOW);
     expect(opened.ok).toBe(true);
@@ -86,7 +86,7 @@ describe("paper trade from an alert", () => {
 
   it("links a flow card to the saved alert and keeps the alert ask", async () => {
     const verdict = { ...gradeFlowRow(row(), null), grade: "A" as const, verdict: "TAKE" as const };
-    expect(await rememberSentAlert(row(), verdict, NOW)).toBe(true);
+    expect((await rememberSentAlert(row(), verdict, NOW)).send).toBe(true);
     const opened = await openPaperLoggedTrade({
       ticker: "spy",
       putCall: "call",
@@ -163,7 +163,7 @@ describe("paper trade from an alert", () => {
 describe("trade log store", () => {
   it("turns two losing closes into the daily stop and keeps the linked grade", async () => {
     const verdict = gradeFlowRow(row(), null);
-    expect(await rememberSentAlert(row(), verdict, NOW)).toBe(true);
+    expect((await rememberSentAlert(row(), verdict, NOW)).send).toBe(true);
     const bookId = `${NOW.getTime()}-SPY|2026-10-08|105|call`;
     const first = await openLoggedTrade(entry(bookId), NOW);
     expect(first.ok).toBe(true);
@@ -230,7 +230,7 @@ function alertId(now: Date, contractKey: string): string {
 }
 
 async function saveAlert(verdict: ReturnType<typeof gradeFlowRow>, now: Date, over: Partial<FlowRow>) {
-  expect(await rememberSentAlert(row(over), verdict, now)).toBe(true);
+  expect((await rememberSentAlert(row(over), verdict, now)).send).toBe(true);
 }
 
 function entry(alertId: string | null) {

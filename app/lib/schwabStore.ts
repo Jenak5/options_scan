@@ -587,19 +587,77 @@ export async function updateAlertBook(change: (current: string | null) => string
     return true;
   }
   if (kind === "blob") return updateBlobAlertBook(guarded);
-  let current: string | null;
-  try {
-    const raw = await kvCommand(["GET", ALERT_BOOK_KEY]);
-    current = typeof raw === "string" && raw.length > 0 ? raw : null;
-  } catch (err) {
-    await recordStoreFailure("alert-book", "read", err);
-    return false;
+  return updateKvAlertBook(guarded);
+}
+
+/**
+ * Compare-and-set the alert book so two instances cannot drop a claim.
+ * EVAL is one Redis command. A conflict re-reads and runs the change again.
+ * A store that rejects EVAL falls back to a plain SET.
+ */
+const KV_ALERT_BOOK_ATTEMPTS = 5;
+let kvAlertBookCasUnsupported = false;
+
+const KV_ALERT_BOOK_CAS = `
+local raw = redis.call('GET', KEYS[1])
+if raw == false then raw = nil end
+if ARGV[3] == '1' then
+  if raw ~= nil then return 0 end
+else
+  if raw ~= ARGV[1] then return 0 end
+end
+redis.call('SET', KEYS[1], ARGV[2])
+return 1
+`;
+
+async function updateKvAlertBook(change: (current: string | null) => string | null): Promise<boolean> {
+  for (let attempt = 0; attempt < KV_ALERT_BOOK_ATTEMPTS; attempt++) {
+    let current: string | null;
+    try {
+      const raw = await kvCommand(["GET", ALERT_BOOK_KEY]);
+      current = typeof raw === "string" && raw.length > 0 ? raw : null;
+    } catch (err) {
+      await recordStoreFailure("alert-book", "read", err);
+      return false;
+    }
+    const next = change(current);
+    if (next == null) {
+      await recordStoreFailure("alert-book", "write", new Error("Refusing to overwrite an unreadable alert book"));
+      return false;
+    }
+    if (next === current) {
+      await clearStoreFailure("alert-book");
+      return true;
+    }
+    if (kvAlertBookCasUnsupported) return writeKvAlertBook(next);
+    try {
+      const result = await kvCommand([
+        "EVAL",
+        KV_ALERT_BOOK_CAS,
+        "1",
+        ALERT_BOOK_KEY,
+        current ?? "",
+        next,
+        current == null ? "1" : "0",
+      ]);
+      if (result === 1 || result === "1") {
+        await clearStoreFailure("alert-book");
+        return true;
+      }
+    } catch (err) {
+      if (isKvCasUnsupported(err)) {
+        kvAlertBookCasUnsupported = true;
+        return writeKvAlertBook(next);
+      }
+      await recordStoreFailure("alert-book", "write", err);
+      return false;
+    }
   }
-  const next = guarded(current);
-  if (next == null) {
-    await recordStoreFailure("alert-book", "write", new Error("Refusing to overwrite an unreadable alert book"));
-    return false;
-  }
+  await recordStoreFailure("alert-book", "write", new Error("Alert book write lost a concurrent update"));
+  return false;
+}
+
+async function writeKvAlertBook(next: string): Promise<boolean> {
   try {
     await kvCommand(["SET", ALERT_BOOK_KEY, next]);
     await clearStoreFailure("alert-book");
@@ -608,6 +666,11 @@ export async function updateAlertBook(change: (current: string | null) => string
     await recordStoreFailure("alert-book", "write", err);
     return false;
   }
+}
+
+function isKvCasUnsupported(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : "";
+  return message.includes("(400)");
 }
 
 /**

@@ -391,7 +391,7 @@ describe("earnings in window", () => {
     });
     expect(heldDate).toBe("2026-12-23");
     const saved = await rememberSentAlert(heldRow(), gradeFlowRow(heldRow(), null, NOW), NOW, heldDate);
-    expect(saved).toBe(true);
+    expect(saved.send).toBe(true);
     const book = parseAlertBook(await readAlertBookText());
     expect(book.records[0]?.windowEarningsDate).toBe("2026-12-23");
     expect(book.records[0]?.grade).toBe("B");
