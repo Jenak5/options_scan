@@ -25,10 +25,12 @@ import { completedSessionMinutes } from "@/app/lib/vwapPut";
  * typical price (H+L+C)/3, volume floored at 1, anchored at 9:30 ET.
  * The day's implied move is spot × annualized IV × sqrt(1/365).
  *
- * 0DTE expires the same day. 1DTE expires the next NYSE trading day and can
- * stay open overnight. ATR used is today's range / ATR14. 0DTE size is $250
- * when that ratio is known. 1DTE size is $875 inside 0.41–0.67 and $300 outside.
- * A missing ATR is $300 for both. The flat $875 size stays for comparison.
+ * 0DTE expires the same day. 1DTE uses the next NYSE trading day's expiry.
+ * Both are entered and closed the same session: the implied-move stop, or
+ * 3:45 PM ET (1:00 PM ET on an early close). They are not held overnight.
+ * ATR used is today's range / ATR14. 0DTE size is $250 when that ratio is
+ * known. 1DTE size is $875 inside 0.41–0.67 and $300 outside. A missing ATR
+ * is $300 for both. The flat $875 size stays for comparison.
  */
 
 export const JG_VWAP_TICKERS = ["QQQ", "SPX"] as const;
@@ -554,9 +556,7 @@ export function formatJgVwapAlert(trade: JgVwapTrade): string {
   const buy = trade.contracts >= 1
     ? `Buy <b>${trade.contracts}</b> at the ask $${trimPrice(trade.entryAsk)} (bid $${trimPrice(trade.entryBid)}). Flat $${budget} sizing would buy <b>${trade.budgetContracts}</b>.`
     : `Suggested size $${Math.round(suggestedSize)} does not cover one contract at the ask $${trimPrice(trade.entryAsk)}, so the ATR-sized paper P/L is not scored. Flat $${budget} sizing would buy <b>${trade.budgetContracts}</b>.`;
-  const exitLine = variant === "1DTE"
-    ? "If it is still open, sell at the bid by 3:45 PM ET on the expiry day (1:00 PM ET when that day is an early close). It stays open overnight. The stop can close it sooner."
-    : "If it is still open, sell at the bid by the flat exit (3:45 PM ET, or 1:00 PM ET on an early close).";
+  const exitLine = "If it is still open, sell at the bid by 3:45 PM ET the same day (1:00 PM ET on an early close).";
   return `<b>PAPER TEST - JG-VWAP ${variant}</b>
 ${escapeHtml(trade.ticker)} <b>${right}</b> · $${trimPrice(trade.strike)} exp ${escapeHtml(trade.expiration)}
 Paper only. This is not an A or a B, and it is outside the daily A/B alert cap. No order is placed.${over}
@@ -634,7 +634,8 @@ function markOpen(
   const quote = snap ? findQuote(snap.contracts, trade) : null;
   const spot = snap?.spot != null && snap.spot > 0 ? snap.spot : null;
   const stopped = spot != null && hitStop(trade, spot);
-  const flatDue = trade.expiration === day && minutes >= jgFlatExitMinute(day);
+  // Both variants exit the entry session. A later session closes anything still open.
+  const flatDue = minutes >= jgFlatExitMinute(day) || entryDayOf(trade) < day;
   if (!expired && !stopped && !flatDue) return trade;
   if (!expired && !quote) return trade;
   const bid = quote && quote.bid >= 0 ? quote.bid : 0;
@@ -786,7 +787,7 @@ function sectionNote(book: JgVwapBook): string {
   const known = JG_VWAP_SIZE_0DTE_DOLLARS;
   const unknown = JG_VWAP_SIZE_UNKNOWN_DOLLARS;
   const spx = spxNote(book);
-  return `${JG_VWAP_TEST.label}. These rows are left out of the A and B totals above. Each entry sends a Telegram message labeled PAPER TEST - JG-VWAP 0DTE or PAPER TEST - JG-VWAP 1DTE, and that message is outside the daily A/B cap. QQQ and SPX, in the direction of session VWAP. A call needs price at or above VWAP × ${(1 - JG_VWAP_TEST.vwapBand).toFixed(3)}, and it is skipped when that price is also on the put side of the band. A put needs price at or below VWAP × ${(1 + JG_VWAP_TEST.vwapBand).toFixed(3)}, and it is skipped when that price is also on the call side. Session VWAP is the regular-hours typical price from 1-minute candles, volume floored at 1, from 9:30 ET. One 0DTE and one 1DTE paper entry per ticker per day. 0DTE expires that day. 1DTE expires the next trading day, skipping weekends and full-day NYSE holidays, and it can stay open overnight. If that expiry is not in the chain, 1DTE is skipped and the scan log says so. The logged strike is the nearest strike of that expiry whose spread is within ${JG_VWAP_TEST.maxSpreadOfMid * 100}% of the mid. Buy at the ask, sell at the bid, $${JG_VWAP_TEST.feePerSide.toFixed(2)} a contract each side. ATR used is today's high minus today's low so far, divided by the 14-day average true range of completed daily bars. 0DTE suggested size is $${known} when ATR used is known. 1DTE suggested size is $${budget} when ATR used is from ${JG_VWAP_ATR_BAND_LOW} through ${JG_VWAP_ATR_BAND_HIGH}, and $${unknown} otherwise. Both use $${unknown} when ATR cannot be computed. Scored contracts are floor(suggested size / (ask × 100)). A size that buys zero contracts is not scored. The flat $${budget} size stays as a comparison: floor(${budget} / (ask × 100)), and a contract above $${budget} is logged as 1 and flagged over budget. Over-budget SPX stays in its own bucket. Over-budget QQQ is flagged on the row and left out of the QQQ totals. The stop is ${JG_VWAP_TEST.stopFractionOfImpliedMove}× the day's implied move (spot × IV × sqrt(1/365)) against the entry. A 0DTE still open is sold at the bid at 3:45 PM ET, or at 1:00 PM ET on an NYSE early close. A 1DTE still open is sold at that same clock on its expiry day. Full-day NYSE holidays are skipped. Market hours only. No order is placed. ${spx}`;
+  return `${JG_VWAP_TEST.label}. These rows are left out of the A and B totals above. Each entry sends a Telegram message labeled PAPER TEST - JG-VWAP 0DTE or PAPER TEST - JG-VWAP 1DTE, and that message is outside the daily A/B cap. QQQ and SPX, in the direction of session VWAP. A call needs price at or above VWAP × ${(1 - JG_VWAP_TEST.vwapBand).toFixed(3)}, and it is skipped when that price is also on the put side of the band. A put needs price at or below VWAP × ${(1 + JG_VWAP_TEST.vwapBand).toFixed(3)}, and it is skipped when that price is also on the call side. Session VWAP is the regular-hours typical price from 1-minute candles, volume floored at 1, from 9:30 ET. One 0DTE and one 1DTE paper entry per ticker per day. 0DTE expires that day. 1DTE uses the next trading day's expiry, skipping weekends and full-day NYSE holidays. Both close the same day, at the implied-move stop or at 3:45 PM ET (1:00 PM ET on an early close). If that next-day expiry is not in the chain, 1DTE is skipped and the scan log says so. The logged strike is the nearest strike of that expiry whose spread is within ${JG_VWAP_TEST.maxSpreadOfMid * 100}% of the mid. Buy at the ask, sell at the bid, $${JG_VWAP_TEST.feePerSide.toFixed(2)} a contract each side. ATR used is today's high minus today's low so far, divided by the 14-day average true range of completed daily bars. 0DTE suggested size is $${known} when ATR used is known. 1DTE suggested size is $${budget} when ATR used is from ${JG_VWAP_ATR_BAND_LOW} through ${JG_VWAP_ATR_BAND_HIGH}, and $${unknown} otherwise. Both use $${unknown} when ATR cannot be computed. Scored contracts are floor(suggested size / (ask × 100)). A size that buys zero contracts is not scored. The flat $${budget} size stays as a comparison: floor(${budget} / (ask × 100)), and a contract above $${budget} is logged as 1 and flagged over budget. Over-budget SPX stays in its own bucket. Over-budget QQQ is flagged on the row and left out of the QQQ totals. The stop is ${JG_VWAP_TEST.stopFractionOfImpliedMove}× the day's implied move (spot × IV × sqrt(1/365)) against the entry. Anything still open is sold at the bid at 3:45 PM ET the same day, or at 1:00 PM ET on an NYSE early close. Full-day NYSE holidays are skipped. Market hours only. No order is placed. ${spx}`;
 }
 
 function spxNote(book: JgVwapBook): string {

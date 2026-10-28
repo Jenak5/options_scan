@@ -558,19 +558,17 @@ describe("JG-VWAP 1DTE", () => {
     expect(oneAlert).toContain("Suggested size");
     expect(oneAlert).toContain("ATR used: 41% | Suggested size: $875");
     expect(oneAlert).toContain("outside the daily A/B alert cap");
+    expect(oneAlert).toContain("3:45 PM ET the same day");
     expect(formatJgVwapAlert(zero as JgVwapTrade)).toContain("PAPER TEST - JG-VWAP 0DTE");
     expect(formatJgVwapAlert(zero as JgVwapTrade)).toContain("ATR used: 41% | Suggested size: $250");
+    expect(formatJgVwapAlert(zero as JgVwapTrade)).toContain("3:45 PM ET the same day");
 
-    const held = advanceJgVwap(opened.book, [snapshot("QQQ", "QQQ", 102, 100, fridayChain, 0.41)], new Date("2026-10-23T19:45:00.000Z"));
-    expect(held.book.trades.find((trade) => trade.dte === "0DTE")?.status).toBe("closed");
-    expect(held.book.trades.find((trade) => trade.dte === "1DTE")?.status).toBe("open");
-    const monday = advanceJgVwap(
-      held.book,
-      [snapshot("QQQ", "QQQ", 102, 100, [contract({ strike: 103, putCall: "call", bid: 3, ask: 3.1, expiration: "2026-10-26" })], 0.41)],
-      new Date("2026-10-26T19:45:00.000Z"),
-    );
-    expect(monday.closed.find((trade) => trade.dte === "1DTE")?.exitReason).toBe("flat");
-    const series = jgVwapPnlSeries(monday.book.trades);
+    const beforeFlat = advanceJgVwap(opened.book, [snapshot("QQQ", "QQQ", 102, 100, fridayChain, 0.41)], new Date("2026-10-23T19:44:00.000Z"));
+    expect(beforeFlat.book.trades.find((trade) => trade.dte === "1DTE")?.status).toBe("open");
+    const sameDay = advanceJgVwap(opened.book, [snapshot("QQQ", "QQQ", 102, 100, fridayChain, 0.41)], new Date("2026-10-23T19:45:00.000Z"));
+    expect(sameDay.closed.find((trade) => trade.dte === "0DTE")?.exitReason).toBe("flat");
+    expect(sameDay.closed.find((trade) => trade.dte === "1DTE")?.exitReason).toBe("flat");
+    const series = jgVwapPnlSeries(sameDay.book.trades);
     const last = series[series.length - 1];
     expect(last.suggested0).not.toBeNull();
     expect(last.suggested1).not.toBeNull();
