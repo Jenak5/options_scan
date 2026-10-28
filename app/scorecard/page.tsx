@@ -76,23 +76,49 @@ interface JgBucket {
   losses: number;
   winRate: number | null;
   pnl: number;
+  pnlBudget?: number;
+  budgetTrades?: number;
   pnlWithoutTop3: number | null;
   maxDrawdownDollars: number;
   maxDrawdownVsAccount: number;
 }
 
+interface JgDteSummary {
+  dte: "0DTE" | "1DTE";
+  trades: number;
+  open: number;
+  pnl: number;
+  pnlBudget?: number;
+  budgetTrades?: number;
+}
+
 interface JgRow {
   id: string;
   ticker: string;
+  dte?: "0DTE" | "1DTE";
   root: string;
   putCall: "call" | "put";
   strike: number;
   expiration: string;
   contracts: number;
+  budgetContracts?: number;
   overBudget: boolean;
+  atrUsed?: number | null;
+  suggestedSize?: number | null;
   status: "open" | "closed";
   exitReason: "stop" | "flat" | null;
   pnlDollars: number | null;
+  pnlBudgetDollars?: number | null;
+}
+
+interface JgPnlPoint {
+  at: number;
+  suggested: number | null;
+  budget: number | null;
+  suggested0?: number | null;
+  budget0?: number | null;
+  suggested1?: number | null;
+  budget1?: number | null;
 }
 
 interface JgSection {
@@ -103,7 +129,10 @@ interface JgSection {
   budgetDollars: number;
   accountDollars: number;
   buckets: JgBucket[];
+  byDte?: JgDteSummary[];
+  oneDteNote?: string;
   rows: JgRow[];
+  pnlSeries?: JgPnlPoint[];
 }
 
 interface Experiment {
@@ -512,6 +541,20 @@ function JgVwapPanel({ section }: { section: JgSection }) {
       <h2 style={heading}>{section.label}</h2>
       <Note color="#94a3b8">{section.note}</Note>
       <Note color={section.tooFew ? "#fbbf24" : "#94a3b8"}>{section.trustNote}</Note>
+      {section.oneDteNote ? <Note color="#fbbf24">{section.oneDteNote}</Note> : null}
+      {section.byDte && section.byDte.length > 0 && (
+        <div style={{ display: "grid", gap: 10, marginBottom: 10 }}>
+          {section.byDte.map((row) => (
+            <section key={row.dte} style={{ ...cardStyle, marginBottom: 0 }}>
+              <h3 style={{ margin: "0 0 4px", fontSize: 16 }}>{row.dte}</h3>
+              <Stat label="Scored trades" value={String(row.trades)} />
+              <Stat label="Open" value={String(row.open)} />
+              <Stat label="P/L at suggested size" value={row.trades === 0 ? "n/a" : signed(row.pnl)} />
+              <Stat label="P/L at $875" value={(row.budgetTrades ?? 0) === 0 ? "n/a" : signed(row.pnlBudget ?? 0)} />
+            </section>
+          ))}
+        </div>
+      )}
       <div style={{ display: "grid", gap: 10 }}>
         {section.buckets.map((bucket) => (
           <section key={bucket.key} style={{ ...cardStyle, marginBottom: 0 }}>
@@ -519,7 +562,8 @@ function JgVwapPanel({ section }: { section: JgSection }) {
             <Stat label="Trades" value={String(bucket.trades)} />
             <Stat label="Open" value={String(bucket.open)} />
             <Stat label="Win %" value={bucket.winRate == null ? "n/a" : percent(bucket.winRate)} />
-            <Stat label="P/L" value={bucket.trades === 0 ? "n/a" : signed(bucket.pnl)} />
+            <Stat label="P/L at suggested size" value={bucket.trades === 0 ? "n/a" : signed(bucket.pnl)} />
+            <Stat label="P/L at $875" value={(bucket.budgetTrades ?? 0) === 0 ? "n/a" : signed(bucket.pnlBudget ?? 0)} />
             <Stat label="P/L without top 3" value={bucket.pnlWithoutTop3 == null ? "n/a" : signed(bucket.pnlWithoutTop3)} />
             <Stat
               label={`Max drawdown vs $${account}`}
@@ -528,39 +572,237 @@ function JgVwapPanel({ section }: { section: JgSection }) {
           </section>
         ))}
       </div>
+      <JgPnlChart points={section.pnlSeries ?? []} />
       {section.rows.length > 0 && (
         <div style={{ overflowX: "auto", marginTop: 10 }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
             <thead>
               <tr>
-                {["Ticker", "Right", "Contracts", "Status", "Exit", "P/L", "Flag"].map((label) => (
+                {["Ticker", "DTE", "Right", "ATR used", "Suggested size", "Contracts", "Status", "Exit", "P/L", "P/L at $875", "Flag"].map((label) => (
                   <th key={label} style={thStyle}>{label}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {section.rows.map((row) => (
-                <tr key={row.id}>
-                  <td style={tdStyle}>
-                    {row.ticker}
-                    <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>
-                      ${row.strike} · {row.expiration}{row.root !== row.ticker ? ` · ${row.root}` : ""}
-                    </div>
-                  </td>
-                  <td style={tdStyle}>{row.putCall === "put" ? "Put" : "Call"}</td>
-                  <td style={tdStyle}>{row.contracts}</td>
-                  <td style={tdStyle}>{row.status === "open" ? "Open" : "Closed"}</td>
-                  <td style={tdStyle}>{row.exitReason === "stop" ? "Implied-move stop" : row.exitReason === "flat" ? "Flat by the time exit" : "Open"}</td>
-                  <td style={{ ...tdStyle, color: pnlColor(row.pnlDollars) }}>{row.pnlDollars == null ? "n/a" : signed(row.pnlDollars)}</td>
-                  <td style={{ ...tdStyle, color: row.overBudget ? "#fbbf24" : "#94a3b8" }}>{row.overBudget ? "Over budget" : ""}</td>
-                </tr>
-              ))}
+              {section.rows.map((row) => {
+                const budgetPnl = row.pnlBudgetDollars ?? (row.suggestedSize == null ? row.pnlDollars : null);
+                const suggestedPnl = row.suggestedSize == null || row.contracts < 1 ? null : row.pnlDollars;
+                return (
+                  <tr key={row.id}>
+                    <td style={tdStyle}>
+                      {row.ticker}
+                      <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>
+                        ${row.strike} · {row.expiration}{row.root !== row.ticker ? ` · ${row.root}` : ""}
+                      </div>
+                    </td>
+                    <td style={tdStyle}>{row.dte === "1DTE" ? "1DTE" : "0DTE"}</td>
+                    <td style={tdStyle}>{row.putCall === "put" ? "Put" : "Call"}</td>
+                    <td style={tdStyle}>{atrLabel(row)}</td>
+                    <td style={tdStyle}>{row.suggestedSize == null ? "n/a" : `$${Math.round(row.suggestedSize)}`}</td>
+                    <td style={tdStyle}>
+                      {row.contracts}
+                      <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>$875: {row.budgetContracts ?? row.contracts}</div>
+                    </td>
+                    <td style={tdStyle}>{row.status === "open" ? "Open" : "Closed"}</td>
+                    <td style={tdStyle}>{row.exitReason === "stop" ? "Implied-move stop" : row.exitReason === "flat" ? "Flat by the time exit" : "Open"}</td>
+                    <td style={{ ...tdStyle, color: pnlColor(suggestedPnl) }}>
+                      {row.suggestedSize != null && row.contracts < 1 ? "not scored" : suggestedPnl == null ? "n/a" : signed(suggestedPnl)}
+                    </td>
+                    <td style={{ ...tdStyle, color: pnlColor(budgetPnl) }}>{budgetPnl == null ? "n/a" : signed(budgetPnl)}</td>
+                    <td style={{ ...tdStyle, color: row.overBudget ? "#fbbf24" : "#94a3b8" }}>{row.overBudget ? "Over budget" : ""}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       )}
     </section>
   );
+}
+
+const jgEtStamp = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
+function atrLabel(row: JgRow): string {
+  if (row.suggestedSize == null) return "n/a";
+  if (row.atrUsed == null || !Number.isFinite(row.atrUsed) || row.atrUsed < 0) return "unknown";
+  const pct = Math.round(row.atrUsed * 1000) / 10;
+  return Number.isInteger(pct) ? `${pct.toFixed(0)}%` : `${pct.toFixed(1)}%`;
+}
+
+type JgChartMode = "all" | "combined" | "0DTE" | "1DTE";
+type JgChartKey = "suggested" | "budget" | "suggested0" | "budget0" | "suggested1" | "budget1";
+
+const JG_CHART_LINES: Record<JgChartMode, { key: JgChartKey; color: string; label: string }[]> = {
+  all: [
+    { key: "suggested", color: "#22d3ee", label: "Suggested, both" },
+    { key: "budget", color: "#fbbf24", label: "Flat $875, both" },
+    { key: "suggested0", color: "#a78bfa", label: "0DTE suggested" },
+    { key: "suggested1", color: "#34d399", label: "1DTE suggested" },
+  ],
+  combined: [
+    { key: "suggested", color: "#22d3ee", label: "Suggested size" },
+    { key: "budget", color: "#fbbf24", label: "Flat $875" },
+  ],
+  "0DTE": [
+    { key: "suggested0", color: "#a78bfa", label: "0DTE suggested" },
+    { key: "budget0", color: "#fbbf24", label: "0DTE at $875" },
+  ],
+  "1DTE": [
+    { key: "suggested1", color: "#34d399", label: "1DTE suggested" },
+    { key: "budget1", color: "#fbbf24", label: "1DTE at $875" },
+  ],
+};
+
+function JgPnlChart({ points }: { points: JgPnlPoint[] }) {
+  const [mode, setMode] = useState<JgChartMode>("all");
+  if (points.length === 0) {
+    return <Note color="#94a3b8">No closed paper trades yet. The cumulative P/L chart starts once one closes.</Note>;
+  }
+  const lines = JG_CHART_LINES[mode];
+  const width = 680;
+  const height = 240;
+  const padL = 68;
+  const padR = 12;
+  const padT = 18;
+  const padB = 36;
+  const values = [0];
+  for (let i = 0; i < points.length; i++) {
+    for (let j = 0; j < lines.length; j++) {
+      const value = points[i][lines[j].key];
+      if (value != null) values.push(value);
+    }
+  }
+  let min = Math.min(...values);
+  let max = Math.max(...values);
+  if (min === max) {
+    min -= 1;
+    max += 1;
+  }
+  const span = max - min || 1;
+  const innerW = width - padL - padR;
+  const innerH = height - padT - padB;
+  const xAt = (index: number) => (points.length === 1 ? padL + innerW / 2 : padL + (index / (points.length - 1)) * innerW);
+  const yAt = (value: number) => padT + (1 - (value - min) / span) * innerH;
+  const path = (key: JgChartKey) => {
+    let d = "";
+    let drawing = false;
+    for (let i = 0; i < points.length; i++) {
+      const value = points[i][key];
+      if (value == null) {
+        drawing = false;
+        continue;
+      }
+      d += `${drawing ? "L" : "M"}${xAt(i).toFixed(1)},${yAt(value).toFixed(1)} `;
+      drawing = true;
+    }
+    return d.trim();
+  };
+  const ticks = Array.from(new Set([max, 0, min]));
+  const labelIndexes = points.length <= 3
+    ? points.map((_, index) => index)
+    : [0, Math.floor((points.length - 1) / 2), points.length - 1];
+  const summary = `Cumulative paper P/L. ${lines.map((line) => line.label).join(", ")}.`;
+  const modes: { id: JgChartMode; label: string }[] = [
+    { id: "all", label: "All" },
+    { id: "combined", label: "Combined" },
+    { id: "0DTE", label: "0DTE" },
+    { id: "1DTE", label: "1DTE" },
+  ];
+  return (
+    <div style={{ marginTop: 12 }}>
+      <h3 style={{ margin: "0 0 6px", fontSize: 16 }}>Cumulative paper P/L</h3>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+        {modes.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => setMode(item.id)}
+            style={{
+              background: mode === item.id ? "rgba(34,211,238,0.16)" : "transparent",
+              color: "#e2e8f0",
+              border: "1px solid rgba(148,163,184,0.35)",
+              borderRadius: 8,
+              padding: "4px 10px",
+              fontSize: 13,
+              cursor: "pointer",
+            }}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <svg
+          viewBox={`0 0 ${width} ${height}`}
+          role="img"
+          aria-label={summary}
+          style={{ width: "100%", minWidth: 520, height: "auto", display: "block" }}
+        >
+          {ticks.map((tick) => (
+            <g key={tick}>
+              <line
+                x1={padL}
+                x2={width - padR}
+                y1={yAt(tick)}
+                y2={yAt(tick)}
+                stroke={tick === 0 ? "#94a3b8" : "rgba(148,163,184,0.25)"}
+                strokeDasharray={tick === 0 ? "4 4" : undefined}
+                strokeWidth={tick === 0 ? 1.5 : 1}
+              />
+              <text x={padL - 8} y={yAt(tick) + 4} textAnchor="end" fill="#94a3b8" fontSize="11">
+                {chartMoney(tick)}
+              </text>
+            </g>
+          ))}
+          {lines.map((line) => (
+            <path key={line.key} d={path(line.key)} fill="none" stroke={line.color} strokeWidth="2" />
+          ))}
+          {points.map((point, index) => (
+            <g key={`${point.at}-${index}`}>
+              {lines.map((line) => {
+                const value = point[line.key];
+                if (value == null) return null;
+                return <circle key={line.key} cx={xAt(index)} cy={yAt(value)} r="3" fill={line.color} />;
+              })}
+            </g>
+          ))}
+          {labelIndexes.map((index) => (
+            <text
+              key={index}
+              x={xAt(index)}
+              y={height - 10}
+              textAnchor={points.length === 1 ? "middle" : index === 0 ? "start" : index === points.length - 1 ? "end" : "middle"}
+              fill="#94a3b8"
+              fontSize="11"
+            >
+              {jgEtStamp.format(new Date(points[index].at))}
+            </text>
+          ))}
+        </svg>
+      </div>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", color: "#94a3b8", fontSize: 13, marginTop: 6 }}>
+        {lines.map((line) => (
+          <span key={line.key}><span style={{ color: line.color }}>●</span> {line.label}</span>
+        ))}
+        <span>Dashed line is $0</span>
+      </div>
+    </div>
+  );
+}
+
+function chartMoney(value: number): string {
+  const abs = Math.abs(value);
+  const body = abs >= 100 ? abs.toFixed(0) : abs.toFixed(2);
+  if (value > 0) return `+$${body}`;
+  if (value < 0) return `-$${body}`;
+  return "$0";
 }
 
 function PaperBuckets({ buckets }: { buckets: PaperBucket[] }) {

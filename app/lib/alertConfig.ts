@@ -213,15 +213,27 @@ export const VWAP_PUT_TEST = {
 } as const;
 
 /**
- * Per-trade paper budget for the JG-VWAP test.
- * Contract count and the over-budget flag both read this number.
+ * Flat per-trade paper budget kept for the JG-VWAP comparison column.
+ * The scored size is the ATR suggested size below. This number is the old
+ * floor($875 / (ask × 100)) sizing, including the over-budget flag.
  * It is her max loss on one contract. Change it here only.
  */
 export const JG_VWAP_BUDGET_DOLLARS = 875;
 
 /**
- * Paper-only 0DTE test. Not a grade, and not part of the A/B daily alert cap.
- * The budget above is the only dollar amount used for size and the over-budget flag.
+ * Suggested paper size for the JG-VWAP test.
+ * 0DTE is a flat $250 when ATR used is known. 1DTE is $875 inside the band
+ * and $300 outside it. $300 is also the size when ATR cannot be computed.
+ */
+export const JG_VWAP_SIZE_0DTE_DOLLARS = 250;
+export const JG_VWAP_SIZE_UNKNOWN_DOLLARS = 300;
+/** Inclusive 1DTE band on ATR used (today's range / 14-day ATR). */
+export const JG_VWAP_ATR_BAND_LOW = 0.41;
+export const JG_VWAP_ATR_BAND_HIGH = 0.67;
+
+/**
+ * Paper-only JG-VWAP test. Not a grade, and not part of the A/B daily alert cap.
+ * Scored contracts use the suggested size. The $875 budget stays as a comparison.
  */
 export const JG_VWAP_TEST = {
   label: "JG-VWAP paper test",
