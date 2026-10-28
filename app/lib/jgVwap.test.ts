@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  JG_VWAP_ATR_BAND_HIGH,
+  JG_VWAP_ATR_BAND_LOW,
   JG_VWAP_BUDGET_DOLLARS,
   JG_VWAP_SIZE_0DTE_DOLLARS,
   JG_VWAP_SIZE_UNKNOWN_DOLLARS,
@@ -18,6 +20,7 @@ import {
   jgChainRoots,
   jgContractsForSize,
   jgImpliedMove,
+  jgNextTradingDay,
   jgSessionVwap,
   jgSpreadTooWide,
   jgStopUnderlying,
@@ -135,7 +138,7 @@ describe("JG-VWAP paper pass", () => {
     expect(first.saved).toBe(true);
     expect(first.spxRoot).toBe("SPXW");
     expect(messages).toHaveLength(2);
-    expect(messages.every((message) => message.startsWith("<b>PAPER TEST - JG-VWAP</b>"))).toBe(true);
+    expect(messages.every((message) => message.startsWith("<b>PAPER TEST - JG-VWAP 0DTE</b>"))).toBe(true);
     expect(messages.some((message) => message.includes("Over budget"))).toBe(true);
     expect(messages.every((message) => message.includes("ATR used") && message.includes("Suggested size"))).toBe(true);
     expect(messages.every((message) => message.includes("ATR used: unknown | Suggested size: $300"))).toBe(true);
@@ -511,13 +514,123 @@ describe("JG-VWAP ATR sizing", () => {
       pnlDollars: 100,
       pnlBudgetDollars: 100,
     });
-    expect(jgVwapPnlSeries([trade])).toEqual([{ at: 2, suggested: null, budget: 100 }]);
+    expect(jgVwapPnlSeries([trade])).toMatchObject([{ at: 2, suggested: null, budget: 100, budget0: 100, suggested1: null, budget1: null }]);
+    expect(trade.dte).toBe("0DTE");
     expect(jgVwapSection({ ...emptyJgVwapBook(), trades: [trade] }).buckets[0]).toMatchObject({
       trades: 0,
       pnl: 0,
       budgetTrades: 1,
       pnlBudget: 100,
     });
+  });
+});
+
+describe("JG-VWAP 1DTE", () => {
+  it("picks the next trading day, including Friday to Monday and a holiday", () => {
+    expect(JG_VWAP_ATR_BAND_LOW).toBe(0.41);
+    expect(JG_VWAP_ATR_BAND_HIGH).toBe(0.67);
+    expect(jgNextTradingDay("2026-10-23")).toBe("2026-10-26");
+    expect(jgNextTradingDay("2026-04-02")).toBe("2026-04-06");
+    expect(jgNextTradingDay("2026-11-25")).toBe("2026-11-27");
+    expect(jgSuggestedSize(0.41, "1DTE")).toBe(875);
+    expect(jgSuggestedSize(0.67, "1DTE")).toBe(875);
+    expect(jgSuggestedSize(0.409, "1DTE")).toBe(300);
+    expect(jgSuggestedSize(0.671, "1DTE")).toBe(300);
+    expect(jgSuggestedSize(null, "1DTE")).toBe(300);
+    expect(jgSuggestedSize(0.41, "0DTE")).toBe(250);
+    expect(jgSuggestedSize(0.67, "0DTE")).toBe(250);
+    expect(jgSuggestedSize(null, "0DTE")).toBe(300);
+
+    const friday = new Date("2026-10-23T14:05:00.000Z");
+    const fridayChain = [
+      contract({ strike: 102, putCall: "call", bid: 1.9, ask: 2, expiration: "2026-10-23" }),
+      contract({ strike: 103, putCall: "call", bid: 1.9, ask: 2, expiration: "2026-10-26" }),
+    ];
+    const opened = advanceJgVwap(emptyJgVwapBook(), [snapshot("QQQ", "QQQ", 102, 100, fridayChain, 0.41)], friday);
+    const zero = opened.opened.find((trade) => trade.dte === "0DTE");
+    const one = opened.opened.find((trade) => trade.dte === "1DTE");
+    expect(zero).toMatchObject({ expiration: "2026-10-23", suggestedSize: 250, contracts: 1 });
+    expect(one).toMatchObject({ expiration: "2026-10-26", suggestedSize: 875, contracts: 4 });
+    expect(opened.oneDteSkips).toEqual([]);
+    const oneAlert = formatJgVwapAlert(one as JgVwapTrade);
+    expect(oneAlert).toContain("PAPER TEST - JG-VWAP 1DTE");
+    expect(oneAlert).toContain("ATR used");
+    expect(oneAlert).toContain("Suggested size");
+    expect(oneAlert).toContain("ATR used: 41% | Suggested size: $875");
+    expect(oneAlert).toContain("outside the daily A/B alert cap");
+    expect(formatJgVwapAlert(zero as JgVwapTrade)).toContain("PAPER TEST - JG-VWAP 0DTE");
+    expect(formatJgVwapAlert(zero as JgVwapTrade)).toContain("ATR used: 41% | Suggested size: $250");
+
+    const held = advanceJgVwap(opened.book, [snapshot("QQQ", "QQQ", 102, 100, fridayChain, 0.41)], new Date("2026-10-23T19:45:00.000Z"));
+    expect(held.book.trades.find((trade) => trade.dte === "0DTE")?.status).toBe("closed");
+    expect(held.book.trades.find((trade) => trade.dte === "1DTE")?.status).toBe("open");
+    const monday = advanceJgVwap(
+      held.book,
+      [snapshot("QQQ", "QQQ", 102, 100, [contract({ strike: 103, putCall: "call", bid: 3, ask: 3.1, expiration: "2026-10-26" })], 0.41)],
+      new Date("2026-10-26T19:45:00.000Z"),
+    );
+    expect(monday.closed.find((trade) => trade.dte === "1DTE")?.exitReason).toBe("flat");
+    const series = jgVwapPnlSeries(monday.book.trades);
+    const last = series[series.length - 1];
+    expect(last.suggested0).not.toBeNull();
+    expect(last.suggested1).not.toBeNull();
+    expect(last.budget).toBeCloseTo((last.budget0 ?? 0) + (last.budget1 ?? 0), 2);
+    expect(last.suggested).toBeCloseTo((last.suggested0 ?? 0) + (last.suggested1 ?? 0), 2);
+
+    const thursday = new Date("2026-04-02T14:05:00.000Z");
+    const holidayChain = [
+      contract({ strike: 102, putCall: "call", bid: 1.9, ask: 2, expiration: "2026-04-02" }),
+      contract({ strike: 104, putCall: "call", bid: 1.9, ask: 2, expiration: "2026-04-03" }),
+    ];
+    const skipped = advanceJgVwap(emptyJgVwapBook(), [snapshot("QQQ", "QQQ", 102, 100, holidayChain, 0.67)], thursday);
+    expect(skipped.opened.map((trade) => trade.dte)).toEqual(["0DTE"]);
+    expect(skipped.oneDteSkips).toEqual([{ ticker: "QQQ", expiration: "2026-04-06" }]);
+    expect(skipped.book.oneDteNote).toContain("no contract expiring 2026-04-06");
+    const withMonday = holidayChain.concat([
+      contract({ strike: 105, putCall: "call", bid: 1.9, ask: 2, expiration: "2026-04-06" }),
+    ]);
+    const holidayOpen = advanceJgVwap(emptyJgVwapBook(), [snapshot("QQQ", "QQQ", 102, 100, withMonday, 0.67)], thursday);
+    expect(holidayOpen.opened.find((trade) => trade.dte === "1DTE")).toMatchObject({
+      expiration: "2026-04-06",
+      suggestedSize: 875,
+    });
+    expect(formatJgVwapAlert(holidayOpen.opened.find((trade) => trade.dte === "1DTE") as JgVwapTrade)).toContain("ATR used: 67% | Suggested size: $875");
+  });
+
+  it("sends the 1DTE label through the paper Telegram path", async () => {
+    const messages: string[] = [];
+    const deps = memoryDeps({
+      history: () => bars(100),
+      chain(symbol) {
+        if (symbol !== "QQQ") return chain([], null);
+        return chain([
+          contract({ strike: 102, putCall: "call", bid: 1.9, ask: 2, expiration: DAY }),
+          contract({ strike: 102, putCall: "call", bid: 1.9, ask: 2, expiration: "2026-10-22" }),
+        ], 102);
+      },
+      send(message) {
+        messages.push(message);
+        return true;
+      },
+    });
+    const result = await runJgVwapPaper(NOW, deps.deps);
+    expect(result.opened).toBe(2);
+    expect(messages).toHaveLength(2);
+    const zero = messages.find((message) => message.includes("PAPER TEST - JG-VWAP 0DTE"));
+    const one = messages.find((message) => message.includes("PAPER TEST - JG-VWAP 1DTE"));
+    expect(zero).toBeTruthy();
+    expect(one).toBeTruthy();
+    expect(zero).toContain("ATR used");
+    expect(zero).toContain("Suggested size");
+    expect(one).toContain("ATR used");
+    expect(one).toContain("Suggested size");
+    expect(one).toContain("outside the daily A/B alert cap");
+    const stored = parseJgVwapBook(deps.text()).trades;
+    expect(messages[0]).toBe(formatJgVwapAlert(stored[0]));
+    expect(messages[1]).toBe(formatJgVwapAlert(stored[1]));
+    expect(stored.find((trade) => trade.dte === "1DTE")?.expiration).toBe("2026-10-22");
+    const series = jgVwapPnlSeries(stored);
+    expect(series).toEqual([]);
   });
 });
 
@@ -545,6 +658,7 @@ function sampleTrade(partial: {
   budgetContracts?: number;
   atrUsed?: number | null;
   suggestedSize?: number | null;
+  dte?: "0DTE" | "1DTE";
 }): JgVwapTrade {
   const closed = partial.pnl !== undefined || partial.pnlBudget !== undefined;
   const contracts = partial.contracts ?? 1;
@@ -555,6 +669,7 @@ function sampleTrade(partial: {
     ticker: partial.ticker,
     root: partial.root ?? partial.ticker,
     putCall: "call",
+    dte: partial.dte ?? "0DTE",
     strike: 100,
     expiration: partial.expiration ?? partial.id.slice(-10),
     openedAt: partial.closedAt ?? 1,

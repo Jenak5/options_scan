@@ -1,4 +1,6 @@
 import {
+  JG_VWAP_ATR_BAND_HIGH,
+  JG_VWAP_ATR_BAND_LOW,
   JG_VWAP_BUDGET_DOLLARS,
   JG_VWAP_SIZE_0DTE_DOLLARS,
   JG_VWAP_SIZE_UNKNOWN_DOLLARS,
@@ -8,7 +10,7 @@ import type { CandleBar } from "@/app/lib/candleTypes";
 import type { OptionContract, PutCall } from "@/app/lib/contract";
 import { newYorkDate } from "@/app/lib/flow";
 import { nyMinutes } from "@/app/lib/featureBackfill";
-import { isChicagoMarketHours, isMarketDay } from "@/app/lib/marketHours";
+import { isChicagoMarketHours, isMarketDay, nextChicagoTradingDay } from "@/app/lib/marketHours";
 import { DEFAULT_ACCOUNT_SIZE_DOLLARS } from "@/app/lib/risk";
 import { completedSessionMinutes } from "@/app/lib/vwapPut";
 
@@ -23,14 +25,21 @@ import { completedSessionMinutes } from "@/app/lib/vwapPut";
  * typical price (H+L+C)/3, volume floored at 1, anchored at 9:30 ET.
  * The day's implied move is spot × annualized IV × sqrt(1/365).
  *
- * This test is 0DTE only. ATR used is informational. Suggested size is $250 when
- * ATR used is known and $300 when it is not. Scored P/L uses that size.
- * The flat $875 size stays on the trade for comparison.
+ * 0DTE expires the same day. 1DTE expires the next NYSE trading day and can
+ * stay open overnight. ATR used is today's range / ATR14. 0DTE size is $250
+ * when that ratio is known. 1DTE size is $875 inside 0.41–0.67 and $300 outside.
+ * A missing ATR is $300 for both. The flat $875 size stays for comparison.
  */
 
 export const JG_VWAP_TICKERS = ["QQQ", "SPX"] as const;
 export type JgTicker = (typeof JG_VWAP_TICKERS)[number];
 export type JgChainRoot = "QQQ" | "SPX" | "SPXW";
+export type JgDte = "0DTE" | "1DTE";
+
+/** Next NYSE session after `ymd`. Weekends and full-day holidays are skipped. Early closes count. */
+export function jgNextTradingDay(ymd: string): string | null {
+  return nextChicagoTradingDay(ymd);
+}
 
 /** NYSE early closes already listed in marketHours.ts. Cash session ends at 1:00 PM ET. */
 const EARLY_CLOSE_ET = new Set(["2026-11-27", "2026-12-24", "2027-11-26"]);
@@ -165,11 +174,16 @@ export function jgAtrUsed(todayRange: number | null, atr14: number | null): numb
 }
 
 /**
- * Suggested dollars for this test. It is 0DTE only, so a known ATR used is $250
- * and the ratio is not a band. A missing ATR is $300.
+ * Suggested dollars. A missing ATR is $300 for both variants.
+ * 0DTE is $250 whenever ATR used is known. 1DTE is $875 inside the inclusive
+ * band and $300 outside it.
  */
-export function jgSuggestedSize(atrUsed: number | null): number {
+export function jgSuggestedSize(atrUsed: number | null, dte: JgDte = "0DTE"): number {
   if (atrUsed == null || !Number.isFinite(atrUsed) || atrUsed < 0) return JG_VWAP_SIZE_UNKNOWN_DOLLARS;
+  if (dte === "1DTE") {
+    if (atrUsed >= JG_VWAP_ATR_BAND_LOW && atrUsed <= JG_VWAP_ATR_BAND_HIGH) return JG_VWAP_BUDGET_DOLLARS;
+    return JG_VWAP_SIZE_UNKNOWN_DOLLARS;
+  }
   return JG_VWAP_SIZE_0DTE_DOLLARS;
 }
 
@@ -236,6 +250,8 @@ export function jgSessionVwap(bars: readonly CandleBar[], nowMs: number): { vwap
 export interface JgVwapTrade {
   id: string;
   ticker: JgTicker;
+  /** 0DTE expires the entry day. 1DTE expires the next trading day. Legacy rows are 0DTE. */
+  dte: JgDte;
   root: string;
   putCall: PutCall;
   strike: number;
@@ -276,6 +292,8 @@ export interface JgVwapBook {
   spxUnavailable: boolean;
   /** Latest run had no SPX session VWAP from 1-minute candles. */
   spxVwapMiss: boolean;
+  /** Latest run had a 1DTE signal but no contract for the next trading day. Empty when none. */
+  oneDteNote: string;
 }
 
 export interface JgSnapshot {
@@ -296,7 +314,7 @@ export interface JgRunMeta {
 }
 
 export function emptyJgVwapBook(): JgVwapBook {
-  return { version: 1, trades: [], spxRoot: null, spxUnavailable: false, spxVwapMiss: false };
+  return { version: 1, trades: [], spxRoot: null, spxUnavailable: false, spxVwapMiss: false, oneDteNote: "" };
 }
 
 export function serializeJgVwapBook(book: JgVwapBook): string {
@@ -306,6 +324,7 @@ export function serializeJgVwapBook(book: JgVwapBook): string {
     spxRoot: book.spxRoot,
     spxUnavailable: book.spxUnavailable,
     spxVwapMiss: book.spxVwapMiss,
+    oneDteNote: book.oneDteNote,
   });
 }
 
@@ -331,7 +350,13 @@ export function parseJgVwapBook(text: string | null | undefined): JgVwapBook {
     spxRoot,
     spxUnavailable: row.spxUnavailable === true,
     spxVwapMiss: row.spxVwapMiss === true,
+    oneDteNote: typeof row.oneDteNote === "string" ? row.oneDteNote.slice(0, 400) : "",
   };
+}
+
+export interface JgOneDteSkip {
+  ticker: JgTicker;
+  expiration: string;
 }
 
 export function advanceJgVwap(
@@ -339,15 +364,17 @@ export function advanceJgVwap(
   snapshots: readonly JgSnapshot[],
   now: Date,
   meta?: JgRunMeta,
-): { book: JgVwapBook; opened: JgVwapTrade[]; closed: JgVwapTrade[] } {
-  if (!jgVwapSessionOpen(now)) return { book, opened: [], closed: [] };
+): { book: JgVwapBook; opened: JgVwapTrade[]; closed: JgVwapTrade[]; oneDteSkips: JgOneDteSkip[] } {
+  if (!jgVwapSessionOpen(now)) return { book, opened: [], closed: [], oneDteSkips: [] };
   const day = newYorkDate(now);
+  const nextDay = jgNextTradingDay(day);
   const exitMinute = jgFlatExitMinute(day);
   const minutes = nyMinutes(now.getTime());
   const byTicker = new Map<JgTicker, JgSnapshot>();
   for (let i = 0; i < snapshots.length; i++) byTicker.set(snapshots[i].ticker, snapshots[i]);
   const closed: JgVwapTrade[] = [];
   const opened: JgVwapTrade[] = [];
+  const oneDteSkips: JgOneDteSkip[] = [];
   let trades = book.trades.map((trade) => ({ ...trade }));
 
   for (let i = 0; i < JG_VWAP_TICKERS.length; i++) {
@@ -355,16 +382,30 @@ export function advanceJgVwap(
     const snap = byTicker.get(ticker) ?? null;
     trades = trades.map((trade) => {
       if (trade.ticker !== ticker || trade.status !== "open") return trade;
-      const next = markOpen(trade, snap, now, day, minutes, exitMinute);
+      const next = markOpen(trade, snap, now, day, minutes);
       if (next.status === "closed" && trade.status === "open") closed.push(next);
       return next;
     });
     if (minutes >= exitMinute) continue;
-    if (trades.some((trade) => trade.ticker === ticker && (trade.status === "open" || trade.expiration === day))) continue;
-    const trade = openTrade(ticker, snap, now, day);
-    if (!trade) continue;
-    trades.push(trade);
-    opened.push(trade);
+    if (!enteredToday(trades, ticker, "0DTE", day)) {
+      const trade = openTrade(ticker, snap, now, day, "0DTE", day);
+      if (trade) {
+        trades.push(trade);
+        opened.push(trade);
+      }
+    }
+    if (nextDay && !enteredToday(trades, ticker, "1DTE", day)) {
+      const side = signalSide(snap);
+      if (side && !listedExpiry(snap?.contracts ?? [], nextDay)) {
+        oneDteSkips.push({ ticker, expiration: nextDay });
+      } else {
+        const trade = openTrade(ticker, snap, now, day, "1DTE", nextDay);
+        if (trade) {
+          trades.push(trade);
+          opened.push(trade);
+        }
+      }
+    }
   }
 
   return {
@@ -374,9 +415,11 @@ export function advanceJgVwap(
       spxRoot: meta ? (meta.spxRoot ?? book.spxRoot) : book.spxRoot,
       spxUnavailable: meta ? meta.spxChainMiss : book.spxUnavailable,
       spxVwapMiss: meta ? meta.spxVwapMiss : book.spxVwapMiss,
+      oneDteNote: oneDteSkipNote(oneDteSkips),
     },
     opened,
     closed,
+    oneDteSkips,
   };
 }
 
@@ -408,17 +451,32 @@ export interface JgVwapSection {
   spxUnavailable: boolean;
   spxVwapMiss: boolean;
   buckets: JgVwapBucket[];
+  byDte: JgDteSummary[];
+  oneDteNote: string;
   rows: JgVwapTrade[];
   /** Closed trades in time order. Running totals for the scorecard chart. */
   pnlSeries: JgPnlPoint[];
 }
 
+export interface JgDteSummary {
+  dte: JgDte;
+  trades: number;
+  open: number;
+  pnl: number;
+  pnlBudget: number;
+  budgetTrades: number;
+}
+
 export interface JgPnlPoint {
   at: number;
-  /** Running suggested-size P/L. Null until the first scored trade. */
+  /** Running suggested-size P/L for both variants. Null until the first scored trade. */
   suggested: number | null;
-  /** Running flat $875 P/L. Null until the first trade with that P/L. */
+  /** Running flat $875 P/L for both variants. */
   budget: number | null;
+  suggested0: number | null;
+  budget0: number | null;
+  suggested1: number | null;
+  budget1: number | null;
 }
 
 export function jgVwapSection(book: JgVwapBook): JgVwapSection {
@@ -443,6 +501,8 @@ export function jgVwapSection(book: JgVwapBook): JgVwapSection {
     spxUnavailable: book.spxUnavailable,
     spxVwapMiss: book.spxVwapMiss,
     buckets: [qqq, spx, over],
+    byDte: [dteSummary(book.trades, "0DTE"), dteSummary(book.trades, "1DTE")],
+    oneDteNote: book.oneDteNote,
     rows: book.trades.slice().sort((a, b) => b.openedAt - a.openedAt).slice(0, 24),
     pnlSeries: jgVwapPnlSeries(book.trades),
   };
@@ -452,28 +512,27 @@ export function jgVwapSection(book: JgVwapBook): JgVwapSection {
 export function jgVwapPnlSeries(trades: readonly JgVwapTrade[]): JgPnlPoint[] {
   const closed = trades.filter((trade) => trade.status === "closed" && trade.closedAt != null);
   closed.sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0) || a.id.localeCompare(b.id));
-  let suggestedRun = 0;
-  let suggestedSeen = false;
-  let budgetRun = 0;
-  let budgetSeen = false;
+  const suggested = freshRun();
+  const budget = freshRun();
+  const suggested0 = freshRun();
+  const budget0 = freshRun();
+  const suggested1 = freshRun();
+  const budget1 = freshRun();
   const points: JgPnlPoint[] = [];
   for (let i = 0; i < closed.length; i++) {
     const trade = closed[i];
-    const suggested = suggestedPnl(trade);
-    const budget = budgetPnl(trade);
-    if (suggested == null && budget == null) continue;
-    if (suggested != null) {
-      suggestedRun += suggested;
-      suggestedSeen = true;
-    }
-    if (budget != null) {
-      budgetRun += budget;
-      budgetSeen = true;
-    }
+    const suggestedPnlValue = suggestedPnl(trade);
+    const budgetPnlValue = budgetPnl(trade);
+    if (suggestedPnlValue == null && budgetPnlValue == null) continue;
+    const one = tradeDte(trade) === "1DTE";
     points.push({
       at: trade.closedAt as number,
-      suggested: suggestedSeen ? roundCents(suggestedRun) : null,
-      budget: budgetSeen ? roundCents(budgetRun) : null,
+      suggested: bumpRun(suggested, suggestedPnlValue),
+      budget: bumpRun(budget, budgetPnlValue),
+      suggested0: bumpRun(suggested0, one ? null : suggestedPnlValue),
+      budget0: bumpRun(budget0, one ? null : budgetPnlValue),
+      suggested1: bumpRun(suggested1, one ? suggestedPnlValue : null),
+      budget1: bumpRun(budget1, one ? budgetPnlValue : null),
     });
   }
   return points;
@@ -491,10 +550,14 @@ export function formatJgVwapAlert(trade: JgVwapTrade): string {
     ? `\n<b>Over budget.</b> One contract costs more than $${budget}. Logged as 1 contract${trade.ticker === "SPX" ? ", in the SPX over-budget scorecard bucket" : ", and left out of the QQQ totals"}.`
     : "";
   const root = trade.root !== trade.ticker ? `\nContract root <b>${escapeHtml(trade.root)}</b>.` : "";
+  const variant = tradeDte(trade);
   const buy = trade.contracts >= 1
     ? `Buy <b>${trade.contracts}</b> at the ask $${trimPrice(trade.entryAsk)} (bid $${trimPrice(trade.entryBid)}). Flat $${budget} sizing would buy <b>${trade.budgetContracts}</b>.`
     : `Suggested size $${Math.round(suggestedSize)} does not cover one contract at the ask $${trimPrice(trade.entryAsk)}, so the ATR-sized paper P/L is not scored. Flat $${budget} sizing would buy <b>${trade.budgetContracts}</b>.`;
-  return `<b>PAPER TEST - JG-VWAP</b>
+  const exitLine = variant === "1DTE"
+    ? "If it is still open, sell at the bid by 3:45 PM ET on the expiry day (1:00 PM ET when that day is an early close). It stays open overnight. The stop can close it sooner."
+    : "If it is still open, sell at the bid by the flat exit (3:45 PM ET, or 1:00 PM ET on an early close).";
+  return `<b>PAPER TEST - JG-VWAP ${variant}</b>
 ${escapeHtml(trade.ticker)} <b>${right}</b> · $${trimPrice(trade.strike)} exp ${escapeHtml(trade.expiration)}
 Paper only. This is not an A or a B, and it is outside the daily A/B alert cap. No order is placed.${over}
 
@@ -502,15 +565,22 @@ ${atrLine}
 ${buy}
 Underlying $${trimPrice(trade.entryUnderlying)} vs session VWAP $${trimPrice(trade.vwap)}.
 Stop if the underlying trades ${stopWord} $${trimPrice(trade.stopUnderlying)} (0.75× the day's implied move).
-If it is still open, sell at the bid by the flat exit (3:45 PM ET, or 1:00 PM ET on an early close).${root}`;
+${exitLine}${root}`;
 }
 
-function openTrade(ticker: JgTicker, snap: JgSnapshot | null, now: Date, day: string): JgVwapTrade | null {
+function openTrade(
+  ticker: JgTicker,
+  snap: JgSnapshot | null,
+  now: Date,
+  entryDay: string,
+  dte: JgDte,
+  expiration: string,
+): JgVwapTrade | null {
   if (!snap || snap.root == null || snap.spot == null || snap.vwap == null) return null;
   if (!(snap.spot > 0) || !(snap.vwap > 0)) return null;
   const side = jgVwapSide(snap.spot, snap.vwap);
   if (!side) return null;
-  const contract = pickSameDay(snap.contracts, side, day, snap.spot);
+  const contract = pickExpiry(snap.contracts, side, expiration, snap.spot);
   if (!contract) return null;
   const iv = contractIv(snap.contracts, contract);
   if (iv == null) return null;
@@ -519,17 +589,18 @@ function openTrade(ticker: JgTicker, snap: JgSnapshot | null, now: Date, day: st
   const stop = jgStopUnderlying(side, snap.spot, move);
   if (stop == null) return null;
   const atrUsed = normalizeAtrUsed(snap.atrUsed);
-  const suggestedSize = jgSuggestedSize(atrUsed);
+  const suggestedSize = jgSuggestedSize(atrUsed, dte);
   const suggestedContracts = jgContractsForSize(contract.ask, suggestedSize);
   const size = jgVwapSize(contract.ask);
   if (suggestedContracts == null || !size) return null;
   return {
-    id: `jgvwap-${ticker}-${day}`,
+    id: `jgvwap-${ticker}-${dte}-${entryDay}`,
     ticker,
+    dte,
     root: snap.root,
     putCall: side,
     strike: contract.strike,
-    expiration: day,
+    expiration,
     openedAt: now.getTime(),
     contracts: suggestedContracts,
     budgetContracts: size.contracts,
@@ -558,14 +629,13 @@ function markOpen(
   now: Date,
   day: string,
   minutes: number,
-  exitMinute: number,
 ): JgVwapTrade {
   const expired = trade.expiration < day;
   const quote = snap ? findQuote(snap.contracts, trade) : null;
   const spot = snap?.spot != null && snap.spot > 0 ? snap.spot : null;
   const stopped = spot != null && hitStop(trade, spot);
-  const timed = minutes >= exitMinute;
-  if (!expired && !stopped && !timed) return trade;
+  const flatDue = trade.expiration === day && minutes >= jgFlatExitMinute(day);
+  if (!expired && !stopped && !flatDue) return trade;
   if (!expired && !quote) return trade;
   const bid = quote && quote.bid >= 0 ? quote.bid : 0;
   const reason = stopped ? "stop" : "flat";
@@ -589,15 +659,15 @@ function hitStop(trade: JgVwapTrade, spot: number): boolean {
   return trade.putCall === "call" ? spot <= trade.stopUnderlying : spot >= trade.stopUnderlying;
 }
 
-function pickSameDay(
+function pickExpiry(
   contracts: readonly OptionContract[],
   side: PutCall,
-  day: string,
+  expiration: string,
   spot: number,
 ): OptionContract | null {
   const same = contracts.filter((contract) => (
     contract.putCall === side
-    && contract.expiration === day
+    && contract.expiration === expiration
     && contract.strike > 0
     && contract.ask > 0
     && contract.bid >= 0
@@ -716,7 +786,7 @@ function sectionNote(book: JgVwapBook): string {
   const known = JG_VWAP_SIZE_0DTE_DOLLARS;
   const unknown = JG_VWAP_SIZE_UNKNOWN_DOLLARS;
   const spx = spxNote(book);
-  return `${JG_VWAP_TEST.label}. These rows are left out of the A and B totals above. Each entry sends a Telegram message labeled PAPER TEST - JG-VWAP, and that message is outside the daily A/B cap. QQQ and SPX, same-day expiry, in the direction of session VWAP. A call needs price at or above VWAP × ${(1 - JG_VWAP_TEST.vwapBand).toFixed(3)}, and it is skipped when that price is also on the put side of the band. A put needs price at or below VWAP × ${(1 + JG_VWAP_TEST.vwapBand).toFixed(3)}, and it is skipped when that price is also on the call side. Session VWAP is the regular-hours typical price from 1-minute candles, volume floored at 1, from 9:30 ET. One paper entry per ticker per day. The logged strike is the nearest same-day strike in that direction whose spread is within ${JG_VWAP_TEST.maxSpreadOfMid * 100}% of the mid. Buy at the ask, sell at the bid, $${JG_VWAP_TEST.feePerSide.toFixed(2)} a contract each side. This test is 0DTE only. ATR used is today's high minus today's low so far, divided by the 14-day average true range of completed daily bars. Suggested size is $${known} when ATR used is known and $${unknown} when it cannot be computed. Scored contracts are floor(suggested size / (ask × 100)). A size that buys zero contracts is not scored. The flat $${budget} size stays as a comparison: floor(${budget} / (ask × 100)), and a contract above $${budget} is logged as 1 and flagged over budget. Over-budget SPX stays in its own bucket. Over-budget QQQ is flagged on the row and left out of the QQQ totals. The stop is ${JG_VWAP_TEST.stopFractionOfImpliedMove}× the day's implied move (spot × IV × sqrt(1/365)) against the entry. Anything still open is sold at the bid at 3:45 PM ET, or at 1:00 PM ET on an NYSE early close. Full-day NYSE holidays are skipped. Market hours only. No order is placed. ${spx}`;
+  return `${JG_VWAP_TEST.label}. These rows are left out of the A and B totals above. Each entry sends a Telegram message labeled PAPER TEST - JG-VWAP 0DTE or PAPER TEST - JG-VWAP 1DTE, and that message is outside the daily A/B cap. QQQ and SPX, in the direction of session VWAP. A call needs price at or above VWAP × ${(1 - JG_VWAP_TEST.vwapBand).toFixed(3)}, and it is skipped when that price is also on the put side of the band. A put needs price at or below VWAP × ${(1 + JG_VWAP_TEST.vwapBand).toFixed(3)}, and it is skipped when that price is also on the call side. Session VWAP is the regular-hours typical price from 1-minute candles, volume floored at 1, from 9:30 ET. One 0DTE and one 1DTE paper entry per ticker per day. 0DTE expires that day. 1DTE expires the next trading day, skipping weekends and full-day NYSE holidays, and it can stay open overnight. If that expiry is not in the chain, 1DTE is skipped and the scan log says so. The logged strike is the nearest strike of that expiry whose spread is within ${JG_VWAP_TEST.maxSpreadOfMid * 100}% of the mid. Buy at the ask, sell at the bid, $${JG_VWAP_TEST.feePerSide.toFixed(2)} a contract each side. ATR used is today's high minus today's low so far, divided by the 14-day average true range of completed daily bars. 0DTE suggested size is $${known} when ATR used is known. 1DTE suggested size is $${budget} when ATR used is from ${JG_VWAP_ATR_BAND_LOW} through ${JG_VWAP_ATR_BAND_HIGH}, and $${unknown} otherwise. Both use $${unknown} when ATR cannot be computed. Scored contracts are floor(suggested size / (ask × 100)). A size that buys zero contracts is not scored. The flat $${budget} size stays as a comparison: floor(${budget} / (ask × 100)), and a contract above $${budget} is logged as 1 and flagged over budget. Over-budget SPX stays in its own bucket. Over-budget QQQ is flagged on the row and left out of the QQQ totals. The stop is ${JG_VWAP_TEST.stopFractionOfImpliedMove}× the day's implied move (spot × IV × sqrt(1/365)) against the entry. A 0DTE still open is sold at the bid at 3:45 PM ET, or at 1:00 PM ET on an NYSE early close. A 1DTE still open is sold at that same clock on its expiry day. Full-day NYSE holidays are skipped. Market hours only. No order is placed. ${spx}`;
 }
 
 function spxNote(book: JgVwapBook): string {
@@ -754,7 +824,8 @@ function parseTrade(value: unknown): JgVwapTrade | null {
   const putCall = row.putCall === "call" || row.putCall === "put" ? row.putCall : null;
   if (!putCall) return null;
   const id = typeof row.id === "string" ? row.id.trim() : "";
-  if (!/^jgvwap-(QQQ|SPX)-\d{4}-\d{2}-\d{2}$/.test(id)) return null;
+  const idDte = dteFromId(id);
+  if (idDte === undefined) return null;
   const expiration = typeof row.expiration === "string" ? row.expiration : "";
   if (!/^\d{4}-\d{2}-\d{2}$/.test(expiration)) return null;
   const strike = asPositive(row.strike);
@@ -795,10 +866,15 @@ function parseTrade(value: unknown): JgVwapTrade | null {
   if (status === "closed" && contracts === 0 && pnlDollars != null) return null;
   if (status === "closed" && pnlBudgetDollars == null && suggestedSize == null && pnlDollars != null) pnlBudgetDollars = pnlDollars;
   if (status === "closed" && suggestedSize != null && pnlBudgetDollars == null) return null;
+  const fieldDte = row.dte == null ? null : row.dte === "0DTE" || row.dte === "1DTE" ? row.dte : null;
+  if (row.dte != null && fieldDte == null) return null;
+  if (idDte && fieldDte && idDte !== fieldDte) return null;
+  const dte: JgDte = idDte ?? fieldDte ?? "0DTE";
   const root = typeof row.root === "string" && row.root.trim() ? row.root.trim().toUpperCase() : ticker;
   return {
     id,
     ticker,
+    dte,
     root,
     putCall,
     strike,
@@ -823,6 +899,83 @@ function parseTrade(value: unknown): JgVwapTrade | null {
     pnlDollars,
     pnlBudgetDollars,
   };
+}
+
+function dteFromId(id: string): JgDte | null | undefined {
+  if (/^jgvwap-(QQQ|SPX)-(0DTE|1DTE)-\d{4}-\d{2}-\d{2}$/.test(id)) return id.includes("-1DTE-") ? "1DTE" : "0DTE";
+  if (/^jgvwap-(QQQ|SPX)-\d{4}-\d{2}-\d{2}$/.test(id)) return null;
+  return undefined;
+}
+
+function tradeDte(trade: JgVwapTrade): JgDte {
+  return trade.dte === "1DTE" ? "1DTE" : "0DTE";
+}
+
+function entryDayOf(trade: JgVwapTrade): string {
+  return trade.id.slice(-10);
+}
+
+function enteredToday(trades: readonly JgVwapTrade[], ticker: JgTicker, dte: JgDte, day: string): boolean {
+  return trades.some((trade) => trade.ticker === ticker && tradeDte(trade) === dte && entryDayOf(trade) === day);
+}
+
+function signalSide(snap: JgSnapshot | null): PutCall | null {
+  if (!snap || snap.spot == null || snap.vwap == null) return null;
+  return jgVwapSide(snap.spot, snap.vwap);
+}
+
+function listedExpiry(contracts: readonly OptionContract[], expiration: string): boolean {
+  for (let i = 0; i < contracts.length; i++) {
+    if (contracts[i].expiration === expiration) return true;
+  }
+  return false;
+}
+
+function oneDteSkipNote(skips: readonly JgOneDteSkip[]): string {
+  if (skips.length === 0) return "";
+  const expiration = skips[0].expiration;
+  const names = skips.map((skip) => skip.ticker).join(" and ");
+  return `1DTE skipped for ${names}: no contract expiring ${expiration}.`;
+}
+
+function dteSummary(trades: readonly JgVwapTrade[], dte: JgDte): JgDteSummary {
+  const rows = trades.filter((trade) => tradeDte(trade) === dte);
+  let pnl = 0;
+  let pnlBudget = 0;
+  let scored = 0;
+  let budgetTrades = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const suggested = suggestedPnl(rows[i]);
+    const budget = budgetPnl(rows[i]);
+    if (suggested != null) {
+      pnl += suggested;
+      scored += 1;
+    }
+    if (budget != null) {
+      pnlBudget += budget;
+      budgetTrades += 1;
+    }
+  }
+  return {
+    dte,
+    trades: scored,
+    open: rows.filter((trade) => trade.status === "open").length,
+    pnl: roundCents(pnl),
+    pnlBudget: roundCents(pnlBudget),
+    budgetTrades,
+  };
+}
+
+function freshRun(): { value: number; seen: boolean } {
+  return { value: 0, seen: false };
+}
+
+function bumpRun(run: { value: number; seen: boolean }, pnl: number | null): number | null {
+  if (pnl != null) {
+    run.value += pnl;
+    run.seen = true;
+  }
+  return run.seen ? roundCents(run.value) : null;
 }
 
 function suggestedPnl(trade: JgVwapTrade): number | null {

@@ -6,6 +6,7 @@ import {
   jgAtrUsed,
   jgChainRoots,
   jgHistorySymbol,
+  jgNextTradingDay,
   jgSessionVwap,
   jgTodayRange,
   jgVwapSection,
@@ -36,7 +37,7 @@ export interface JgVwapDeps {
   history: (symbol: string, now: Date) => Promise<CandleBar[]>;
   /** Completed daily bars from the same price-history source as the minute candles. */
   daily: (symbol: string, now: Date) => Promise<CandleBar[]>;
-  chain: (symbol: string, day: string) => Promise<ChainParseResult>;
+  chain: (symbol: string, fromDay: string, toDay: string) => Promise<ChainParseResult>;
   readBook: () => Promise<string | null>;
   writeBook: (change: (current: string | null) => string) => Promise<boolean>;
   send: (message: string) => Promise<boolean>;
@@ -62,6 +63,7 @@ export async function runJgVwapPaper(now: Date, deps: JgVwapDeps = defaultDeps()
     return { opened: 0, closed: 0, saved: true, skipped: "closed", spxRoot: null, spxUnavailable: false, logNote: "outside market hours" };
   }
   const day = newYorkDate(now);
+  const toDay = jgNextTradingDay(day) ?? day;
   const snapshots: JgSnapshot[] = [];
   let spxRoot: "SPX" | "SPXW" | null = null;
   let spxChainMiss = false;
@@ -77,7 +79,7 @@ export async function runJgVwapPaper(now: Date, deps: JgVwapDeps = defaultDeps()
     const session = jgSessionVwap(bars, now.getTime());
     const atrUsed = jgAtrUsed(jgTodayRange(bars, now.getTime()), jgAtr14(daily, day));
     if (ticker === "SPX" && !session) spxVwapMiss = true;
-    const loaded = await loadChain(jgChainRoots(ticker), day, deps);
+    const loaded = await loadChain(jgChainRoots(ticker), day, toDay, deps);
     if (ticker === "SPX") {
       if (loaded.root === "SPX" || loaded.root === "SPXW") spxRoot = loaded.root;
       else spxChainMiss = true;
@@ -99,6 +101,7 @@ export async function runJgVwapPaper(now: Date, deps: JgVwapDeps = defaultDeps()
   const closedIds = new Set<string>();
   let spxStored: "SPX" | "SPXW" | null = spxRoot;
   let spxUnavailable = spxChainMiss;
+  let oneDteNote = "";
   const saved = await deps.writeBook((text) => {
     const current = parseJgVwapBook(text);
     const advanced = advanceJgVwap(current, snapshots, now, meta);
@@ -106,10 +109,11 @@ export async function runJgVwapPaper(now: Date, deps: JgVwapDeps = defaultDeps()
     for (let i = 0; i < advanced.closed.length; i++) closedIds.add(advanced.closed[i].id);
     spxStored = advanced.book.spxRoot;
     spxUnavailable = advanced.book.spxUnavailable;
+    oneDteNote = advanced.book.oneDteNote;
     return serializeJgVwapBook(advanced.book);
   });
   if (!saved) {
-    return { opened: 0, closed: 0, saved: false, skipped: null, spxRoot: spxStored, spxUnavailable, logNote: logNote(spxStored, spxUnavailable, spxVwapMiss) };
+    return { opened: 0, closed: 0, saved: false, skipped: null, spxRoot: spxStored, spxUnavailable, logNote: logNote(spxStored, spxUnavailable, spxVwapMiss, oneDteNote) };
   }
   const stored = parseJgVwapBook(await deps.readBook());
   const opened = stored.trades.filter((trade) => openedById.has(trade.id));
@@ -124,11 +128,16 @@ export async function runJgVwapPaper(now: Date, deps: JgVwapDeps = defaultDeps()
     skipped: null,
     spxRoot: stored.spxRoot ?? spxStored,
     spxUnavailable: stored.spxUnavailable,
-    logNote: logNote(stored.spxRoot ?? spxStored, stored.spxUnavailable, stored.spxVwapMiss),
+    logNote: logNote(stored.spxRoot ?? spxStored, stored.spxUnavailable, stored.spxVwapMiss, stored.oneDteNote),
   };
 }
 
-function logNote(spxRoot: "SPX" | "SPXW" | null, unavailable: boolean, vwapMiss: boolean): string {
+function logNote(spxRoot: "SPX" | "SPXW" | null, unavailable: boolean, vwapMiss: boolean, oneDteNote: string): string {
+  const base = spxNote(spxRoot, unavailable, vwapMiss);
+  return oneDteNote ? `${base}. ${oneDteNote}` : base;
+}
+
+function spxNote(spxRoot: "SPX" | "SPXW" | null, unavailable: boolean, vwapMiss: boolean): string {
   if (unavailable && spxRoot == null) return "SPX and SPXW chains unavailable; QQQ only";
   if (unavailable) return `latest SPX chain missed; last root ${spxRoot}`;
   if (vwapMiss && spxRoot) return `SPX contracts on ${spxRoot}; SPX VWAP candles missing`;
@@ -138,13 +147,14 @@ function logNote(spxRoot: "SPX" | "SPXW" | null, unavailable: boolean, vwapMiss:
 
 async function loadChain(
   roots: readonly string[],
-  day: string,
+  fromDay: string,
+  toDay: string,
   deps: JgVwapDeps,
 ): Promise<{ root: JgTicker | "SPXW" | null; chain: ChainParseResult | null }> {
   for (let i = 0; i < roots.length; i++) {
     const root = roots[i];
     try {
-      const chain = await deps.chain(root, day);
+      const chain = await deps.chain(root, fromDay, toDay);
       if (chain.contracts.length > 0 && (root === "QQQ" || root === "SPX" || root === "SPXW")) {
         return { root, chain };
       }
@@ -201,12 +211,12 @@ async function loadDaily(symbol: string, now: Date): Promise<CandleBar[]> {
   }
 }
 
-async function loadOptionChain(symbol: string, day: string): Promise<ChainParseResult> {
+async function loadOptionChain(symbol: string, fromDay: string, toDay: string): Promise<ChainParseResult> {
   return getOptionChain({
     symbol,
     contractType: "ALL",
-    fromDate: day,
-    toDate: day,
+    fromDate: fromDay,
+    toDate: toDay,
     range: "NTM",
     strikeCount: 8,
   });

@@ -83,9 +83,19 @@ interface JgBucket {
   maxDrawdownVsAccount: number;
 }
 
+interface JgDteSummary {
+  dte: "0DTE" | "1DTE";
+  trades: number;
+  open: number;
+  pnl: number;
+  pnlBudget?: number;
+  budgetTrades?: number;
+}
+
 interface JgRow {
   id: string;
   ticker: string;
+  dte?: "0DTE" | "1DTE";
   root: string;
   putCall: "call" | "put";
   strike: number;
@@ -105,6 +115,10 @@ interface JgPnlPoint {
   at: number;
   suggested: number | null;
   budget: number | null;
+  suggested0?: number | null;
+  budget0?: number | null;
+  suggested1?: number | null;
+  budget1?: number | null;
 }
 
 interface JgSection {
@@ -115,6 +129,8 @@ interface JgSection {
   budgetDollars: number;
   accountDollars: number;
   buckets: JgBucket[];
+  byDte?: JgDteSummary[];
+  oneDteNote?: string;
   rows: JgRow[];
   pnlSeries?: JgPnlPoint[];
 }
@@ -525,6 +541,20 @@ function JgVwapPanel({ section }: { section: JgSection }) {
       <h2 style={heading}>{section.label}</h2>
       <Note color="#94a3b8">{section.note}</Note>
       <Note color={section.tooFew ? "#fbbf24" : "#94a3b8"}>{section.trustNote}</Note>
+      {section.oneDteNote ? <Note color="#fbbf24">{section.oneDteNote}</Note> : null}
+      {section.byDte && section.byDte.length > 0 && (
+        <div style={{ display: "grid", gap: 10, marginBottom: 10 }}>
+          {section.byDte.map((row) => (
+            <section key={row.dte} style={{ ...cardStyle, marginBottom: 0 }}>
+              <h3 style={{ margin: "0 0 4px", fontSize: 16 }}>{row.dte}</h3>
+              <Stat label="Scored trades" value={String(row.trades)} />
+              <Stat label="Open" value={String(row.open)} />
+              <Stat label="P/L at suggested size" value={row.trades === 0 ? "n/a" : signed(row.pnl)} />
+              <Stat label="P/L at $875" value={(row.budgetTrades ?? 0) === 0 ? "n/a" : signed(row.pnlBudget ?? 0)} />
+            </section>
+          ))}
+        </div>
+      )}
       <div style={{ display: "grid", gap: 10 }}>
         {section.buckets.map((bucket) => (
           <section key={bucket.key} style={{ ...cardStyle, marginBottom: 0 }}>
@@ -548,7 +578,7 @@ function JgVwapPanel({ section }: { section: JgSection }) {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
             <thead>
               <tr>
-                {["Ticker", "Right", "ATR used", "Suggested size", "Contracts", "Status", "Exit", "P/L", "P/L at $875", "Flag"].map((label) => (
+                {["Ticker", "DTE", "Right", "ATR used", "Suggested size", "Contracts", "Status", "Exit", "P/L", "P/L at $875", "Flag"].map((label) => (
                   <th key={label} style={thStyle}>{label}</th>
                 ))}
               </tr>
@@ -565,6 +595,7 @@ function JgVwapPanel({ section }: { section: JgSection }) {
                         ${row.strike} · {row.expiration}{row.root !== row.ticker ? ` · ${row.root}` : ""}
                       </div>
                     </td>
+                    <td style={tdStyle}>{row.dte === "1DTE" ? "1DTE" : "0DTE"}</td>
                     <td style={tdStyle}>{row.putCall === "put" ? "Put" : "Call"}</td>
                     <td style={tdStyle}>{atrLabel(row)}</td>
                     <td style={tdStyle}>{row.suggestedSize == null ? "n/a" : `$${Math.round(row.suggestedSize)}`}</td>
@@ -605,10 +636,36 @@ function atrLabel(row: JgRow): string {
   return Number.isInteger(pct) ? `${pct.toFixed(0)}%` : `${pct.toFixed(1)}%`;
 }
 
+type JgChartMode = "all" | "combined" | "0DTE" | "1DTE";
+type JgChartKey = "suggested" | "budget" | "suggested0" | "budget0" | "suggested1" | "budget1";
+
+const JG_CHART_LINES: Record<JgChartMode, { key: JgChartKey; color: string; label: string }[]> = {
+  all: [
+    { key: "suggested", color: "#22d3ee", label: "Suggested, both" },
+    { key: "budget", color: "#fbbf24", label: "Flat $875, both" },
+    { key: "suggested0", color: "#a78bfa", label: "0DTE suggested" },
+    { key: "suggested1", color: "#34d399", label: "1DTE suggested" },
+  ],
+  combined: [
+    { key: "suggested", color: "#22d3ee", label: "Suggested size" },
+    { key: "budget", color: "#fbbf24", label: "Flat $875" },
+  ],
+  "0DTE": [
+    { key: "suggested0", color: "#a78bfa", label: "0DTE suggested" },
+    { key: "budget0", color: "#fbbf24", label: "0DTE at $875" },
+  ],
+  "1DTE": [
+    { key: "suggested1", color: "#34d399", label: "1DTE suggested" },
+    { key: "budget1", color: "#fbbf24", label: "1DTE at $875" },
+  ],
+};
+
 function JgPnlChart({ points }: { points: JgPnlPoint[] }) {
+  const [mode, setMode] = useState<JgChartMode>("all");
   if (points.length === 0) {
     return <Note color="#94a3b8">No closed paper trades yet. The cumulative P/L chart starts once one closes.</Note>;
   }
+  const lines = JG_CHART_LINES[mode];
   const width = 680;
   const height = 240;
   const padL = 68;
@@ -617,8 +674,10 @@ function JgPnlChart({ points }: { points: JgPnlPoint[] }) {
   const padB = 36;
   const values = [0];
   for (let i = 0; i < points.length; i++) {
-    if (points[i].suggested != null) values.push(points[i].suggested as number);
-    if (points[i].budget != null) values.push(points[i].budget as number);
+    for (let j = 0; j < lines.length; j++) {
+      const value = points[i][lines[j].key];
+      if (value != null) values.push(value);
+    }
   }
   let min = Math.min(...values);
   let max = Math.max(...values);
@@ -631,7 +690,7 @@ function JgPnlChart({ points }: { points: JgPnlPoint[] }) {
   const innerH = height - padT - padB;
   const xAt = (index: number) => (points.length === 1 ? padL + innerW / 2 : padL + (index / (points.length - 1)) * innerW);
   const yAt = (value: number) => padT + (1 - (value - min) / span) * innerH;
-  const path = (key: "suggested" | "budget") => {
+  const path = (key: JgChartKey) => {
     let d = "";
     let drawing = false;
     for (let i = 0; i < points.length; i++) {
@@ -649,12 +708,36 @@ function JgPnlChart({ points }: { points: JgPnlPoint[] }) {
   const labelIndexes = points.length <= 3
     ? points.map((_, index) => index)
     : [0, Math.floor((points.length - 1) / 2), points.length - 1];
-  const lastSuggested = [...points].reverse().find((point) => point.suggested != null)?.suggested;
-  const lastBudget = [...points].reverse().find((point) => point.budget != null)?.budget;
-  const summary = `Cumulative paper P/L. ATR suggested size ${lastSuggested == null ? "has no scored closes" : signed(lastSuggested)}. Flat $875 size ${lastBudget == null ? "has no closes" : signed(lastBudget)}.`;
+  const summary = `Cumulative paper P/L. ${lines.map((line) => line.label).join(", ")}.`;
+  const modes: { id: JgChartMode; label: string }[] = [
+    { id: "all", label: "All" },
+    { id: "combined", label: "Combined" },
+    { id: "0DTE", label: "0DTE" },
+    { id: "1DTE", label: "1DTE" },
+  ];
   return (
     <div style={{ marginTop: 12 }}>
       <h3 style={{ margin: "0 0 6px", fontSize: 16 }}>Cumulative paper P/L</h3>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+        {modes.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => setMode(item.id)}
+            style={{
+              background: mode === item.id ? "rgba(34,211,238,0.16)" : "transparent",
+              color: "#e2e8f0",
+              border: "1px solid rgba(148,163,184,0.35)",
+              borderRadius: 8,
+              padding: "4px 10px",
+              fontSize: 13,
+              cursor: "pointer",
+            }}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
       <div style={{ overflowX: "auto" }}>
         <svg
           viewBox={`0 0 ${width} ${height}`}
@@ -678,12 +761,16 @@ function JgPnlChart({ points }: { points: JgPnlPoint[] }) {
               </text>
             </g>
           ))}
-          <path d={path("budget")} fill="none" stroke="#fbbf24" strokeWidth="2" />
-          <path d={path("suggested")} fill="none" stroke="#22d3ee" strokeWidth="2" />
+          {lines.map((line) => (
+            <path key={line.key} d={path(line.key)} fill="none" stroke={line.color} strokeWidth="2" />
+          ))}
           {points.map((point, index) => (
             <g key={`${point.at}-${index}`}>
-              {point.budget != null && <circle cx={xAt(index)} cy={yAt(point.budget)} r="3" fill="#fbbf24" />}
-              {point.suggested != null && <circle cx={xAt(index)} cy={yAt(point.suggested)} r="3" fill="#22d3ee" />}
+              {lines.map((line) => {
+                const value = point[line.key];
+                if (value == null) return null;
+                return <circle key={line.key} cx={xAt(index)} cy={yAt(value)} r="3" fill={line.color} />;
+              })}
             </g>
           ))}
           {labelIndexes.map((index) => (
@@ -701,8 +788,9 @@ function JgPnlChart({ points }: { points: JgPnlPoint[] }) {
         </svg>
       </div>
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", color: "#94a3b8", fontSize: 13, marginTop: 6 }}>
-        <span><span style={{ color: "#22d3ee" }}>●</span> ATR suggested size</span>
-        <span><span style={{ color: "#fbbf24" }}>●</span> Flat $875</span>
+        {lines.map((line) => (
+          <span key={line.key}><span style={{ color: line.color }}>●</span> {line.label}</span>
+        ))}
         <span>Dashed line is $0</span>
       </div>
     </div>

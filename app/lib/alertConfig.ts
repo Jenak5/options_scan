@@ -221,15 +221,18 @@ export const VWAP_PUT_TEST = {
 export const JG_VWAP_BUDGET_DOLLARS = 875;
 
 /**
- * Suggested paper size for this JG-VWAP test.
- * The test is same-day (0DTE) only, so a known ATR used is a flat $250.
- * ATR used is shown on the alert and is not a band. $300 is only for a missing ATR.
+ * Suggested paper size for the JG-VWAP test.
+ * 0DTE is a flat $250 when ATR used is known. 1DTE is $875 inside the band
+ * and $300 outside it. $300 is also the size when ATR cannot be computed.
  */
 export const JG_VWAP_SIZE_0DTE_DOLLARS = 250;
 export const JG_VWAP_SIZE_UNKNOWN_DOLLARS = 300;
+/** Inclusive 1DTE band on ATR used (today's range / 14-day ATR). */
+export const JG_VWAP_ATR_BAND_LOW = 0.41;
+export const JG_VWAP_ATR_BAND_HIGH = 0.67;
 
 /**
- * Paper-only 0DTE test. Not a grade, and not part of the A/B daily alert cap.
+ * Paper-only JG-VWAP test. Not a grade, and not part of the A/B daily alert cap.
  * Scored contracts use the suggested size. The $875 budget stays as a comparison.
  */
 export const JG_VWAP_TEST = {
