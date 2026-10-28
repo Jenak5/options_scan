@@ -12,13 +12,13 @@ import { newYorkDate } from "@/app/lib/flow";
 import { nyMinutes } from "@/app/lib/featureBackfill";
 import { isChicagoMarketHours, isMarketDay, nextChicagoTradingDay } from "@/app/lib/marketHours";
 import { DEFAULT_ACCOUNT_SIZE_DOLLARS } from "@/app/lib/risk";
+import type { JgSignal } from "@/app/lib/jgSignal";
 import { completedSessionMinutes } from "@/app/lib/vwapPut";
 
 /**
  * Paper-only J.G. Banks 0DTE entry with a session-VWAP filter.
- * The repo has no separate Banks signal. Direction is the side of session VWAP:
- * a call when price is on the call side of the band, a put when it is on the put side.
- * Inside the band both inequalities pass, so there is no entry.
+ * Direction comes from the backtest, not from which side of VWAP price is on.
+ * See jgSignal.ts. A missing trend, level, or vol index is no trade.
  * Nothing here grades an alert, sends the A/B Telegram path, or places an order.
  *
  * Session VWAP matches the other paper rule: completed regular-hours minutes,
@@ -47,7 +47,6 @@ export function jgNextTradingDay(ymd: string): string | null {
 const EARLY_CLOSE_ET = new Set(["2026-11-27", "2026-12-24", "2027-11-26"]);
 const FLAT_EXIT_ET = 15 * 60 + 45;
 const EARLY_FLAT_EXIT_ET = 13 * 60;
-const IMPLIED_MOVE_YEAR_DAYS = 365;
 const ROW_CAP = 1_500;
 const ATR_PERIOD = 14;
 const RTH_OPEN = 9 * 60 + 30;
@@ -208,9 +207,10 @@ export function jgSpreadTooWide(bid: number, ask: number): boolean {
   return (ask - bid) / mid > JG_VWAP_TEST.maxSpreadOfMid + 1e-12;
 }
 
-export function jgImpliedMove(spot: number, iv: number): number | null {
-  if (!(spot > 0) || !(iv > 0) || !Number.isFinite(spot) || !Number.isFinite(iv)) return null;
-  const move = spot * iv * Math.sqrt(1 / IMPLIED_MOVE_YEAR_DAYS);
+/** Prior close × (VXN or VIX / 100) / sqrt(252). volIndex is the index level, such as 18.5. */
+export function jgImpliedMove(priorClose: number, volIndex: number): number | null {
+  if (!(priorClose > 0) || !(volIndex > 0) || !Number.isFinite(priorClose) || !Number.isFinite(volIndex)) return null;
+  const move = priorClose * (volIndex / 100) / Math.sqrt(252);
   return move > 0 && Number.isFinite(move) ? move : null;
 }
 
@@ -272,6 +272,8 @@ export interface JgVwapTrade {
   entryBid: number;
   entryUnderlying: number;
   vwap: number;
+  /** Retest level. Null on a row saved before the backtest entry. */
+  level: number | null;
   iv: number;
   impliedMove: number;
   stopUnderlying: number;
@@ -306,6 +308,12 @@ export interface JgSnapshot {
   contracts: readonly OptionContract[];
   /** Null when today's range or ATR14 is missing. */
   atrUsed: number | null;
+  /** Backtest signal for this pass. Null when there is nothing to paper. */
+  signal: JgSignal | null;
+  /** Why this pass did not signal, including a VWAP rejection. */
+  signalNote: string;
+  /** Today's 5-minute bars, used to see if the implied-move stop traded. */
+  bars?: readonly CandleBar[];
 }
 
 export interface JgRunMeta {
@@ -397,7 +405,7 @@ export function advanceJgVwap(
       }
     }
     if (nextDay && !enteredToday(trades, ticker, "1DTE", day)) {
-      const side = signalSide(snap);
+      const side = snap?.signal?.vwapOk ? snap.signal.direction : null;
       if (side && !listedExpiry(snap?.contracts ?? [], nextDay)) {
         oneDteSkips.push({ ticker, expiration: nextDay });
       } else {
@@ -563,8 +571,8 @@ Paper only. This is not an A or a B, and it is outside the daily A/B alert cap. 
 
 ${atrLine}
 ${buy}
-Underlying $${trimPrice(trade.entryUnderlying)} vs session VWAP $${trimPrice(trade.vwap)}.
-Stop if the underlying trades ${stopWord} $${trimPrice(trade.stopUnderlying)} (0.75× the day's implied move).
+Underlying $${trimPrice(trade.entryUnderlying)} vs session VWAP $${trimPrice(trade.vwap)}. Level $${trimPrice(trade.level ?? trade.vwap)}.
+Stop if the underlying trades ${stopWord} $${trimPrice(trade.stopUnderlying)} (0.75× the day's implied move from the prior close and the vol index).
 ${exitLine}${root}`;
 }
 
@@ -576,19 +584,13 @@ function openTrade(
   dte: JgDte,
   expiration: string,
 ): JgVwapTrade | null {
-  if (!snap || snap.root == null || snap.spot == null || snap.vwap == null) return null;
-  if (!(snap.spot > 0) || !(snap.vwap > 0)) return null;
-  const side = jgVwapSide(snap.spot, snap.vwap);
-  if (!side) return null;
-  const contract = pickExpiry(snap.contracts, side, expiration, snap.spot);
+  const signal = snap?.signal;
+  if (!snap || snap.root == null || !signal || !signal.vwapOk) return null;
+  if (!(signal.entry > 0) || !(signal.vwap > 0) || !(signal.stop > 0)) return null;
+  const side = signal.direction;
+  const contract = pickExpiry(snap.contracts, side, expiration, signal.entry);
   if (!contract) return null;
-  const iv = contractIv(snap.contracts, contract);
-  if (iv == null) return null;
-  const move = jgImpliedMove(snap.spot, iv);
-  if (move == null) return null;
-  const stop = jgStopUnderlying(side, snap.spot, move);
-  if (stop == null) return null;
-  const atrUsed = normalizeAtrUsed(snap.atrUsed);
+  const atrUsed = signal.atrUsed;
   const suggestedSize = jgSuggestedSize(atrUsed, dte);
   const suggestedContracts = jgContractsForSize(contract.ask, suggestedSize);
   const size = jgVwapSize(contract.ask);
@@ -601,7 +603,7 @@ function openTrade(
     putCall: side,
     strike: contract.strike,
     expiration,
-    openedAt: now.getTime(),
+    openedAt: signal.signalAt > 0 ? signal.signalAt : now.getTime(),
     contracts: suggestedContracts,
     budgetContracts: size.contracts,
     overBudget: size.overBudget,
@@ -609,11 +611,12 @@ function openTrade(
     suggestedSize,
     entryAsk: contract.ask,
     entryBid: contract.bid,
-    entryUnderlying: snap.spot,
-    vwap: snap.vwap,
-    iv,
-    impliedMove: move,
-    stopUnderlying: stop,
+    entryUnderlying: signal.entry,
+    vwap: signal.vwap,
+    level: signal.level,
+    iv: signal.volIndex / 100,
+    impliedMove: signal.impliedMove,
+    stopUnderlying: signal.stop,
     status: "open",
     closedAt: null,
     exitBid: null,
@@ -633,7 +636,7 @@ function markOpen(
   const expired = trade.expiration < day;
   const quote = snap ? findQuote(snap.contracts, trade) : null;
   const spot = snap?.spot != null && snap.spot > 0 ? snap.spot : null;
-  const stopped = spot != null && hitStop(trade, spot);
+  const stopped = (spot != null && hitStop(trade, spot)) || barsHitStop(trade, snap?.bars);
   // Both variants exit the entry session. A later session closes anything still open.
   const flatDue = minutes >= jgFlatExitMinute(day) || entryDayOf(trade) < day;
   if (!expired && !stopped && !flatDue) return trade;
@@ -658,6 +661,17 @@ function markOpen(
 
 function hitStop(trade: JgVwapTrade, spot: number): boolean {
   return trade.putCall === "call" ? spot <= trade.stopUnderlying : spot >= trade.stopUnderlying;
+}
+
+function barsHitStop(trade: JgVwapTrade, bars: readonly CandleBar[] | undefined): boolean {
+  if (!bars) return false;
+  for (let i = 0; i < bars.length; i++) {
+    const bar = bars[i];
+    if (bar.t + 5 * 60_000 < trade.openedAt - 60_000) continue;
+    if (trade.putCall === "call" && bar.l <= trade.stopUnderlying) return true;
+    if (trade.putCall === "put" && bar.h >= trade.stopUnderlying) return true;
+  }
+  return false;
 }
 
 function pickExpiry(
@@ -787,7 +801,7 @@ function sectionNote(book: JgVwapBook): string {
   const known = JG_VWAP_SIZE_0DTE_DOLLARS;
   const unknown = JG_VWAP_SIZE_UNKNOWN_DOLLARS;
   const spx = spxNote(book);
-  return `${JG_VWAP_TEST.label}. These rows are left out of the A and B totals above. Each entry sends a Telegram message labeled PAPER TEST - JG-VWAP 0DTE or PAPER TEST - JG-VWAP 1DTE, and that message is outside the daily A/B cap. QQQ and SPX, in the direction of session VWAP. A call needs price at or above VWAP × ${(1 - JG_VWAP_TEST.vwapBand).toFixed(3)}, and it is skipped when that price is also on the put side of the band. A put needs price at or below VWAP × ${(1 + JG_VWAP_TEST.vwapBand).toFixed(3)}, and it is skipped when that price is also on the call side. Session VWAP is the regular-hours typical price from 1-minute candles, volume floored at 1, from 9:30 ET. One 0DTE and one 1DTE paper entry per ticker per day. 0DTE expires that day. 1DTE uses the next trading day's expiry, skipping weekends and full-day NYSE holidays. Both close the same day, at the implied-move stop or at 3:45 PM ET (1:00 PM ET on an early close). If that next-day expiry is not in the chain, 1DTE is skipped and the scan log says so. The logged strike is the nearest strike of that expiry whose spread is within ${JG_VWAP_TEST.maxSpreadOfMid * 100}% of the mid. Buy at the ask, sell at the bid, $${JG_VWAP_TEST.feePerSide.toFixed(2)} a contract each side. ATR used is today's high minus today's low so far, divided by the 14-day average true range of completed daily bars. 0DTE suggested size is $${known} when ATR used is known. 1DTE suggested size is $${budget} when ATR used is from ${JG_VWAP_ATR_BAND_LOW} through ${JG_VWAP_ATR_BAND_HIGH}, and $${unknown} otherwise. Both use $${unknown} when ATR cannot be computed. Scored contracts are floor(suggested size / (ask × 100)). A size that buys zero contracts is not scored. The flat $${budget} size stays as a comparison: floor(${budget} / (ask × 100)), and a contract above $${budget} is logged as 1 and flagged over budget. Over-budget SPX stays in its own bucket. Over-budget QQQ is flagged on the row and left out of the QQQ totals. The stop is ${JG_VWAP_TEST.stopFractionOfImpliedMove}× the day's implied move (spot × IV × sqrt(1/365)) against the entry. Anything still open is sold at the bid at 3:45 PM ET the same day, or at 1:00 PM ET on an NYSE early close. Full-day NYSE holidays are skipped. Market hours only. No order is placed. ${spx}`;
+  return `${JG_VWAP_TEST.label}. These rows are left out of the A and B totals above. Each entry sends a Telegram message labeled PAPER TEST - JG-VWAP 0DTE or PAPER TEST - JG-VWAP 1DTE, and that message is outside the daily A/B cap. QQQ uses VXN and SPX uses VIX. One 0DTE and one 1DTE paper entry per ticker per day. 0DTE expires that day. 1DTE uses the next trading day's expiry, skipping weekends and full-day NYSE holidays. Both close the same day, at the implied-move stop or at 3:45 PM ET (1:00 PM ET on an early close). If that next-day expiry is not in the chain, 1DTE is skipped and the scan log says so. The logged strike is the nearest strike of that expiry whose spread is within ${JG_VWAP_TEST.maxSpreadOfMid * 100}% of the mid. Buy at the ask, sell at the bid, $${JG_VWAP_TEST.feePerSide.toFixed(2)} a contract each side. ATR used is today's high minus today's low so far, divided by the 14-day average true range of completed daily bars. 0DTE suggested size is $${known} when ATR used is known. 1DTE suggested size is $${budget} when ATR used is from ${JG_VWAP_ATR_BAND_LOW} through ${JG_VWAP_ATR_BAND_HIGH}, and $${unknown} otherwise. Both use $${unknown} when ATR cannot be computed. Scored contracts are floor(suggested size / (ask × 100)). A size that buys zero contracts is not scored. The flat $${budget} size stays as a comparison: floor(${budget} / (ask × 100)), and a contract above $${budget} is logged as 1 and flagged over budget. Over-budget SPX stays in its own bucket. Over-budget QQQ is flagged on the row and left out of the QQQ totals. The stop is ${JG_VWAP_TEST.stopFractionOfImpliedMove}× the implied move (prior close × VXN or VIX / 100 / sqrt(252)) against the 5-minute close. Direction is prior-day EMA8/EMA21 agreeing with the last completed week. The entry is the first 5-minute retest of an hourly pivot break between 9:45 and 14:30 ET, with close×volume VWAP still on the trade side (aligned distance at least -0.10). Anything still open is sold at the bid at 3:45 PM ET the same day, or at 1:00 PM ET on an NYSE early close. Full-day NYSE holidays are skipped. Market hours only. No order is placed. ${spx}`;
 }
 
 function spxNote(book: JgVwapBook): string {
@@ -840,6 +854,8 @@ function parseTrade(value: unknown): JgVwapTrade | null {
   const entryBid = asNonNegative(row.entryBid);
   const entryUnderlying = asPositive(row.entryUnderlying);
   const vwap = asPositive(row.vwap);
+  const level = row.level == null ? null : asPositive(row.level);
+  if (row.level != null && level == null) return null;
   const iv = asPositive(row.iv);
   const impliedMove = asPositive(row.impliedMove);
   const stopUnderlying = asPositive(row.stopUnderlying);
@@ -890,6 +906,7 @@ function parseTrade(value: unknown): JgVwapTrade | null {
     entryBid,
     entryUnderlying,
     vwap,
+    level,
     iv,
     impliedMove,
     stopUnderlying,
@@ -918,11 +935,6 @@ function entryDayOf(trade: JgVwapTrade): string {
 
 function enteredToday(trades: readonly JgVwapTrade[], ticker: JgTicker, dte: JgDte, day: string): boolean {
   return trades.some((trade) => trade.ticker === ticker && tradeDte(trade) === dte && entryDayOf(trade) === day);
-}
-
-function signalSide(snap: JgSnapshot | null): PutCall | null {
-  if (!snap || snap.spot == null || snap.vwap == null) return null;
-  return jgVwapSide(snap.spot, snap.vwap);
 }
 
 function listedExpiry(contracts: readonly OptionContract[], expiration: string): boolean {

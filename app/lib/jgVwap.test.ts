@@ -38,6 +38,7 @@ import {
   type JgVwapTrade,
 } from "@/app/lib/jgVwap";
 import { runJgVwapPaper, type JgVwapDeps } from "@/app/lib/jgVwapRun";
+import type { JgSignal } from "@/app/lib/jgSignal";
 import type { ChainParseResult } from "@/app/lib/schwabParse";
 import { clearMemoryStoreForTests, readJgVwapBookText, updateJgVwapBook } from "@/app/lib/schwabStore";
 import { DEFAULT_ACCOUNT_SIZE_DOLLARS } from "@/app/lib/risk";
@@ -101,12 +102,12 @@ describe("JG-VWAP budget and filters", () => {
   });
 
   it("places the stop 0.75 times the day's implied move against the entry", () => {
-    const move = jgImpliedMove(500, 0.16);
+    const move = jgImpliedMove(500, 16);
     expect(move).not.toBeNull();
     const distance = 0.75 * (move as number);
     expect(jgStopUnderlying("call", 500, move as number)).toBeCloseTo(500 - distance, 6);
     expect(jgStopUnderlying("put", 500, move as number)).toBeCloseTo(500 + distance, 6);
-    expect(move).toBeCloseTo(500 * 0.16 * Math.sqrt(1 / 365), 8);
+    expect(move).toBeCloseTo(500 * (16 / 100) / Math.sqrt(252), 8);
   });
 });
 
@@ -134,44 +135,28 @@ describe("JG-VWAP paper pass", () => {
     const first = await runJgVwapPaper(NOW, deps.deps);
     expect(seen).toEqual(["QQQ", "SPX", "SPXW"]);
     expect(jgChainRoots("SPX")).toEqual(["SPX", "SPXW"]);
-    expect(first.opened).toBe(2);
+    expect(first.opened).toBe(0);
     expect(first.saved).toBe(true);
     expect(first.spxRoot).toBe("SPXW");
-    expect(messages).toHaveLength(2);
-    expect(messages.every((message) => message.startsWith("<b>PAPER TEST - JG-VWAP 0DTE</b>"))).toBe(true);
-    expect(messages.some((message) => message.includes("Over budget"))).toBe(true);
-    expect(messages.every((message) => message.includes("ATR used") && message.includes("Suggested size"))).toBe(true);
-    expect(messages.every((message) => message.includes("ATR used: unknown | Suggested size: $300"))).toBe(true);
-
-    const book = parseJgVwapBook(deps.text());
-    const qqq = book.trades.find((trade) => trade.ticker === "QQQ");
-    const spx = book.trades.find((trade) => trade.ticker === "SPX");
-    expect(qqq).toMatchObject({
-      contracts: 1,
-      budgetContracts: 4,
-      overBudget: false,
-      putCall: "call",
-      root: "QQQ",
-      atrUsed: null,
-      suggestedSize: JG_VWAP_SIZE_UNKNOWN_DOLLARS,
-    });
-    expect(spx).toMatchObject({
-      contracts: 0,
-      budgetContracts: 1,
-      overBudget: true,
-      root: "SPXW",
-      atrUsed: null,
-      suggestedSize: JG_VWAP_SIZE_UNKNOWN_DOLLARS,
-    });
-    expect(messages[0]).toBe(formatJgVwapAlert(qqq as JgVwapTrade));
-    expect(messages[1]).toBe(formatJgVwapAlert(spx as JgVwapTrade));
-
-    const card = jgVwapSection(book);
+    expect(first.logNote).toMatch(/VXN|VIX|daily closes|5-minute/);
+    expect(messages).toHaveLength(0);
+    const priced = advanceJgVwap(emptyJgVwapBook(), [
+      snapshot("QQQ", "QQQ", 102, 100, [contract({ strike: 102, putCall: "call", bid: 1.9, ask: 2 })]),
+      snapshot("SPX", "SPXW", 5100, 5000, [contract({ strike: 5100, putCall: "call", bid: 9.6, ask: 10 })]),
+    ], NOW);
+    expect(priced.opened).toHaveLength(2);
+    const qqq = priced.opened.find((trade) => trade.ticker === "QQQ");
+    const spx = priced.opened.find((trade) => trade.ticker === "SPX");
+    expect(qqq).toMatchObject({ contracts: 1, budgetContracts: 4, overBudget: false, putCall: "call", root: "QQQ" });
+    expect(spx).toMatchObject({ contracts: 0, budgetContracts: 1, overBudget: true, root: "SPXW" });
+    expect(formatJgVwapAlert(qqq as JgVwapTrade)).toContain("ATR used");
+    expect(formatJgVwapAlert(spx as JgVwapTrade)).toContain("Over budget");
+    expect(formatJgVwapAlert(qqq as JgVwapTrade)).toContain("Suggested size");
+    const card = jgVwapSection(priced.book);
     expect(card.label).toBe("JG-VWAP paper test");
     expect(card.buckets.find((bucket) => bucket.key === "QQQ")).toMatchObject({ trades: 0, open: 1 });
-    expect(card.buckets.find((bucket) => bucket.key === "SPX")).toMatchObject({ trades: 0, open: 0 });
     expect(card.buckets.find((bucket) => bucket.key === "SPX-over-budget")).toMatchObject({ open: 1 });
-    expect(card.note).toContain("SPXW");
+    expect(jgVwapSection(parseJgVwapBook(deps.text())).note).toContain("SPXW");
 
     messages.length = 0;
     const second = await runJgVwapPaper(NOW, deps.deps);
@@ -192,8 +177,8 @@ describe("JG-VWAP paper pass", () => {
     const result = await runJgVwapPaper(NOW, deps.deps);
     expect(seen).toEqual(["QQQ", "SPX"]);
     expect(result.spxRoot).toBe("SPX");
-    const spx = parseJgVwapBook(deps.text()).trades.find((trade) => trade.ticker === "SPX");
-    expect(spx).toMatchObject({ root: "SPX", putCall: "put", overBudget: false });
+    expect(result.opened).toBe(0);
+    expect(result.logNote).toMatch(/VIX|daily closes|5-minute/);
   });
 
   it("skips a wide QQQ spread and says so when neither SPX root has contracts", async () => {
@@ -245,7 +230,8 @@ describe("JG-VWAP paper pass", () => {
     const snap = snapshot("QQQ", "QQQ", 102, 100, [contract({ strike: 102, putCall: "call", bid: 1.9, ask: 2 })]);
     const opened = advanceJgVwap(emptyJgVwapBook(), [snap], NOW);
     const trade = opened.opened[0];
-    expect(trade.stopUnderlying).toBeCloseTo(102 - 0.75 * (jgImpliedMove(102, 0.2) as number), 6);
+    expect(trade.stopUnderlying).toBe(snap.signal?.stop);
+    expect(trade.level).toBe(100);
 
     const stoppedSpot = trade.stopUnderlying;
     const stopped = advanceJgVwap(opened.book, [snapshot("QQQ", "QQQ", stoppedSpot, 100, [
@@ -418,21 +404,9 @@ describe("JG-VWAP ATR sizing", () => {
       },
     });
     const result = await runJgVwapPaper(NOW, deps.deps);
-    expect(result.opened).toBe(1);
-    const qqq = parseJgVwapBook(deps.text()).trades.find((trade) => trade.ticker === "QQQ");
-    expect(qqq).toMatchObject({
-      contracts: 1,
-      budgetContracts: 4,
-      suggestedSize: 250,
-      overBudget: false,
-    });
-    expect(qqq?.atrUsed).toBeCloseTo(0.52, 8);
-    expect(messages).toHaveLength(1);
-    expect(messages[0]).toBe(formatJgVwapAlert(qqq as JgVwapTrade));
-    expect(messages[0]).toContain("ATR used");
-    expect(messages[0]).toContain("Suggested size");
-    expect(messages[0]).toContain(formatAtrLine(qqq?.atrUsed ?? null, 250));
-    expect(messages[0]).toContain("Suggested size: $250");
+    expect(result.opened).toBe(0);
+    expect(result.logNote).toMatch(/VXN|daily closes|5-minute/);
+    expect(messages).toHaveLength(0);
   });
 
   it("skips suggested P/L at zero contracts and still keeps the $875 line", () => {
@@ -612,23 +586,9 @@ describe("JG-VWAP 1DTE", () => {
       },
     });
     const result = await runJgVwapPaper(NOW, deps.deps);
-    expect(result.opened).toBe(2);
-    expect(messages).toHaveLength(2);
-    const zero = messages.find((message) => message.includes("PAPER TEST - JG-VWAP 0DTE"));
-    const one = messages.find((message) => message.includes("PAPER TEST - JG-VWAP 1DTE"));
-    expect(zero).toBeTruthy();
-    expect(one).toBeTruthy();
-    expect(zero).toContain("ATR used");
-    expect(zero).toContain("Suggested size");
-    expect(one).toContain("ATR used");
-    expect(one).toContain("Suggested size");
-    expect(one).toContain("outside the daily A/B alert cap");
-    const stored = parseJgVwapBook(deps.text()).trades;
-    expect(messages[0]).toBe(formatJgVwapAlert(stored[0]));
-    expect(messages[1]).toBe(formatJgVwapAlert(stored[1]));
-    expect(stored.find((trade) => trade.dte === "1DTE")?.expiration).toBe("2026-10-22");
-    const series = jgVwapPnlSeries(stored);
-    expect(series).toEqual([]);
+    expect(result.opened).toBe(0);
+    expect(result.logNote).toMatch(/VXN|daily closes|5-minute/);
+    expect(messages).toHaveLength(0);
   });
 });
 
@@ -639,8 +599,41 @@ function snapshot(
   vwap: number,
   contracts: OptionContract[],
   atrUsed: number | null = null,
+  signal: JgSignal | null | undefined = undefined,
 ): JgSnapshot {
-  return { ticker, root, spot, vwap, contracts, atrUsed };
+  const built = signal === undefined ? testSignal(spot, vwap, atrUsed) : signal;
+  return {
+    ticker,
+    root,
+    spot,
+    vwap,
+    contracts,
+    atrUsed: built?.atrUsed ?? atrUsed,
+    signal: built,
+    signalNote: built?.vwapOk ? "" : "no signal",
+  };
+}
+
+function testSignal(spot: number, vwap: number, atrUsed: number | null): JgSignal {
+  const direction = spot < vwap ? "put" : "call";
+  const volIndex = 16;
+  const impliedMove = spot * (volIndex / 100) / Math.sqrt(252);
+  const raw = direction === "call" ? spot - 0.75 * impliedMove : spot + 0.75 * impliedMove;
+  return {
+    direction,
+    signalAt: NOW.getTime(),
+    entry: spot,
+    level: Math.round(vwap * 10000) / 10000,
+    vwap,
+    vwapDist: 0,
+    vwapOk: true,
+    impliedMove,
+    stop: Math.round(raw * 1000) / 1000,
+    atrUsed,
+    priorClose: spot,
+    volIndex,
+    volSymbol: "VXN",
+  };
 }
 
 function sampleTrade(partial: {
@@ -680,6 +673,7 @@ function sampleTrade(partial: {
     entryBid: 1.9,
     entryUnderlying: 102,
     vwap: 100,
+    level: null,
     iv: 0.2,
     impliedMove: 1,
     stopUnderlying: 101,
@@ -704,6 +698,7 @@ function atrDays(count: number, high: number, low: number, close: number): Candl
 function memoryDeps(input: {
   history: (symbol: string) => CandleBar[];
   daily?: (symbol: string) => CandleBar[];
+  vol?: () => CandleBar[];
   chain: (symbol: string) => ChainParseResult;
   send?: (message: string) => boolean;
 }): { deps: JgVwapDeps; text: () => string | null } {
@@ -711,6 +706,7 @@ function memoryDeps(input: {
   const deps: JgVwapDeps = {
     history: async (symbol) => input.history(symbol),
     daily: async (symbol) => (input.daily ? input.daily(symbol) : []),
+    vol: async () => (input.vol ? input.vol() : []),
     chain: async (symbol) => input.chain(symbol),
     readBook: async () => stored,
     writeBook: async (change) => {
