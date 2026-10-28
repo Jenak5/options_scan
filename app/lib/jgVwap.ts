@@ -1,4 +1,9 @@
-import { JG_VWAP_BUDGET_DOLLARS, JG_VWAP_TEST } from "@/app/lib/alertConfig";
+import {
+  JG_VWAP_BUDGET_DOLLARS,
+  JG_VWAP_SIZE_0DTE_DOLLARS,
+  JG_VWAP_SIZE_UNKNOWN_DOLLARS,
+  JG_VWAP_TEST,
+} from "@/app/lib/alertConfig";
 import type { CandleBar } from "@/app/lib/candleTypes";
 import type { OptionContract, PutCall } from "@/app/lib/contract";
 import { newYorkDate } from "@/app/lib/flow";
@@ -17,6 +22,10 @@ import { completedSessionMinutes } from "@/app/lib/vwapPut";
  * Session VWAP matches the other paper rule: completed regular-hours minutes,
  * typical price (H+L+C)/3, volume floored at 1, anchored at 9:30 ET.
  * The day's implied move is spot × annualized IV × sqrt(1/365).
+ *
+ * This test is 0DTE only. ATR used is informational. Suggested size is $250 when
+ * ATR used is known and $300 when it is not. Scored P/L uses that size.
+ * The flat $875 size stays on the trade for comparison.
  */
 
 export const JG_VWAP_TICKERS = ["QQQ", "SPX"] as const;
@@ -29,6 +38,9 @@ const FLAT_EXIT_ET = 15 * 60 + 45;
 const EARLY_FLAT_EXIT_ET = 13 * 60;
 const IMPLIED_MOVE_YEAR_DAYS = 365;
 const ROW_CAP = 1_500;
+const ATR_PERIOD = 14;
+const RTH_OPEN = 9 * 60 + 30;
+const RTH_CLOSE = 16 * 60;
 
 export function jgChainRoots(ticker: JgTicker): readonly string[] {
   return ticker === "SPX" ? ["SPX", "SPXW"] : ["QQQ"];
@@ -64,12 +76,112 @@ export function jgVwapSide(price: number, vwap: number): PutCall | null {
 
 /** floor(budget / (ask × 100)). Above the budget, log 1 contract and flag it. */
 export function jgVwapSize(ask: number): { contracts: number; overBudget: boolean } | null {
-  if (!(ask > 0) || !Number.isFinite(ask)) return null;
+  return jgBudgetSize(ask, JG_VWAP_BUDGET_DOLLARS);
+}
+
+/**
+ * Contracts at a dollar size: floor(size / (ask × 100)).
+ * Zero means the size does not buy one contract. Callers skip scoring that case.
+ */
+export function jgContractsForSize(ask: number, size: number): number | null {
+  if (!(ask > 0) || !Number.isFinite(ask) || !(size > 0) || !Number.isFinite(size)) return null;
   const cost = ask * 100;
   if (!(cost > 0) || !Number.isFinite(cost)) return null;
-  const fit = Math.floor(JG_VWAP_BUDGET_DOLLARS / cost);
+  const fit = Math.floor(size / cost);
+  return Number.isInteger(fit) && fit >= 0 ? fit : null;
+}
+
+function jgBudgetSize(ask: number, budget: number): { contracts: number; overBudget: boolean } | null {
+  const fit = jgContractsForSize(ask, budget);
+  if (fit == null) return null;
   if (fit >= 1) return { contracts: fit, overBudget: false };
   return { contracts: 1, overBudget: true };
+}
+
+/**
+ * 14-day average true range from prior completed daily bars.
+ * True range is max(high−low, |high−previous close|, |low−previous close|).
+ * The value is the simple average of the last 14 true ranges. Today is excluded.
+ * Fewer than 14 true ranges, or a non-positive average, is missing. Nothing is filled in.
+ */
+export function jgAtr14(bars: readonly CandleBar[], today: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(today)) return null;
+  const byDay = new Map<string, CandleBar>();
+  for (let i = 0; i < bars.length; i++) {
+    const bar = bars[i];
+    if (!Number.isFinite(bar.t) || !usableDailyBar(bar)) continue;
+    const date = newYorkDate(new Date(bar.t));
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date >= today) continue;
+    byDay.set(date, bar);
+  }
+  const days = Array.from(byDay.keys()).sort();
+  if (days.length < ATR_PERIOD + 1) return null;
+  const ranges: number[] = [];
+  for (let i = 1; i < days.length; i++) {
+    const bar = byDay.get(days[i]);
+    const prev = byDay.get(days[i - 1]);
+    if (!bar || !prev) return null;
+    const tr = Math.max(bar.h - bar.l, Math.abs(bar.h - prev.c), Math.abs(bar.l - prev.c));
+    if (!Number.isFinite(tr) || tr < 0) return null;
+    ranges.push(tr);
+  }
+  const last = ranges.slice(-ATR_PERIOD);
+  if (last.length < ATR_PERIOD) return null;
+  let sum = 0;
+  for (let i = 0; i < last.length; i++) sum += last[i];
+  const atr = sum / ATR_PERIOD;
+  return atr > 0 && Number.isFinite(atr) ? atr : null;
+}
+
+/** Today's high minus today's low so far, from regular-hours bars that have started. */
+export function jgTodayRange(bars: readonly CandleBar[], nowMs: number): number | null {
+  if (!Number.isFinite(nowMs)) return null;
+  const today = newYorkDate(new Date(nowMs));
+  let high = -Infinity;
+  let low = Infinity;
+  let count = 0;
+  for (let i = 0; i < bars.length; i++) {
+    const bar = bars[i];
+    if (!Number.isFinite(bar.t) || bar.t > nowMs) continue;
+    if (newYorkDate(new Date(bar.t)) !== today) continue;
+    const minutes = nyMinutes(bar.t);
+    if (minutes < RTH_OPEN || minutes >= RTH_CLOSE) continue;
+    if (!(bar.h > 0) || !(bar.l > 0) || !Number.isFinite(bar.h) || !Number.isFinite(bar.l) || bar.h < bar.l) continue;
+    if (bar.h > high) high = bar.h;
+    if (bar.l < low) low = bar.l;
+    count += 1;
+  }
+  if (count === 0 || !(high >= low)) return null;
+  const range = high - low;
+  return Number.isFinite(range) && range >= 0 ? range : null;
+}
+
+/** atr_used = today's range / ATR14. Null when either input is missing. */
+export function jgAtrUsed(todayRange: number | null, atr14: number | null): number | null {
+  if (todayRange == null || atr14 == null) return null;
+  if (!(todayRange >= 0) || !Number.isFinite(todayRange) || !(atr14 > 0) || !Number.isFinite(atr14)) return null;
+  const used = todayRange / atr14;
+  return Number.isFinite(used) && used >= 0 ? used : null;
+}
+
+/**
+ * Suggested dollars for this test. It is 0DTE only, so a known ATR used is $250
+ * and the ratio is not a band. A missing ATR is $300.
+ */
+export function jgSuggestedSize(atrUsed: number | null): number {
+  if (atrUsed == null || !Number.isFinite(atrUsed) || atrUsed < 0) return JG_VWAP_SIZE_UNKNOWN_DOLLARS;
+  return JG_VWAP_SIZE_0DTE_DOLLARS;
+}
+
+export function formatAtrUsed(atrUsed: number | null): string {
+  if (atrUsed == null || !Number.isFinite(atrUsed) || atrUsed < 0) return "unknown";
+  const pct = Math.round(atrUsed * 1000) / 10;
+  return Number.isInteger(pct) ? `${pct.toFixed(0)}%` : `${pct.toFixed(1)}%`;
+}
+
+export function formatAtrLine(atrUsed: number | null, suggestedSize: number): string {
+  const size = Number.isFinite(suggestedSize) && suggestedSize > 0 ? suggestedSize : JG_VWAP_SIZE_UNKNOWN_DOLLARS;
+  return `ATR used: ${formatAtrUsed(atrUsed)} | Suggested size: $${Math.round(size)}`;
 }
 
 /** True when the bid/ask is wider than 10% of the mid. A spread equal to 10% is kept. */
@@ -129,8 +241,15 @@ export interface JgVwapTrade {
   strike: number;
   expiration: string;
   openedAt: number;
+  /** Contracts at the suggested size. Zero is stored and not scored. */
   contracts: number;
+  /** Contracts at the flat $875 size. Always at least 1 when the trade is logged. */
+  budgetContracts: number;
   overBudget: boolean;
+  /** Null when ATR used could not be computed. Legacy rows are also null. */
+  atrUsed: number | null;
+  /** Dollars. Null on a row saved before suggested sizing. */
+  suggestedSize: number | null;
   entryAsk: number;
   entryBid: number;
   entryUnderlying: number;
@@ -142,7 +261,10 @@ export interface JgVwapTrade {
   closedAt: number | null;
   exitBid: number | null;
   exitReason: "stop" | "flat" | null;
+  /** Suggested-size P/L. Null while open, and null when the suggested size buys zero contracts. */
   pnlDollars: number | null;
+  /** Flat $875 P/L. Null while open. Legacy rows copy pnlDollars. */
+  pnlBudgetDollars: number | null;
 }
 
 export interface JgVwapBook {
@@ -162,6 +284,8 @@ export interface JgSnapshot {
   spot: number | null;
   vwap: number | null;
   contracts: readonly OptionContract[];
+  /** Null when today's range or ATR14 is missing. */
+  atrUsed: number | null;
 }
 
 export interface JgRunMeta {
@@ -265,6 +389,8 @@ export interface JgVwapBucket {
   losses: number;
   winRate: number | null;
   pnl: number;
+  pnlBudget: number;
+  budgetTrades: number;
   pnlWithoutTop3: number | null;
   maxDrawdownDollars: number;
   maxDrawdownVsAccount: number;
@@ -283,6 +409,16 @@ export interface JgVwapSection {
   spxVwapMiss: boolean;
   buckets: JgVwapBucket[];
   rows: JgVwapTrade[];
+  /** Closed trades in time order. Running totals for the scorecard chart. */
+  pnlSeries: JgPnlPoint[];
+}
+
+export interface JgPnlPoint {
+  at: number;
+  /** Running suggested-size P/L. Null until the first scored trade. */
+  suggested: number | null;
+  /** Running flat $875 P/L. Null until the first trade with that P/L. */
+  budget: number | null;
 }
 
 export function jgVwapSection(book: JgVwapBook): JgVwapSection {
@@ -294,7 +430,7 @@ export function jgVwapSection(book: JgVwapBook): JgVwapSection {
     "SPX over budget",
     (trade) => trade.ticker === "SPX" && trade.overBudget,
   );
-  const closedAll = book.trades.filter((trade) => trade.status === "closed" && trade.pnlDollars != null).length;
+  const closedAll = book.trades.filter((trade) => suggestedPnl(trade) != null).length;
   return {
     label: JG_VWAP_TEST.label,
     note: sectionNote(book),
@@ -308,22 +444,62 @@ export function jgVwapSection(book: JgVwapBook): JgVwapSection {
     spxVwapMiss: book.spxVwapMiss,
     buckets: [qqq, spx, over],
     rows: book.trades.slice().sort((a, b) => b.openedAt - a.openedAt).slice(0, 24),
+    pnlSeries: jgVwapPnlSeries(book.trades),
   };
+}
+
+/** Cumulative P/L after each close. Suggested size skips a zero-contract trade. $875 does not. */
+export function jgVwapPnlSeries(trades: readonly JgVwapTrade[]): JgPnlPoint[] {
+  const closed = trades.filter((trade) => trade.status === "closed" && trade.closedAt != null);
+  closed.sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0) || a.id.localeCompare(b.id));
+  let suggestedRun = 0;
+  let suggestedSeen = false;
+  let budgetRun = 0;
+  let budgetSeen = false;
+  const points: JgPnlPoint[] = [];
+  for (let i = 0; i < closed.length; i++) {
+    const trade = closed[i];
+    const suggested = suggestedPnl(trade);
+    const budget = budgetPnl(trade);
+    if (suggested == null && budget == null) continue;
+    if (suggested != null) {
+      suggestedRun += suggested;
+      suggestedSeen = true;
+    }
+    if (budget != null) {
+      budgetRun += budget;
+      budgetSeen = true;
+    }
+    points.push({
+      at: trade.closedAt as number,
+      suggested: suggestedSeen ? roundCents(suggestedRun) : null,
+      budget: budgetSeen ? roundCents(budgetRun) : null,
+    });
+  }
+  return points;
 }
 
 export function formatJgVwapAlert(trade: JgVwapTrade): string {
   const right = trade.putCall.toUpperCase();
   const budget = JG_VWAP_BUDGET_DOLLARS.toFixed(0);
   const stopWord = trade.putCall === "call" ? "at or below" : "at or above";
+  const suggestedSize = trade.suggestedSize != null && trade.suggestedSize > 0
+    ? trade.suggestedSize
+    : JG_VWAP_SIZE_UNKNOWN_DOLLARS;
+  const atrLine = formatAtrLine(trade.atrUsed, suggestedSize);
   const over = trade.overBudget
     ? `\n<b>Over budget.</b> One contract costs more than $${budget}. Logged as 1 contract${trade.ticker === "SPX" ? ", in the SPX over-budget scorecard bucket" : ", and left out of the QQQ totals"}.`
     : "";
   const root = trade.root !== trade.ticker ? `\nContract root <b>${escapeHtml(trade.root)}</b>.` : "";
+  const buy = trade.contracts >= 1
+    ? `Buy <b>${trade.contracts}</b> at the ask $${trimPrice(trade.entryAsk)} (bid $${trimPrice(trade.entryBid)}). Flat $${budget} sizing would buy <b>${trade.budgetContracts}</b>.`
+    : `Suggested size $${Math.round(suggestedSize)} does not cover one contract at the ask $${trimPrice(trade.entryAsk)}, so the ATR-sized paper P/L is not scored. Flat $${budget} sizing would buy <b>${trade.budgetContracts}</b>.`;
   return `<b>PAPER TEST - JG-VWAP</b>
 ${escapeHtml(trade.ticker)} <b>${right}</b> · $${trimPrice(trade.strike)} exp ${escapeHtml(trade.expiration)}
 Paper only. This is not an A or a B, and it is outside the daily A/B alert cap. No order is placed.${over}
 
-Buy <b>${trade.contracts}</b> at the ask $${trimPrice(trade.entryAsk)} (bid $${trimPrice(trade.entryBid)}). Budget $${budget}.
+${atrLine}
+${buy}
 Underlying $${trimPrice(trade.entryUnderlying)} vs session VWAP $${trimPrice(trade.vwap)}.
 Stop if the underlying trades ${stopWord} $${trimPrice(trade.stopUnderlying)} (0.75× the day's implied move).
 If it is still open, sell at the bid by the flat exit (3:45 PM ET, or 1:00 PM ET on an early close).${root}`;
@@ -342,8 +518,11 @@ function openTrade(ticker: JgTicker, snap: JgSnapshot | null, now: Date, day: st
   if (move == null) return null;
   const stop = jgStopUnderlying(side, snap.spot, move);
   if (stop == null) return null;
+  const atrUsed = normalizeAtrUsed(snap.atrUsed);
+  const suggestedSize = jgSuggestedSize(atrUsed);
+  const suggestedContracts = jgContractsForSize(contract.ask, suggestedSize);
   const size = jgVwapSize(contract.ask);
-  if (!size) return null;
+  if (suggestedContracts == null || !size) return null;
   return {
     id: `jgvwap-${ticker}-${day}`,
     ticker,
@@ -352,8 +531,11 @@ function openTrade(ticker: JgTicker, snap: JgSnapshot | null, now: Date, day: st
     strike: contract.strike,
     expiration: day,
     openedAt: now.getTime(),
-    contracts: size.contracts,
+    contracts: suggestedContracts,
+    budgetContracts: size.contracts,
     overBudget: size.overBudget,
+    atrUsed,
+    suggestedSize,
     entryAsk: contract.ask,
     entryBid: contract.bid,
     entryUnderlying: snap.spot,
@@ -366,6 +548,7 @@ function openTrade(ticker: JgTicker, snap: JgSnapshot | null, now: Date, day: st
     exitBid: null,
     exitReason: null,
     pnlDollars: null,
+    pnlBudgetDollars: null,
   };
 }
 
@@ -386,13 +569,19 @@ function markOpen(
   if (!expired && !quote) return trade;
   const bid = quote && quote.bid >= 0 ? quote.bid : 0;
   const reason = stopped ? "stop" : "flat";
+  const budgetContracts = trade.budgetContracts >= 1
+    ? trade.budgetContracts
+    : trade.suggestedSize == null && trade.contracts >= 1
+      ? trade.contracts
+      : 0;
   return {
     ...trade,
     status: "closed",
     closedAt: now.getTime(),
     exitBid: bid,
     exitReason: reason,
-    pnlDollars: jgVwapPnl(trade.entryAsk, bid, trade.contracts),
+    pnlDollars: trade.contracts >= 1 ? jgVwapPnl(trade.entryAsk, bid, trade.contracts) : null,
+    pnlBudgetDollars: budgetContracts >= 1 ? jgVwapPnl(trade.entryAsk, bid, budgetContracts) : null,
   };
 }
 
@@ -456,9 +645,14 @@ function bucketOf(
   keep: (trade: JgVwapTrade) => boolean,
 ): JgVwapBucket {
   const rows = trades.filter(keep);
-  const closed = rows.filter((trade) => trade.status === "closed" && trade.pnlDollars != null);
+  const closed = rows.filter((trade) => suggestedPnl(trade) != null);
   const ordered = closed.slice().sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0));
-  const pnls = ordered.map((trade) => trade.pnlDollars as number);
+  const pnls = ordered.map((trade) => suggestedPnl(trade) as number);
+  const budgetPnls = rows
+    .filter((trade) => budgetPnl(trade) != null)
+    .slice()
+    .sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0))
+    .map((trade) => budgetPnl(trade) as number);
   let wins = 0;
   let losses = 0;
   let pnl = 0;
@@ -478,6 +672,8 @@ function bucketOf(
     losses,
     winRate: decided > 0 ? wins / decided : null,
     pnl: roundCents(pnl),
+    pnlBudget: roundCents(budgetPnls.reduce((sum, value) => sum + value, 0)),
+    budgetTrades: budgetPnls.length,
     pnlWithoutTop3: pnlWithoutTop(pnls, 3),
     maxDrawdownDollars: drawdown.dollars,
     maxDrawdownVsAccount: drawdown.fraction,
@@ -510,15 +706,17 @@ function pnlWithoutTop(pnls: readonly number[], drop: number): number | null {
 
 function trustNote(closed: number): string {
   if (closed < JG_VWAP_TEST.minTrust) {
-    return `${closed} closed paper trades. Fewer than ${JG_VWAP_TEST.minTrust} is too few to read as a result.`;
+    return `${closed} closed paper trades scored at the suggested size. Fewer than ${JG_VWAP_TEST.minTrust} is too few to read as a result.`;
   }
-  return `${closed} closed paper trades. That is enough to describe. It does not change a live alert or an exit.`;
+  return `${closed} closed paper trades scored at the suggested size. That is enough to describe. It does not change a live alert or an exit.`;
 }
 
 function sectionNote(book: JgVwapBook): string {
   const budget = JG_VWAP_BUDGET_DOLLARS;
+  const known = JG_VWAP_SIZE_0DTE_DOLLARS;
+  const unknown = JG_VWAP_SIZE_UNKNOWN_DOLLARS;
   const spx = spxNote(book);
-  return `${JG_VWAP_TEST.label}. These rows are left out of the A and B totals above. Each entry sends a Telegram message labeled PAPER TEST - JG-VWAP, and that message is outside the daily A/B cap. QQQ and SPX, same-day expiry, in the direction of session VWAP. A call needs price at or above VWAP × ${(1 - JG_VWAP_TEST.vwapBand).toFixed(3)}, and it is skipped when that price is also on the put side of the band. A put needs price at or below VWAP × ${(1 + JG_VWAP_TEST.vwapBand).toFixed(3)}, and it is skipped when that price is also on the call side. Session VWAP is the regular-hours typical price from 1-minute candles, volume floored at 1, from 9:30 ET. One paper entry per ticker per day. The logged strike is the nearest same-day strike in that direction whose spread is within ${JG_VWAP_TEST.maxSpreadOfMid * 100}% of the mid. Buy at the ask, sell at the bid, $${JG_VWAP_TEST.feePerSide.toFixed(2)} a contract each side. Contracts are floor(${budget} / (ask × 100)). A contract above $${budget} is logged as 1 and flagged over budget. Over-budget SPX stays in its own bucket. Over-budget QQQ is flagged on the row and left out of the QQQ totals. The stop is ${JG_VWAP_TEST.stopFractionOfImpliedMove}× the day's implied move (spot × IV × sqrt(1/365)) against the entry. Anything still open is sold at the bid at 3:45 PM ET, or at 1:00 PM ET on an NYSE early close. Full-day NYSE holidays are skipped. Market hours only. No order is placed. ${spx}`;
+  return `${JG_VWAP_TEST.label}. These rows are left out of the A and B totals above. Each entry sends a Telegram message labeled PAPER TEST - JG-VWAP, and that message is outside the daily A/B cap. QQQ and SPX, same-day expiry, in the direction of session VWAP. A call needs price at or above VWAP × ${(1 - JG_VWAP_TEST.vwapBand).toFixed(3)}, and it is skipped when that price is also on the put side of the band. A put needs price at or below VWAP × ${(1 + JG_VWAP_TEST.vwapBand).toFixed(3)}, and it is skipped when that price is also on the call side. Session VWAP is the regular-hours typical price from 1-minute candles, volume floored at 1, from 9:30 ET. One paper entry per ticker per day. The logged strike is the nearest same-day strike in that direction whose spread is within ${JG_VWAP_TEST.maxSpreadOfMid * 100}% of the mid. Buy at the ask, sell at the bid, $${JG_VWAP_TEST.feePerSide.toFixed(2)} a contract each side. This test is 0DTE only. ATR used is today's high minus today's low so far, divided by the 14-day average true range of completed daily bars. Suggested size is $${known} when ATR used is known and $${unknown} when it cannot be computed. Scored contracts are floor(suggested size / (ask × 100)). A size that buys zero contracts is not scored. The flat $${budget} size stays as a comparison: floor(${budget} / (ask × 100)), and a contract above $${budget} is logged as 1 and flagged over budget. Over-budget SPX stays in its own bucket. Over-budget QQQ is flagged on the row and left out of the QQQ totals. The stop is ${JG_VWAP_TEST.stopFractionOfImpliedMove}× the day's implied move (spot × IV × sqrt(1/365)) against the entry. Anything still open is sold at the bid at 3:45 PM ET, or at 1:00 PM ET on an NYSE early close. Full-day NYSE holidays are skipped. Market hours only. No order is placed. ${spx}`;
 }
 
 function spxNote(book: JgVwapBook): string {
@@ -561,7 +759,11 @@ function parseTrade(value: unknown): JgVwapTrade | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(expiration)) return null;
   const strike = asPositive(row.strike);
   const openedAt = asTime(row.openedAt);
-  const contracts = asWhole(row.contracts);
+  const suggestedSize = row.suggestedSize == null ? null : asPositive(row.suggestedSize);
+  if (row.suggestedSize != null && suggestedSize == null) return null;
+  const atrUsed = row.atrUsed == null ? null : asNonNegative(row.atrUsed);
+  if (row.atrUsed != null && atrUsed == null) return null;
+  const contracts = suggestedSize == null ? asWhole(row.contracts) : asCount(row.contracts);
   const entryAsk = asPositive(row.entryAsk);
   const entryBid = asNonNegative(row.entryBid);
   const entryUnderlying = asPositive(row.entryUnderlying);
@@ -574,13 +776,25 @@ function parseTrade(value: unknown): JgVwapTrade | null {
     || entryUnderlying == null || vwap == null || iv == null || impliedMove == null || stopUnderlying == null
   ) return null;
   const status = row.status === "closed" ? "closed" : row.status === "open" ? "open" : null;
-  if (!status) return null;
+  if (!status || contracts == null) return null;
   const closedAt = row.closedAt == null ? null : asTime(row.closedAt);
   const exitBid = row.exitBid == null ? null : asNonNegative(row.exitBid);
   const exitReason = row.exitReason === "stop" || row.exitReason === "flat" ? row.exitReason : null;
   const pnlDollars = row.pnlDollars == null ? null : asFinite(row.pnlDollars);
-  if (status === "open" && (closedAt != null || exitBid != null || exitReason != null || pnlDollars != null)) return null;
-  if (status === "closed" && (closedAt == null || exitBid == null || exitReason == null || pnlDollars == null)) return null;
+  let budgetContracts = row.budgetContracts == null ? null : asWhole(row.budgetContracts);
+  if (row.budgetContracts != null && budgetContracts == null) return null;
+  if (budgetContracts == null) {
+    if (suggestedSize == null && contracts >= 1) budgetContracts = contracts;
+    else return null;
+  }
+  let pnlBudgetDollars = row.pnlBudgetDollars == null ? null : asFinite(row.pnlBudgetDollars);
+  if (row.pnlBudgetDollars != null && pnlBudgetDollars == null) return null;
+  if (status === "open" && (closedAt != null || exitBid != null || exitReason != null || pnlDollars != null || pnlBudgetDollars != null)) return null;
+  if (status === "closed" && (closedAt == null || exitBid == null || exitReason == null)) return null;
+  if (status === "closed" && contracts >= 1 && pnlDollars == null) return null;
+  if (status === "closed" && contracts === 0 && pnlDollars != null) return null;
+  if (status === "closed" && pnlBudgetDollars == null && suggestedSize == null && pnlDollars != null) pnlBudgetDollars = pnlDollars;
+  if (status === "closed" && suggestedSize != null && pnlBudgetDollars == null) return null;
   const root = typeof row.root === "string" && row.root.trim() ? row.root.trim().toUpperCase() : ticker;
   return {
     id,
@@ -591,7 +805,10 @@ function parseTrade(value: unknown): JgVwapTrade | null {
     expiration,
     openedAt,
     contracts,
+    budgetContracts,
     overBudget: row.overBudget === true,
+    atrUsed,
+    suggestedSize,
     entryAsk,
     entryBid,
     entryUnderlying,
@@ -604,7 +821,31 @@ function parseTrade(value: unknown): JgVwapTrade | null {
     exitBid,
     exitReason,
     pnlDollars,
+    pnlBudgetDollars,
   };
+}
+
+function suggestedPnl(trade: JgVwapTrade): number | null {
+  if (trade.status !== "closed" || trade.suggestedSize == null || trade.contracts < 1 || trade.pnlDollars == null) return null;
+  return trade.pnlDollars;
+}
+
+function budgetPnl(trade: JgVwapTrade): number | null {
+  if (trade.status !== "closed") return null;
+  if (trade.pnlBudgetDollars != null) return trade.pnlBudgetDollars;
+  if (trade.suggestedSize == null && trade.pnlDollars != null) return trade.pnlDollars;
+  return null;
+}
+
+function normalizeAtrUsed(value: number | null | undefined): number | null {
+  if (value == null || !Number.isFinite(value) || value < 0) return null;
+  return value;
+}
+
+function usableDailyBar(bar: CandleBar): boolean {
+  return bar.h > 0 && bar.l > 0 && bar.c > 0
+    && Number.isFinite(bar.h) && Number.isFinite(bar.l) && Number.isFinite(bar.c)
+    && bar.h >= bar.l;
 }
 
 function roundCents(value: number): number {
@@ -638,4 +879,8 @@ function asTime(value: unknown): number | null {
 
 function asWhole(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : null;
+}
+
+function asCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
 }

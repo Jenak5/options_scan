@@ -1,17 +1,30 @@
 import { describe, expect, it } from "vitest";
-import { JG_VWAP_BUDGET_DOLLARS, JG_VWAP_TEST } from "@/app/lib/alertConfig";
+import {
+  JG_VWAP_BUDGET_DOLLARS,
+  JG_VWAP_SIZE_0DTE_DOLLARS,
+  JG_VWAP_SIZE_UNKNOWN_DOLLARS,
+  JG_VWAP_TEST,
+} from "@/app/lib/alertConfig";
 import type { CandleBar } from "@/app/lib/candleTypes";
 import type { OptionContract } from "@/app/lib/contract";
 import {
   advanceJgVwap,
   emptyJgVwapBook,
+  formatAtrLine,
+  formatAtrUsed,
   formatJgVwapAlert,
+  jgAtr14,
+  jgAtrUsed,
   jgChainRoots,
+  jgContractsForSize,
   jgImpliedMove,
   jgSessionVwap,
   jgSpreadTooWide,
   jgStopUnderlying,
+  jgSuggestedSize,
+  jgTodayRange,
   jgVwapPnl,
+  jgVwapPnlSeries,
   jgVwapSection,
   jgVwapSide,
   jgVwapSize,
@@ -124,12 +137,31 @@ describe("JG-VWAP paper pass", () => {
     expect(messages).toHaveLength(2);
     expect(messages.every((message) => message.startsWith("<b>PAPER TEST - JG-VWAP</b>"))).toBe(true);
     expect(messages.some((message) => message.includes("Over budget"))).toBe(true);
+    expect(messages.every((message) => message.includes("ATR used") && message.includes("Suggested size"))).toBe(true);
+    expect(messages.every((message) => message.includes("ATR used: unknown | Suggested size: $300"))).toBe(true);
 
     const book = parseJgVwapBook(deps.text());
     const qqq = book.trades.find((trade) => trade.ticker === "QQQ");
     const spx = book.trades.find((trade) => trade.ticker === "SPX");
-    expect(qqq).toMatchObject({ contracts: 4, overBudget: false, putCall: "call", root: "QQQ" });
-    expect(spx).toMatchObject({ contracts: 1, overBudget: true, root: "SPXW" });
+    expect(qqq).toMatchObject({
+      contracts: 1,
+      budgetContracts: 4,
+      overBudget: false,
+      putCall: "call",
+      root: "QQQ",
+      atrUsed: null,
+      suggestedSize: JG_VWAP_SIZE_UNKNOWN_DOLLARS,
+    });
+    expect(spx).toMatchObject({
+      contracts: 0,
+      budgetContracts: 1,
+      overBudget: true,
+      root: "SPXW",
+      atrUsed: null,
+      suggestedSize: JG_VWAP_SIZE_UNKNOWN_DOLLARS,
+    });
+    expect(messages[0]).toBe(formatJgVwapAlert(qqq as JgVwapTrade));
+    expect(messages[1]).toBe(formatJgVwapAlert(spx as JgVwapTrade));
 
     const card = jgVwapSection(book);
     expect(card.label).toBe("JG-VWAP paper test");
@@ -228,8 +260,13 @@ describe("JG-VWAP paper pass", () => {
       contract({ strike: 102, putCall: "call", bid: 3, ask: 3.1 }),
     ])], new Date("2026-10-21T19:45:00.000Z"));
     expect(flat.closed[0]).toMatchObject({ exitReason: "flat", exitBid: 3 });
-    expect(formatJgVwapAlert(trade)).toContain("PAPER TEST - JG-VWAP");
-    expect(formatJgVwapAlert(trade)).toContain("outside the daily A/B alert cap");
+    expect(stopped.closed[0].pnlBudgetDollars).toBe(jgVwapPnl(2, 0.5, trade.budgetContracts));
+    const alert = formatJgVwapAlert(trade);
+    expect(alert).toContain("PAPER TEST - JG-VWAP");
+    expect(alert).toContain("outside the daily A/B alert cap");
+    expect(alert).toContain("ATR used");
+    expect(alert).toContain("Suggested size");
+    expect(alert).toContain("ATR used: unknown | Suggested size: $300");
   });
 
   it("flats an early close at 1:00 PM ET", () => {
@@ -290,10 +327,197 @@ describe("JG-VWAP scorecard", () => {
     };
     expect(await updateJgVwapBook(() => serializeJgVwapBook(book))).toBe(true);
     expect(parseJgVwapBook(await readJgVwapBookText()).trades[0].pnlDollars).toBe(12);
+    expect(parseJgVwapBook(await readJgVwapBookText()).trades[0].atrUsed).toBe(0.52);
+    expect(parseJgVwapBook(await readJgVwapBookText()).trades[0].suggestedSize).toBe(JG_VWAP_SIZE_0DTE_DOLLARS);
     expect(parseJgVwapBook(await readJgVwapBookText()).spxRoot).toBe("SPXW");
     expect(await updateJgVwapBook(() => "{")).toBe(true);
     expect(await updateJgVwapBook(() => serializeJgVwapBook(book))).toBe(false);
     expect(await readJgVwapBookText()).toBe("{");
+  });
+});
+
+describe("JG-VWAP ATR sizing", () => {
+  it("formats the Telegram line and keeps 0DTE size flat when ATR is known", () => {
+    expect(JG_VWAP_SIZE_0DTE_DOLLARS).toBe(250);
+    expect(JG_VWAP_SIZE_UNKNOWN_DOLLARS).toBe(300);
+    expect(formatAtrLine(0.52, 250)).toBe("ATR used: 52% | Suggested size: $250");
+    expect(formatAtrLine(null, 300)).toBe("ATR used: unknown | Suggested size: $300");
+    expect(formatAtrUsed(0.525)).toBe("52.5%");
+    expect(jgSuggestedSize(0.41)).toBe(250);
+    expect(jgSuggestedSize(0.52)).toBe(250);
+    expect(jgSuggestedSize(0.67)).toBe(250);
+    expect(jgSuggestedSize(0.2)).toBe(250);
+    expect(jgSuggestedSize(1.4)).toBe(250);
+    expect(jgSuggestedSize(0)).toBe(250);
+    expect(jgSuggestedSize(null)).toBe(300);
+    expect(jgSuggestedSize(Number.NaN)).toBe(300);
+    const known = sampleTrade({
+      id: "jgvwap-QQQ-2026-10-21",
+      ticker: "QQQ",
+      atrUsed: 0.52,
+      suggestedSize: 250,
+      contracts: 1,
+      budgetContracts: 4,
+    });
+    const text = formatJgVwapAlert(known);
+    expect(text).toContain("ATR used");
+    expect(text).toContain("Suggested size");
+    expect(text).toContain("ATR used: 52% | Suggested size: $250");
+    const missing = sampleTrade({
+      id: "jgvwap-SPX-2026-10-21",
+      ticker: "SPX",
+      atrUsed: null,
+      suggestedSize: 300,
+      contracts: 0,
+      budgetContracts: 1,
+      overBudget: true,
+    });
+    expect(formatJgVwapAlert(missing)).toContain("ATR used: unknown | Suggested size: $300");
+    expect(formatJgVwapAlert(missing)).toContain("not scored");
+  });
+
+  it("averages 14 completed true ranges and leaves today out", () => {
+    const prior = atrDays(15, 125, 100, 100);
+    expect(jgAtr14(prior, DAY)).toBe(25);
+    const withToday = prior.concat([{ t: Date.parse(`${DAY}T16:00:00.000Z`), o: 100, h: 400, l: 50, c: 100, v: 1 }]);
+    expect(jgAtr14(withToday, DAY)).toBe(25);
+    expect(jgAtr14(prior.slice(0, 14), DAY)).toBeNull();
+    expect(jgAtr14([], DAY)).toBeNull();
+    const range = jgTodayRange([{ t: SESSION_OPEN, o: 100, h: 113, l: 100, c: 100, v: 1 }], NOW.getTime());
+    expect(range).toBe(13);
+    expect(jgAtrUsed(range, 25)).toBeCloseTo(0.52, 8);
+    expect(jgAtrUsed(null, 25)).toBeNull();
+    expect(jgAtrUsed(13, null)).toBeNull();
+    expect(jgAtrUsed(13, 0)).toBeNull();
+    expect(jgContractsForSize(2, 250)).toBe(1);
+    expect(jgContractsForSize(10, 250)).toBe(0);
+    expect(jgContractsForSize(2, 875)).toBe(4);
+  });
+
+  it("puts a known ATR on the Telegram text and scores the suggested size", async () => {
+    const messages: string[] = [];
+    const deps = memoryDeps({
+      history(symbol) {
+        if (symbol === "QQQ") return [{ t: SESSION_OPEN, o: 100, h: 113, l: 100, c: 100, v: 1 }];
+        return bars(5000);
+      },
+      daily(symbol) {
+        return symbol === "QQQ" ? atrDays(16, 125, 100, 100) : [];
+      },
+      chain(symbol) {
+        if (symbol === "QQQ") return chain([contract({ strike: 110, putCall: "call", bid: 1.9, ask: 2 })], 110);
+        if (symbol === "SPX") return chain([], null);
+        return chain([], null);
+      },
+      send(message) {
+        messages.push(message);
+        return true;
+      },
+    });
+    const result = await runJgVwapPaper(NOW, deps.deps);
+    expect(result.opened).toBe(1);
+    const qqq = parseJgVwapBook(deps.text()).trades.find((trade) => trade.ticker === "QQQ");
+    expect(qqq).toMatchObject({
+      contracts: 1,
+      budgetContracts: 4,
+      suggestedSize: 250,
+      overBudget: false,
+    });
+    expect(qqq?.atrUsed).toBeCloseTo(0.52, 8);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toBe(formatJgVwapAlert(qqq as JgVwapTrade));
+    expect(messages[0]).toContain("ATR used");
+    expect(messages[0]).toContain("Suggested size");
+    expect(messages[0]).toContain(formatAtrLine(qqq?.atrUsed ?? null, 250));
+    expect(messages[0]).toContain("Suggested size: $250");
+  });
+
+  it("skips suggested P/L at zero contracts and still keeps the $875 line", () => {
+    const book: JgVwapBook = {
+      ...emptyJgVwapBook(),
+      trades: [
+        sampleTrade({ id: "jgvwap-QQQ-2026-10-19", ticker: "QQQ", pnl: 100, pnlBudget: 400, closedAt: 10, contracts: 1, budgetContracts: 4 }),
+        sampleTrade({ id: "jgvwap-QQQ-2026-10-20", ticker: "QQQ", pnl: -40, pnlBudget: -20, closedAt: 20, contracts: 1, budgetContracts: 4 }),
+        sampleTrade({
+          id: "jgvwap-SPX-2026-10-21",
+          ticker: "SPX",
+          pnl: null,
+          pnlBudget: -15,
+          closedAt: 30,
+          contracts: 0,
+          budgetContracts: 1,
+          overBudget: true,
+          suggestedSize: 250,
+          atrUsed: 0.52,
+        }),
+        sampleTrade({
+          id: "jgvwap-QQQ-2026-10-18",
+          ticker: "QQQ",
+          pnl: 80,
+          closedAt: 5,
+          suggestedSize: null,
+          atrUsed: null,
+          contracts: 4,
+          budgetContracts: 4,
+        }),
+      ],
+    };
+    const series = jgVwapPnlSeries(book.trades);
+    expect(series.map((point) => point.budget)).toEqual([80, 480, 460, 445]);
+    expect(series.map((point) => point.suggested)).toEqual([null, 100, 60, 60]);
+    expect(jgVwapSection(book).pnlSeries).toEqual(series);
+    expect(jgVwapSection(emptyJgVwapBook()).pnlSeries).toEqual([]);
+    const qqq = jgVwapSection(book).buckets.find((bucket) => bucket.key === "QQQ");
+    expect(qqq).toMatchObject({ trades: 2, pnl: 60, budgetTrades: 3, pnlBudget: 460 });
+    const over = jgVwapSection(book).buckets.find((bucket) => bucket.key === "SPX-over-budget");
+    expect(over).toMatchObject({ trades: 0, pnl: 0, budgetTrades: 1, pnlBudget: -15 });
+  });
+
+  it("keeps a legacy $875 row when ATR fields are absent", () => {
+    const legacy = {
+      version: 1,
+      trades: [{
+        id: "jgvwap-QQQ-2026-10-19",
+        ticker: "QQQ",
+        putCall: "call",
+        strike: 100,
+        expiration: "2026-10-19",
+        openedAt: 1,
+        contracts: 4,
+        overBudget: false,
+        entryAsk: 2,
+        entryBid: 1.9,
+        entryUnderlying: 102,
+        vwap: 100,
+        iv: 0.2,
+        impliedMove: 1,
+        stopUnderlying: 101,
+        status: "closed",
+        closedAt: 2,
+        exitBid: 3,
+        exitReason: "flat",
+        pnlDollars: 100,
+      }],
+      spxRoot: null,
+      spxUnavailable: false,
+      spxVwapMiss: false,
+    };
+    const trade = parseJgVwapBook(JSON.stringify(legacy)).trades[0];
+    expect(trade).toMatchObject({
+      contracts: 4,
+      budgetContracts: 4,
+      atrUsed: null,
+      suggestedSize: null,
+      pnlDollars: 100,
+      pnlBudgetDollars: 100,
+    });
+    expect(jgVwapPnlSeries([trade])).toEqual([{ at: 2, suggested: null, budget: 100 }]);
+    expect(jgVwapSection({ ...emptyJgVwapBook(), trades: [trade] }).buckets[0]).toMatchObject({
+      trades: 0,
+      pnl: 0,
+      budgetTrades: 1,
+      pnlBudget: 100,
+    });
   });
 });
 
@@ -303,20 +527,29 @@ function snapshot(
   spot: number,
   vwap: number,
   contracts: OptionContract[],
+  atrUsed: number | null = null,
 ): JgSnapshot {
-  return { ticker, root, spot, vwap, contracts };
+  return { ticker, root, spot, vwap, contracts, atrUsed };
 }
 
 function sampleTrade(partial: {
   id: string;
   ticker: "QQQ" | "SPX";
   pnl?: number | null;
+  pnlBudget?: number | null;
   closedAt?: number;
   overBudget?: boolean;
   root?: string;
   expiration?: string;
+  contracts?: number;
+  budgetContracts?: number;
+  atrUsed?: number | null;
+  suggestedSize?: number | null;
 }): JgVwapTrade {
-  const closed = partial.pnl != null;
+  const closed = partial.pnl !== undefined || partial.pnlBudget !== undefined;
+  const contracts = partial.contracts ?? 1;
+  const suggestedSize = partial.suggestedSize === undefined ? JG_VWAP_SIZE_0DTE_DOLLARS : partial.suggestedSize;
+  const scored = suggestedSize != null && contracts >= 1;
   return {
     id: partial.id,
     ticker: partial.ticker,
@@ -325,8 +558,11 @@ function sampleTrade(partial: {
     strike: 100,
     expiration: partial.expiration ?? partial.id.slice(-10),
     openedAt: partial.closedAt ?? 1,
-    contracts: 1,
+    contracts,
+    budgetContracts: partial.budgetContracts ?? 1,
     overBudget: partial.overBudget === true,
+    atrUsed: partial.atrUsed === undefined ? (suggestedSize == null ? null : 0.52) : partial.atrUsed,
+    suggestedSize,
     entryAsk: 2,
     entryBid: 1.9,
     entryUnderlying: 102,
@@ -338,18 +574,30 @@ function sampleTrade(partial: {
     closedAt: closed ? partial.closedAt ?? 1 : null,
     exitBid: closed ? 2 : null,
     exitReason: closed ? "flat" : null,
-    pnlDollars: closed ? partial.pnl ?? 0 : null,
+    pnlDollars: closed && scored ? partial.pnl ?? 0 : null,
+    pnlBudgetDollars: closed ? (partial.pnlBudget === undefined ? partial.pnl ?? 0 : partial.pnlBudget) : null,
   };
+}
+
+function atrDays(count: number, high: number, low: number, close: number): CandleBar[] {
+  const start = Date.parse("2026-09-28T16:00:00.000Z");
+  const out: CandleBar[] = [];
+  for (let i = 0; i < count; i++) {
+    out.push({ t: start + i * 86_400_000, o: close, h: high, l: low, c: close, v: 1 });
+  }
+  return out;
 }
 
 function memoryDeps(input: {
   history: (symbol: string) => CandleBar[];
+  daily?: (symbol: string) => CandleBar[];
   chain: (symbol: string) => ChainParseResult;
   send?: (message: string) => boolean;
 }): { deps: JgVwapDeps; text: () => string | null } {
   let stored: string | null = null;
   const deps: JgVwapDeps = {
     history: async (symbol) => input.history(symbol),
+    daily: async (symbol) => (input.daily ? input.daily(symbol) : []),
     chain: async (symbol) => input.chain(symbol),
     readBook: async () => stored,
     writeBook: async (change) => {

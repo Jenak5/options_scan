@@ -2,9 +2,12 @@ import type { CandleBar } from "@/app/lib/candleTypes";
 import {
   advanceJgVwap,
   formatJgVwapAlert,
+  jgAtr14,
+  jgAtrUsed,
   jgChainRoots,
   jgHistorySymbol,
   jgSessionVwap,
+  jgTodayRange,
   jgVwapSection,
   jgVwapSessionOpen,
   parseJgVwapBook,
@@ -23,13 +26,16 @@ import { readJgVwapBookText, updateJgVwapBook } from "@/app/lib/schwabStore";
 import { sendTelegramAlert } from "@/app/lib/telegram";
 
 /**
- * Scheduled paper pass for JG-VWAP. It reads chains and 1-minute candles,
- * writes its own log, and sends PAPER TEST telegrams.
+ * Scheduled paper pass for JG-VWAP. It reads chains, 1-minute candles, and
+ * daily candles from the same price history, writes its own log, and sends
+ * PAPER TEST telegrams through sendTelegramAlert.
  * It does not call the A/B alert chooser and it does not write the alert book.
  */
 
 export interface JgVwapDeps {
   history: (symbol: string, now: Date) => Promise<CandleBar[]>;
+  /** Completed daily bars from the same price-history source as the minute candles. */
+  daily: (symbol: string, now: Date) => Promise<CandleBar[]>;
   chain: (symbol: string, day: string) => Promise<ChainParseResult>;
   readBook: () => Promise<string | null>;
   writeBook: (change: (current: string | null) => string) => Promise<boolean>;
@@ -63,8 +69,13 @@ export async function runJgVwapPaper(now: Date, deps: JgVwapDeps = defaultDeps()
 
   for (let i = 0; i < JG_VWAP_TICKERS.length; i++) {
     const ticker = JG_VWAP_TICKERS[i];
-    const bars = await deps.history(jgHistorySymbol(ticker), now);
+    const symbol = jgHistorySymbol(ticker);
+    const [bars, daily] = await Promise.all([
+      deps.history(symbol, now),
+      deps.daily(symbol, now),
+    ]);
     const session = jgSessionVwap(bars, now.getTime());
+    const atrUsed = jgAtrUsed(jgTodayRange(bars, now.getTime()), jgAtr14(daily, day));
     if (ticker === "SPX" && !session) spxVwapMiss = true;
     const loaded = await loadChain(jgChainRoots(ticker), day, deps);
     if (ticker === "SPX") {
@@ -79,6 +90,7 @@ export async function runJgVwapPaper(now: Date, deps: JgVwapDeps = defaultDeps()
       spot,
       vwap: session?.vwap ?? null,
       contracts: loaded.chain?.contracts ?? [],
+      atrUsed,
     });
   }
 
@@ -102,6 +114,7 @@ export async function runJgVwapPaper(now: Date, deps: JgVwapDeps = defaultDeps()
   const stored = parseJgVwapBook(await deps.readBook());
   const opened = stored.trades.filter((trade) => openedById.has(trade.id));
   for (let i = 0; i < opened.length; i++) {
+    // Same Telegram send as the paper test in PR #66. The ATR line is inside the message.
     await deps.send(formatJgVwapAlert(opened[i]));
   }
   return {
@@ -145,6 +158,7 @@ async function loadChain(
 function defaultDeps(): JgVwapDeps {
   return {
     history: loadHistory,
+    daily: loadDaily,
     chain: loadOptionChain,
     readBook: readJgVwapBookText,
     writeBook: updateJgVwapBook,
@@ -162,6 +176,23 @@ async function loadHistory(symbol: string, now: Date): Promise<CandleBar[]> {
       frequency: 1,
       needExtendedHoursData: false,
       startDate: now.getTime() - 36 * 60 * 60 * 1000,
+      endDate: now.getTime(),
+    });
+    return candles.map(toBar);
+  } catch {
+    return [];
+  }
+}
+
+async function loadDaily(symbol: string, now: Date): Promise<CandleBar[]> {
+  try {
+    const candles = await getPriceHistory({
+      symbol,
+      periodType: "month",
+      period: 2,
+      frequencyType: "daily",
+      frequency: 1,
+      needExtendedHoursData: false,
       endDate: now.getTime(),
     });
     return candles.map(toBar);
