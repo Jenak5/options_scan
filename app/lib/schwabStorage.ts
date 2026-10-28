@@ -51,6 +51,12 @@ export const SCHWAB_BLOB_TRADE_LOG_PATH = "schwab/trade-log.json";
 export const SCHWAB_BLOB_SHADOW_BOOK_PATH = "schwab/shadow-book.json";
 
 /**
+ * Private blob for the JG-VWAP paper test. Not a token, not the alert book,
+ * and not the A/B shadow scorecard.
+ */
+export const SCHWAB_BLOB_JG_VWAP_PATH = "schwab/jg-vwap-book.json";
+
+/**
  * Small private blob for the last alert-book, flow, or trade-log failure.
  * Written without ifMatch so a status line can be saved even when a
  * conditional overwrite of the alert book is rejected.

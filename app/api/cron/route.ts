@@ -17,6 +17,7 @@ import { TICKER_GROUP_PAUSE_MS, flowCronSliceNote, planCronScan, selectAlertRows
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import type { ResearchCandidate } from "@/app/lib/researchTrack";
 import { earningsDateMapForRows, windowEarningsDateForContract } from "@/app/lib/earningsWindow";
+import { runJgVwapPaper } from "@/app/lib/jgVwapRun";
 import { openMissingShadows, openScanTickers, recordEarningsWindowShadows, recordExperimentalShadows, recordVwapRejectionPuts, runShadowPass } from "@/app/lib/shadowStore";
 import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow, isMarketDay } from "@/app/lib/marketHours";
 import { preferredDataSource } from "@/app/lib/dataSourcePref";
@@ -425,6 +426,14 @@ async function handleCron(request: NextRequest) {
       } else {
         log.push(`${row.ticker}: saved in the alert book, but Telegram send failed — check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID`);
       }
+    }
+    try {
+      const jg = await runJgVwapPaper(now);
+      const noun = jg.opened === 1 ? "entry" : "entries";
+      log.push(`JG-VWAP paper: ${jg.opened} new ${noun}, ${jg.closed} closed (${jg.saved ? "saved" : "not saved"}, PAPER TEST, outside the A/B cap). ${jg.logNote}`);
+    } catch (err) {
+      const line = err instanceof Error ? err.message.slice(0, 160) : "JG-VWAP paper update failed";
+      log.push(`JG-VWAP paper update failed: ${line}`);
     }
     try {
       const openedLate = await openMissingShadows();

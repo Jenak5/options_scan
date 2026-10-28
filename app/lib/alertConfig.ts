@@ -213,6 +213,31 @@ export const VWAP_PUT_TEST = {
 } as const;
 
 /**
+ * Per-trade paper budget for the JG-VWAP test.
+ * Contract count and the over-budget flag both read this number.
+ * It is her max loss on one contract. Change it here only.
+ */
+export const JG_VWAP_BUDGET_DOLLARS = 875;
+
+/**
+ * Paper-only 0DTE test. Not a grade, and not part of the A/B daily alert cap.
+ * The budget above is the only dollar amount used for size and the over-budget flag.
+ */
+export const JG_VWAP_TEST = {
+  label: "JG-VWAP paper test",
+  budgetDollars: JG_VWAP_BUDGET_DOLLARS,
+  minTrust: 30,
+  /** Dollars per contract, each side. Buy at the ask and sell at the bid. */
+  feePerSide: 0.65,
+  /** Skip the entry when (ask − bid) / mid is above this. */
+  maxSpreadOfMid: 0.10,
+  /** Calls need price >= VWAP × (1 − band). Puts need price <= VWAP × (1 + band). */
+  vwapBand: 0.001,
+  /** Stop distance is this fraction of the day's implied move, against the entry. */
+  stopFractionOfImpliedMove: 0.75,
+} as const;
+
+/**
  * A second result for each saved A or B.
  * The live scorecard exit is unchanged. This row exits at +40%, -25%, or 60 minutes.
  * It is not a grade and it is not sent. It does not add a quote.
