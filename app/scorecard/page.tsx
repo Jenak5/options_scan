@@ -67,6 +67,45 @@ interface PaperBucket {
   totalPnlFlat: number;
 }
 
+interface JgBucket {
+  key: string;
+  label: string;
+  trades: number;
+  open: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  pnl: number;
+  pnlWithoutTop3: number | null;
+  maxDrawdownDollars: number;
+  maxDrawdownVsAccount: number;
+}
+
+interface JgRow {
+  id: string;
+  ticker: string;
+  root: string;
+  putCall: "call" | "put";
+  strike: number;
+  expiration: string;
+  contracts: number;
+  overBudget: boolean;
+  status: "open" | "closed";
+  exitReason: "stop" | "flat" | null;
+  pnlDollars: number | null;
+}
+
+interface JgSection {
+  label: string;
+  note: string;
+  trustNote: string;
+  tooFew: boolean;
+  budgetDollars: number;
+  accountDollars: number;
+  buckets: JgBucket[];
+  rows: JgRow[];
+}
+
 interface Experiment {
   label: string;
   note: string;
@@ -125,6 +164,7 @@ interface Scorecard {
   experimentalEarnings?: Experiment;
   vwapPuts?: Experiment;
   timeStop60?: Experiment;
+  jgVwap?: JgSection | null;
 }
 
 export default function ScorecardPage() {
@@ -246,6 +286,9 @@ export default function ScorecardPage() {
                 empty="No 60-minute shadows yet. Each saved A or B gets one row here. The A and B result above stays on its own exits."
                 fallbackLabel="Test: 60-minute time stop"
               />
+            )}
+            {page.jgVwap ? <JgVwapPanel section={page.jgVwap} /> : (
+              <Note color="#fbbf24">JG-VWAP paper test could not be read. The totals above are unchanged.</Note>
             )}
 
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, marginTop: 22 }}>
@@ -454,6 +497,64 @@ function ExperimentPanel({ section, empty, fallbackLabel }: { section: Experimen
                   </tr>
                 );
               })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function JgVwapPanel({ section }: { section: JgSection }) {
+  const account = section.accountDollars.toLocaleString("en-US");
+  return (
+    <section style={{ ...cardStyle, borderColor: "rgba(251,191,36,0.35)" }}>
+      <h2 style={heading}>{section.label}</h2>
+      <Note color="#94a3b8">{section.note}</Note>
+      <Note color={section.tooFew ? "#fbbf24" : "#94a3b8"}>{section.trustNote}</Note>
+      <div style={{ display: "grid", gap: 10 }}>
+        {section.buckets.map((bucket) => (
+          <section key={bucket.key} style={{ ...cardStyle, marginBottom: 0 }}>
+            <h3 style={{ margin: "0 0 4px", fontSize: 16 }}>{bucket.label}</h3>
+            <Stat label="Trades" value={String(bucket.trades)} />
+            <Stat label="Open" value={String(bucket.open)} />
+            <Stat label="Win %" value={bucket.winRate == null ? "n/a" : percent(bucket.winRate)} />
+            <Stat label="P/L" value={bucket.trades === 0 ? "n/a" : signed(bucket.pnl)} />
+            <Stat label="P/L without top 3" value={bucket.pnlWithoutTop3 == null ? "n/a" : signed(bucket.pnlWithoutTop3)} />
+            <Stat
+              label={`Max drawdown vs $${account}`}
+              value={`${signed(bucket.maxDrawdownDollars).replace("+", "")} (${percent(bucket.maxDrawdownVsAccount)})`}
+            />
+          </section>
+        ))}
+      </div>
+      {section.rows.length > 0 && (
+        <div style={{ overflowX: "auto", marginTop: 10 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+            <thead>
+              <tr>
+                {["Ticker", "Right", "Contracts", "Status", "Exit", "P/L", "Flag"].map((label) => (
+                  <th key={label} style={thStyle}>{label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {section.rows.map((row) => (
+                <tr key={row.id}>
+                  <td style={tdStyle}>
+                    {row.ticker}
+                    <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>
+                      ${row.strike} · {row.expiration}{row.root !== row.ticker ? ` · ${row.root}` : ""}
+                    </div>
+                  </td>
+                  <td style={tdStyle}>{row.putCall === "put" ? "Put" : "Call"}</td>
+                  <td style={tdStyle}>{row.contracts}</td>
+                  <td style={tdStyle}>{row.status === "open" ? "Open" : "Closed"}</td>
+                  <td style={tdStyle}>{row.exitReason === "stop" ? "Implied-move stop" : row.exitReason === "flat" ? "Flat by the time exit" : "Open"}</td>
+                  <td style={{ ...tdStyle, color: pnlColor(row.pnlDollars) }}>{row.pnlDollars == null ? "n/a" : signed(row.pnlDollars)}</td>
+                  <td style={{ ...tdStyle, color: row.overBudget ? "#fbbf24" : "#94a3b8" }}>{row.overBudget ? "Over budget" : ""}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>

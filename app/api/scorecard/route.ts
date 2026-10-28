@@ -5,6 +5,7 @@ import { readCandleCoverage } from "@/app/lib/candleStore";
 import { withOpeningLabels } from "@/app/lib/openingCheck";
 import { emptyScanHealth, scanFreshness } from "@/app/lib/scanHealth";
 import { readScanHealth } from "@/app/lib/schwabStore";
+import { loadJgVwapSection } from "@/app/lib/jgVwapRun";
 import { loadShadowPage, shadowCsv } from "@/app/lib/shadowStore";
 
 export const dynamic = "force-dynamic";
@@ -28,14 +29,16 @@ export async function GET(request: NextRequest) {
   }
 
   const now = new Date();
-  const [page, health, book, candles] = await Promise.all([
+  const [page, health, book, candles, jgVwap] = await Promise.all([
     loadShadowPage(now),
     readScanHealth().catch(() => emptyScanHealth()),
     loadAlertBook(),
     readCandleCoverage().catch(() => null),
+    loadJgVwapSection().catch(() => null),
   ]);
   return NextResponse.json({
     ...withOpeningLabels(page, book.records),
+    jgVwap,
     freshness: scanFreshness(health),
     candles,
   });
