@@ -18,6 +18,7 @@ import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import type { ResearchCandidate } from "@/app/lib/researchTrack";
 import { earningsDateMapForRows, windowEarningsDateForContract } from "@/app/lib/earningsWindow";
 import { formatAvwapPaperLog, runAvwapPaper } from "@/app/lib/avwapPaperRun";
+import { runCallsPaper } from "@/app/lib/callsPaperRun";
 import { runJgVwapPaper } from "@/app/lib/jgVwapRun";
 import { openMissingShadows, openScanTickers, recordEarningsWindowShadows, recordExperimentalShadows, recordVwapRejectionPuts, runShadowPass } from "@/app/lib/shadowStore";
 import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow, isMarketDay } from "@/app/lib/marketHours";
@@ -443,6 +444,15 @@ async function handleCron(request: NextRequest) {
       } else {
         log.push(`${row.ticker}: saved in the alert book, but Telegram send failed — check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID`);
       }
+    }
+    try {
+      const calls = await runCallsPaper(now);
+      const callNoun = calls.opened === 1 ? "entry" : "entries";
+      const flag = calls.drawdownFlag ? " Drawdown flag over $1,500." : "";
+      log.push(`Calls paper: ${calls.openedA} long-call and ${calls.openedS} spread, ${calls.opened} new ${callNoun}, ${calls.closed} closed (${calls.saved ? "saved" : "not saved"}, PAPER ONLY).${flag} ${calls.logNote}`);
+    } catch (err) {
+      const line = err instanceof Error ? err.message.slice(0, 160) : "Calls paper update failed";
+      log.push(`Calls paper update failed: ${line}`);
     }
     try {
       const jg = await runJgVwapPaper(now);

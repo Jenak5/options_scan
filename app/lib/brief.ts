@@ -1,6 +1,7 @@
 import type { StoredAlert } from "@/app/lib/alertBook";
 import { TRADE_RULES } from "@/app/lib/alertConfig";
 import { avwapPaperBrief, type AvwapPaperBook, type AvwapPaperBrief, type AvwapPaperTrade } from "@/app/lib/avwapPaper";
+import { callsPaperBrief, emptyCallsPaperBook, type CallsPaperBook, type CallsPaperBrief } from "@/app/lib/callsPaper";
 import { planExits } from "@/app/lib/exits";
 import { calendarDaysBetween, newYorkDate, notionalPremium } from "@/app/lib/flow";
 import type { HealthReport } from "@/app/lib/healthReport";
@@ -240,6 +241,8 @@ export interface MarketBrief {
   paper: BriefPaper;
   /** Gap-day anchored VWAP paper trades. Separate from the manual trade log. */
   avwapPaper: AvwapPaperBrief;
+  /** Flush-then-reclaim call paper log. Separate from the manual trade log and from AVWAP. */
+  callsPaper: CallsPaperBrief;
   /** Same fields as GET /api/health. */
   scan: HealthReport;
 }
@@ -256,8 +259,10 @@ export function buildMarketBrief(input: {
   paperQuoteMisses?: Readonly<Record<string, string>>;
   /** Gap-day anchored VWAP paper book. Empty when that log has no rows. */
   avwapTrades?: readonly AvwapPaperTrade[];
-  /** Full paper book, so the brief can show the last check and each symbol's reason. */
+  /** Full AVWAP book, so the brief can show the last check and each symbol's reason. */
   avwapBook?: AvwapPaperBook | null;
+  /** Flush-then-reclaim call paper book. Empty when that log has no rows. */
+  callsBook?: CallsPaperBook;
 }): MarketBrief {
   const tradingDay = chicagoDate(input.now);
   const previous = tradingDay ? previousChicagoTradingDay(tradingDay) : null;
@@ -317,6 +322,7 @@ export function buildMarketBrief(input: {
       dailyStopAfter: DAILY_STOP_CONSECUTIVE_LOSSES,
     },
     avwapPaper: avwapPaperBrief(input.avwapBook?.trades ?? input.avwapTrades ?? [], input.now, input.avwapBook),
+    callsPaper: callsPaperBrief(input.callsBook ?? emptyCallsPaperBook(), input.now),
     scan: input.scan,
   };
 }
