@@ -31,6 +31,7 @@ import { formatRealertHtml, formatVerdictHtml, paperTradeLinkHtml, sendTelegramA
 import type { AlertVerdict } from "@/app/lib/verdict";
 import { formatVolArbSummary, type VolArbReading, type VolSignal } from "@/app/lib/volArb";
 import { scanVolArb } from "@/app/lib/volScan";
+import { runUnusualFlowPass } from "@/app/lib/unusualFlowStore";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -44,6 +45,8 @@ export const maxDuration = 300;
 // Schwab read on a full-day NYSE holiday. Early closes still run.
 // Each run scans the original 15 names, any open shadow or paper ticker,
 // and one group of the added names. maxDuration is 300 seconds.
+// Unusual flow is scored after the AVWAP and paper checks, from the chains
+// this run already fetched. It does not send Telegram.
 //
 // Auth is Authorization: Bearer <CRON_SECRET> only. A query secret is ignored.
 // Telegram and the alert book get letter A and B only, capped per Chicago day.
@@ -480,6 +483,21 @@ async function handleCron(request: NextRequest) {
     } catch (err) {
       rethrowIfSchwabOnly(err);
       log.push("Shadow alert update failed");
+    }
+    try {
+      const unusual = await runUnusualFlowPass({ rows: scan.rows, watchlist, now });
+      if (unusual.skipped === "holiday") {
+        log.push("Unusual flow skipped: market holiday");
+      } else if (!unusual.saved) {
+        log.push("Unusual flow was not saved");
+      } else {
+        const flags = unusual.newFlags === 1 ? "flag" : "flags";
+        const marks = unusual.outcomes === 1 ? "mark" : "marks";
+        log.push(`Unusual flow: ${unusual.newFlags} new ${flags}, ${unusual.outcomes} outcome ${marks} (no Telegram)`);
+      }
+    } catch (err) {
+      rethrowIfSchwabOnly(err);
+      log.push("Unusual flow update failed");
     }
     const outcome = skippedNames.length > 0 ? "partial" : "success";
     summary.outcome = outcome;

@@ -69,6 +69,12 @@ export const SCHWAB_BLOB_AVWAP_PAPER_PATH = "schwab/avwap-paper-book.json";
 export const SCHWAB_BLOB_CALLS_PAPER_PATH = "schwab/calls-paper-book.json";
 
 /**
+ * Private blob for unusual-flow flags and their later marks.
+ * Not a token, not an order, and not a Telegram alert.
+ */
+export const SCHWAB_BLOB_UNUSUAL_PATH = "schwab/unusual-flow.json";
+
+/**
  * Small private blob for the last alert-book, flow, or trade-log failure.
  * Written without ifMatch so a status line can be saved even when a
  * conditional overwrite of the alert book is rejected.

@@ -469,6 +469,8 @@ describe("market brief", () => {
     expect(brief.paper.todayLossStreak).toBe(0);
     expect(brief.paper.dailyStop).toBe(false);
     expect(brief.paper.dailyStopAfter).toBe(2);
+    expect(brief.unusualFlow.top).toEqual([]);
+    expect(brief.unusualFlow.note).toContain("No Telegram");
     expect(brief.scan).toEqual(scan);
 
     const text = JSON.stringify(brief);

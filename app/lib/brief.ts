@@ -15,6 +15,7 @@ import {
   weeklyDrawdownThreshold,
   type StoredTrade,
 } from "@/app/lib/trades";
+import { unusualBrief, type BriefUnusual, type UnusualFlag } from "@/app/lib/unusualFlow";
 
 /**
  * Read-only packet for a pre-market, midday, or close brief.
@@ -243,6 +244,8 @@ export interface MarketBrief {
   avwapPaper: AvwapPaperBrief;
   /** Flush-then-reclaim call paper log. Separate from the manual trade log and from AVWAP. */
   callsPaper: CallsPaperBrief;
+  /** Up to five unusual-flow flags saved today. No Telegram alert. */
+  unusualFlow: BriefUnusual;
   /** Same fields as GET /api/health. */
   scan: HealthReport;
 }
@@ -263,6 +266,8 @@ export function buildMarketBrief(input: {
   avwapBook?: AvwapPaperBook | null;
   /** Flush-then-reclaim call paper book. Empty when that log has no rows. */
   callsBook?: CallsPaperBook;
+  /** Unusual-flow flags already stored. Empty when none have been saved. */
+  unusualFlags?: readonly UnusualFlag[];
 }): MarketBrief {
   const tradingDay = chicagoDate(input.now);
   const previous = tradingDay ? previousChicagoTradingDay(tradingDay) : null;
@@ -323,6 +328,7 @@ export function buildMarketBrief(input: {
     },
     avwapPaper: avwapPaperBrief(input.avwapBook?.trades ?? input.avwapTrades ?? [], input.now, input.avwapBook),
     callsPaper: callsPaperBrief(input.callsBook ?? emptyCallsPaperBook(), input.now),
+    unusualFlow: unusualBrief(input.unusualFlags ?? [], tradingDay),
     scan: input.scan,
   };
 }

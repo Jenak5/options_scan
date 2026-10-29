@@ -24,6 +24,7 @@ import { annotateFlowRows, carryPriorSession } from "@/app/lib/marketContext";
 import { chainInterestFromContracts, type ChainInterest } from "@/app/lib/openingCheck";
 import { quotePointFromContract, type FlowQuotePoint } from "@/app/lib/prints";
 import { BothSourcesFailedError, getOptionChain, requireMarketData, rethrowIfSchwabOnly } from "@/app/lib/marketData";
+import { getTradeSideDataAvailable } from "@/app/lib/marketDataHealth";
 import { readFlowSnapshots, writeFlowSnapshots } from "@/app/lib/schwabStore";
 
 /**
@@ -68,6 +69,8 @@ interface CachedChain {
   delayed: boolean;
   underlyingPrice: number | null;
   livePoints: Record<string, FlowQuotePoint[]>;
+  /** TimeAndSale was available on the chain fetch that filled this cache. */
+  tradeSideDataAvailable: boolean;
 }
 
 /** Per ticker, so a cron slice and a Flow page group can share a recent chain. */
@@ -124,6 +127,7 @@ export async function scanEstimatedFlow(options?: {
       await pace(Date.now());
       try {
         const chain = await getOptionChain(flowChainRequest(ticker, asOf));
+        const tradeSideDataAvailable = getTradeSideDataAvailable() === "yes";
         const levels = await keyLevelsForTicker({
           ticker,
           spot: chain.underlyingPrice,
@@ -142,6 +146,7 @@ export async function scanEstimatedFlow(options?: {
           activity: activityScore(chain.contracts, previous[ticker] ?? null, asOf),
           livePoints: livePointsFromContracts(chain.contracts, sampledAt),
           reused: false,
+          tradeSideDataAvailable,
         });
       } catch (err) {
         rethrowIfSchwabOnly(err);
@@ -168,6 +173,7 @@ export async function scanEstimatedFlow(options?: {
           const chain = await getOptionChain(flowChainRequest(ticker, asOf));
           const sampledAt = Date.now();
           pass.contracts = chain.contracts;
+          pass.tradeSideDataAvailable = getTradeSideDataAvailable() === "yes";
           pass.delayed = pass.delayed || chain.delayed;
           pass.underlyingPrice = chain.underlyingPrice;
           appendLivePoints(pass.livePoints, chain.contracts, sampledAt);
@@ -189,6 +195,7 @@ export async function scanEstimatedFlow(options?: {
       delayed: pass.delayed,
       underlyingPrice: pass.underlyingPrice,
       livePoints: copyLivePoints(pass.livePoints),
+      tradeSideDataAvailable: pass.tradeSideDataAvailable,
     });
   }
 
@@ -206,6 +213,7 @@ export async function scanEstimatedFlow(options?: {
       previous: prior,
       now: asOf,
       livePoints: pass.livePoints,
+      tradeSideDataAvailable: pass.tradeSideDataAvailable,
     }).map((row) => ({ ...row, levels: pass.levels, earnings: pass.earnings }));
     pass.contracts = [];
     rows.push(...scored);
@@ -264,6 +272,8 @@ interface TickerPass {
   livePoints: Record<string, FlowQuotePoint[]>;
   /** True when this pass reused a chain fetched inside the last 5 minutes. */
   reused: boolean;
+  /** Snapshotted immediately after this ticker's chain returned. */
+  tradeSideDataAvailable: boolean;
 }
 
 function recentChain(ticker: string, now: number): TickerPass | null {
@@ -279,6 +289,7 @@ function recentChain(ticker: string, now: number): TickerPass | null {
     activity: 0,
     livePoints: copyLivePoints(hit.livePoints),
     reused: true,
+    tradeSideDataAvailable: hit.tradeSideDataAvailable === true,
   };
 }
 

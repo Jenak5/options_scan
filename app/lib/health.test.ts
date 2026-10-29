@@ -80,6 +80,13 @@ describe("health report", () => {
         },
       },
       callsPaper: emptyCallsPaperHealth(),
+      unusualFlow: {
+        flagsToday: 0,
+        bullishToday: 0,
+        bearishToday: 0,
+        awaitingOutcome: 0,
+        lastFlagAt: null,
+      },
       marketData: emptyMarketDataHealth(),
     });
     expect(JSON.stringify(report)).not.toContain("token");
