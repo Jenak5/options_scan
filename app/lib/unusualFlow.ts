@@ -267,6 +267,16 @@ export function unusualUniverse(watchlist: readonly string[]): string[] {
  * Buy, ask, and at-ask are the offer. Sell, bid, and at-bid are the bid.
  * Anything else, including an estimated side, is not a tape aggressor.
  */
+/**
+ * DXLink TimeAndSale uses buy and sell. unknown and anything else are not a tape side,
+ * so the caller falls back to the last-versus-bid/ask estimate.
+ */
+export function tapeFromAggressorSide(value: unknown): TapeSide | null {
+  if (value === "buy") return "ask";
+  if (value === "sell") return "bid";
+  return null;
+}
+
 export function parseTradeAggressor(value: unknown): TapeSide | null {
   if (typeof value !== "string") return null;
   const text = value.trim().toLowerCase().replace(/[_-]+/g, " ");
@@ -298,7 +308,7 @@ export function intervalsFromFlowRows(rows: readonly FlowRow[]): UnusualInterval
     const row = rows[i];
     if (!Number.isFinite(row.volume) || row.volume < 0) continue;
     if (!Number.isFinite(row.openInterest) || row.openInterest < 0) continue;
-    const extra = row as FlowRow & { tradeAggressor?: unknown; trades?: unknown };
+    const extra = row as FlowRow & { tradeAggressor?: unknown; trades?: unknown; aggressorSide?: unknown };
     out.push({
       symbol: row.ticker.trim().toUpperCase(),
       putCall: row.putCall,
@@ -314,7 +324,7 @@ export function intervalsFromFlowRows(rows: readonly FlowRow[]): UnusualInterval
       mark: finitePositive(row.mid),
       dte: row.dte,
       underlyingPrice: finitePositive(row.underlyingPrice),
-      tradeAggressor: parseTradeAggressor(extra.tradeAggressor),
+      tradeAggressor: tapeFromAggressorSide(extra.aggressorSide) ?? parseTradeAggressor(extra.tradeAggressor),
       trades: parseTrades(extra.trades),
     });
   }

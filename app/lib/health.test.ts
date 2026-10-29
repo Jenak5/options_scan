@@ -3,6 +3,7 @@ import type { StoredAlert } from "@/app/lib/alertBook";
 import { hasHealthBearer } from "@/app/lib/auth";
 import { emptyCallsPaperHealth } from "@/app/lib/callsPaper";
 import { buildHealthReport, countShadowTotals, trackedAlertCounts } from "@/app/lib/healthReport";
+import { emptyMarketDataHealth } from "@/app/lib/marketDataHealth";
 import { emptyScanHealth } from "@/app/lib/scanHealth";
 import { shadowFromAlert, type ShadowTrade } from "@/app/lib/shadow";
 
@@ -86,6 +87,7 @@ describe("health report", () => {
         awaitingOutcome: 0,
         lastFlagAt: null,
       },
+      marketData: emptyMarketDataHealth(),
     });
     expect(JSON.stringify(report)).not.toContain("token");
     expect(JSON.stringify(report)).not.toContain("secret");

@@ -1,20 +1,24 @@
 import type { OptionContract, PutCall } from "@/app/lib/contract";
 import { calendarDaysBetween, flowChainRequest, newYorkDate } from "@/app/lib/flow";
 import { getOptionChain, getQuotes } from "@/app/lib/marketData";
-import { parseTradeAggressor, type TapeSide, type TradePrint, type UnusualInterval } from "@/app/lib/unusualFlow";
+import { getTradeSideDataAvailable } from "@/app/lib/marketDataHealth";
+import { tapeFromAggressorSide, type TapeSide, type TradePrint, type UnusualInterval } from "@/app/lib/unusualFlow";
 
 /**
  * The only market-data reads for unusual flow.
  *
- * These are not Tastytrade-first. They call the chain and quote helpers this
- * app uses today. An upcoming pull request adds a shared provider layer with
- * Tastytrade as the primary source and Schwab as the fallback. These two
- * functions will move onto that layer when it lands. The screener itself does
- * not choose a source, and this file does not build that switch.
+ * Both functions go through the shared provider in app/lib/marketData.ts:
+ * Tastytrade first, Schwab when that call fails. This file does not pick a
+ * source and does not call either broker directly.
  *
- * The cron does not call them. It scores the chain the scan already fetched,
+ * DXLink TimeAndSale aggressor side is used only when that fetch reports
+ * tradeSideDataAvailable yes. buy is the ask, sell is the bid. unknown, or
+ * a no on that flag, falls back to the last-versus-bid/ask estimate.
+ *
+ * The cron does not call these. It scores the chain the scan already fetched,
  * after the AVWAP check and the other paper checks, so this pass does not add
- * a request and does not run ahead of those checks.
+ * a request and does not run ahead of those checks. That scan copies the
+ * aggressor onto the row only when the same flag was yes for that chain.
  *
  * Chains and quotes only. No orders, accounts, or transactions.
  */
@@ -42,11 +46,12 @@ export interface UnusualChainSnapshot {
 
 export async function fetchUnusualChain(symbol: string, now: Date): Promise<UnusualChainSnapshot> {
   const chain = await getOptionChain(flowChainRequest(symbol, now));
+  const tape = getTradeSideDataAvailable() === "yes";
   return {
     symbol: symbol.trim().toUpperCase(),
     underlyingPrice: chain.underlyingPrice,
     delayed: chain.delayed,
-    contracts: chain.contracts.map(contractFromChain),
+    contracts: chain.contracts.map((contract) => contractFromChain(contract, tape)),
   };
 }
 
@@ -97,8 +102,8 @@ export function intervalsFromChain(
   return out;
 }
 
-function contractFromChain(contract: OptionContract): UnusualChainContract {
-  const extra = contract as OptionContract & { aggressor?: unknown; tradeSide?: unknown; trades?: unknown };
+function contractFromChain(contract: OptionContract, tape: boolean): UnusualChainContract {
+  const extra = contract as OptionContract & { trades?: unknown };
   return {
     expiration: contract.expiration,
     strike: contract.strike,
@@ -108,8 +113,8 @@ function contractFromChain(contract: OptionContract): UnusualChainContract {
     last: contract.last,
     volume: contract.volume,
     openInterest: contract.openInterest,
-    tradeAggressor: parseTradeAggressor(extra.aggressor ?? extra.tradeSide),
-    trades: parseChainTrades(extra.trades),
+    tradeAggressor: tape ? tapeFromAggressorSide(contract.aggressorSide) : null,
+    trades: tape ? parseChainTrades(extra.trades) : undefined,
   };
 }
 
@@ -123,7 +128,7 @@ function parseChainTrades(value: unknown): TradePrint[] | undefined {
     if (typeof trade.size !== "number" || !(trade.size > 0)) continue;
     trades.push({
       size: trade.size,
-      aggressor: parseTradeAggressor(trade.aggressor),
+      aggressor: tapeFromAggressorSide(trade.aggressor),
       price: typeof trade.price === "number" ? trade.price : null,
       bid: typeof trade.bid === "number" ? trade.bid : null,
       ask: typeof trade.ask === "number" ? trade.ask : null,

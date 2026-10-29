@@ -202,6 +202,12 @@ export interface FlowRow {
   liquidityPasses: boolean;
   delayed: boolean;
   underlyingPrice: number | null;
+  /**
+   * DXLink TimeAndSale side from the chain that built this row.
+   * Set only when that fetch reported tradeSideDataAvailable yes.
+   * Absent or unknown means the unusual-flow screener estimates the side.
+   */
+  aggressorSide?: "buy" | "sell" | "unknown" | null;
   /** Support and resistance for this ticker. Null until a history read fills them. */
   levels: KeyLevels | null;
   /** Quote-derived prints. Null summary when no new trade was seen. */
@@ -731,6 +737,8 @@ export function scoreChain(input: {
   maxExpirations?: number;
   /** Quote points from this scan, including any short follow-up reads. */
   livePoints?: Record<string, FlowQuotePoint[]>;
+  /** True when the chain fetch that produced these contracts had TimeAndSale available. */
+  tradeSideDataAvailable?: boolean;
 }): FlowRow[] {
   const today = newYorkDate(input.now);
   const limited = keepScanExpirations(
@@ -759,6 +767,7 @@ export function scoreChain(input: {
       now: input.now,
       dte,
       livePoints: input.livePoints?.[key] ?? null,
+      tradeSideDataAvailable: input.tradeSideDataAvailable === true,
     }));
   });
   rows.sort((a, b) => b.score - a.score || (b.notionalPremium ?? 0) - (a.notionalPremium ?? 0));
@@ -889,6 +898,7 @@ function scoreContract(input: {
   now: Date;
   dte: number;
   livePoints: FlowQuotePoint[] | null;
+  tradeSideDataAvailable: boolean;
 }): FlowRow {
   const contract = input.contract;
   const liquidity = liquidityOf(contract);
@@ -950,6 +960,7 @@ function scoreContract(input: {
     liquidityPasses: liquidity.passes,
     delayed: input.delayed,
     underlyingPrice: input.underlyingPrice,
+    aggressorSide: input.tradeSideDataAvailable ? contract.aggressorSide ?? null : null,
     levels: null,
     prints,
     score,

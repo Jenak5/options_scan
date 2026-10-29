@@ -6,7 +6,7 @@ import { hasHealthBearer } from "@/app/lib/auth";
 import { emptyCandleHealth, readCandleHealth } from "@/app/lib/candleStore";
 import { buildHealthReport, countShadowTotals, trackedAlertCounts } from "@/app/lib/healthReport";
 import { emptyScanHealth } from "@/app/lib/scanHealth";
-import { dataSourceStatus } from "@/app/lib/marketData";
+import { loadMarketDataHealth } from "@/app/lib/marketData";
 import { getSchwabStatus } from "@/app/lib/schwab";
 import { readAvwapPaperBookText, readCallsPaperBookText, readScanHealth, readShadowBookText } from "@/app/lib/schwabStore";
 import { readUnusualBook } from "@/app/lib/unusualFlowStore";
@@ -18,7 +18,7 @@ export const dynamic = "force-dynamic";
 
 /**
  * Read-only monitor. Bearer HEALTH_TOKEN, or CRON_SECRET when HEALTH_TOKEN is unset.
- * No session cookie. No secrets in the body. Nothing here calls Tastytrade or places an order.
+ * No session cookie. No secrets in the body. Nothing here places an order.
  */
 export async function GET(request: NextRequest) {
   if (!(await hasHealthBearer(request))) {
@@ -26,7 +26,7 @@ export async function GET(request: NextRequest) {
   }
 
   const now = new Date();
-  const [health, schwab, book, shadowText, candles, avwapText, callsText, unusualBook] = await Promise.all([
+  const [health, schwab, book, shadowText, candles, avwapText, callsText, unusualBook, marketData] = await Promise.all([
     readScanHealth().catch(() => emptyScanHealth()),
     getSchwabStatus().then(
       (status) => status.connected === true,
@@ -38,6 +38,7 @@ export async function GET(request: NextRequest) {
     readAvwapPaperBookText().catch(() => null),
     readCallsPaperBookText().catch(() => null),
     readUnusualBook().catch(() => null),
+    loadMarketDataHealth().catch(() => null),
   ]);
   const shadowBook = parseShadowBook(shadowText);
   const avwapBook = parseAvwapPaperBook(avwapText);
@@ -60,7 +61,8 @@ export async function GET(request: NextRequest) {
     avwapPaper: avwapPaperHealth(avwapBook.trades, now, avwapBook),
     callsPaper: callsPaperHealth(parseCallsPaperBook(callsText), now),
     unusualFlow: unusualBook ? unusualFlowHealth(unusualBook, now) : undefined,
+    marketData: marketData ?? undefined,
     now,
   });
-  return NextResponse.json({ ...report, dataSource: dataSourceStatus() });
+  return NextResponse.json({ ...report, dataSource: report.marketData });
 }

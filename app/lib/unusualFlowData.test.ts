@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getOptionChain, getQuotes } from "@/app/lib/marketData";
+import { resetTradeSideForTests, setTradeSideDataAvailable } from "@/app/lib/marketDataHealth";
 import { fetchUnusualChain, fetchUnusualQuotes, intervalsFromChain } from "@/app/lib/unusualFlowData";
 
 vi.mock("@/app/lib/marketData", () => ({
@@ -11,9 +12,10 @@ describe("unusual flow market data", () => {
   beforeEach(() => {
     vi.mocked(getOptionChain).mockReset();
     vi.mocked(getQuotes).mockReset();
+    resetTradeSideForTests();
   });
 
-  it("reads a chain through the shared router and keeps a trade aggressor", async () => {
+  it("uses the DXLink aggressor only when trade side data is available", async () => {
     vi.mocked(getOptionChain).mockResolvedValue({
       underlyingPrice: 100,
       delayed: false,
@@ -28,10 +30,11 @@ describe("unusual flow market data", () => {
         strike: 105,
         expiration: "2026-11-20",
         putCall: "call",
-        aggressor: "buy",
+        aggressorSide: "buy",
         trades: [{ size: 4, aggressor: "sell" }, { size: 6, price: 2, bid: 1.9, ask: 2 }],
       } as never],
     });
+    setTradeSideDataAvailable("yes");
     const chain = await fetchUnusualChain("spy", new Date("2026-10-01T16:00:00Z"));
     expect(vi.mocked(getOptionChain).mock.calls[0][0].symbol).toBe("SPY");
     expect(chain.contracts[0].tradeAggressor).toBe("ask");
@@ -41,6 +44,11 @@ describe("unusual flow market data", () => {
     expect(interval.volumeJump).toBe(6);
     expect(interval.tradeAggressor).toBe("ask");
     expect(interval.symbol).toBe("SPY");
+
+    setTradeSideDataAvailable("no");
+    const estimated = await fetchUnusualChain("spy", new Date("2026-10-01T16:00:00Z"));
+    expect(estimated.contracts[0].tradeAggressor).toBeNull();
+    expect(estimated.contracts[0].trades).toBeUndefined();
   });
 
   it("asks the shared quote router and does not invent a quote for an empty list", async () => {

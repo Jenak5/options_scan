@@ -1,6 +1,7 @@
 import type { StoredAlert } from "@/app/lib/alertBook";
 import { emptyAvwapPaperHealth, type AvwapPaperHealth } from "@/app/lib/avwapPaper";
 import { emptyCallsPaperHealth, type CallsPaperHealth } from "@/app/lib/callsPaper";
+import { emptyMarketDataHealth, type MarketDataHealth } from "@/app/lib/marketDataHealth";
 import { emptyUnusualFlowHealth, type UnusualFlowHealth } from "@/app/lib/unusualFlow";
 import { chicagoDate, isMarketDay, isNyseHoliday } from "@/app/lib/marketHours";
 import { RULES_VERSION } from "@/app/lib/rulesVersion";
@@ -54,6 +55,11 @@ export interface HealthReport {
   callsPaper: CallsPaperHealth;
   /** Unusual-flow flags saved by the scan. Counts only. No Telegram alerts. */
   unusualFlow: UnusualFlowHealth;
+  /**
+   * Active provider per data type, fallback count, last error, and the last
+   * successful Tastytrade call. No secrets. tradeSideDataAvailable is yes or no.
+   */
+  marketData: MarketDataHealth;
 }
 
 export function buildHealthReport(input: {
@@ -73,6 +79,7 @@ export function buildHealthReport(input: {
   avwapPaper?: AvwapPaperHealth;
   callsPaper?: CallsPaperHealth;
   unusualFlow?: UnusualFlowHealth;
+  marketData?: MarketDataHealth;
   now: Date;
 }): HealthReport {
   const latest = latestScan(input.health);
@@ -113,6 +120,7 @@ export function buildHealthReport(input: {
     avwapPaper: input.avwapPaper ?? emptyAvwapPaperHealth(),
     callsPaper: input.callsPaper ?? emptyCallsPaperHealth(),
     unusualFlow: input.unusualFlow ?? emptyUnusualFlowHealth(),
+    marketData: input.marketData ?? emptyMarketDataHealth(),
   };
 }
 

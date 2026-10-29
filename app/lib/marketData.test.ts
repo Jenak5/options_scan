@@ -21,6 +21,7 @@ vi.mock("@/app/lib/schwab", () => ({
 import {
   dataSourceStatus, getOptionChain, getPriceHistory, getQuoteEntries, preferredDataSource, resetDataSourceStatsForTests,
 } from "@/app/lib/marketData";
+import { requestedPrimary } from "@/app/lib/dataSourcePref";
 
 const creds = { TASTYTRADE_CLIENT_ID: "id", TASTYTRADE_CLIENT_SECRET: "secret", TASTYTRADE_REFRESH_TOKEN: "refresh" };
 const chain = (n: number) => ({ contracts: Array(n).fill({}), delayed: false, underlyingPrice: n > 0 ? 100 : null });
@@ -35,10 +36,14 @@ describe("market data router", () => {
     vi.spyOn(console, "info").mockImplementation(() => {});
   });
 
-  it("picks the source from DATA_SOURCE and the Tastytrade keys", () => {
+  it("picks the source from MARKET_DATA_PRIMARY, then DATA_SOURCE, then the Tastytrade keys", () => {
+    expect(requestedPrimary({ ...creds })).toBe("tastytrade");
     expect(preferredDataSource({ ...creds })).toBe("tastytrade");
     expect(preferredDataSource({ ...creds, DATA_SOURCE: "schwab" })).toBe("schwab");
     expect(preferredDataSource({ DATA_SOURCE: "tastytrade" })).toBe("schwab");
+    expect(preferredDataSource({ ...creds, MARKET_DATA_PRIMARY: "schwab", DATA_SOURCE: "tastytrade" })).toBe("schwab");
+    expect(preferredDataSource({ ...creds, MARKET_DATA_PRIMARY: "tastytrade", DATA_SOURCE: "schwab" })).toBe("tastytrade");
+    expect(requestedPrimary({})).toBe("tastytrade");
   });
 
   it("serves from Tastytrade when it answers", async () => {
@@ -48,9 +53,29 @@ describe("market data router", () => {
     const status = dataSourceStatus();
     expect(status.lastServed.chain).toMatchObject({ source: "tastytrade", fallback: false });
     expect(status.counts.tastytrade).toBe(1);
+    expect(status.active.chain).toBe("tastytrade");
+    expect(status.active.openInterest).toBe("tastytrade");
+    expect(status.active.volume).toBe("tastytrade");
+    expect(status.active.greeks).toBe("tastytrade");
+    expect(status.primary).toBe("tastytrade");
+    expect(status.tradeSideDataAvailable).toBe("no");
+    expect(status.lastTastytradeSuccessAt).toBeTruthy();
   });
 
-  it("falls back to Schwab on an error or an empty answer", async () => {
+  it("falls back to Schwab on a 401, a timeout, or an empty answer", async () => {
+    tt.chain.mockRejectedValueOnce(new Error("Tastytrade option chain failed (401) bearer super-secret-token"));
+    sw.chain.mockResolvedValueOnce(chain(4));
+    await expect(getOptionChain({ symbol: "QQQ" })).resolves.toEqual(chain(4));
+    const after401 = dataSourceStatus();
+    expect(after401.lastServed.chain).toMatchObject({ source: "schwab", fallback: true });
+    expect(after401.fallbackCount).toBe(1);
+    expect(after401.lastError).not.toContain("super-secret-token");
+    expect(after401.lastError).toContain("[redacted]");
+
+    tt.chain.mockRejectedValueOnce(new Error("Tastytrade market data request timed out"));
+    sw.chain.mockResolvedValueOnce(chain(2));
+    await expect(getOptionChain({ symbol: "IWM" })).resolves.toEqual(chain(2));
+    expect(dataSourceStatus().lastError).toMatch(/timed out/i);
     tt.chain.mockRejectedValueOnce(new Error("Tastytrade market data request failed (500)"));
     sw.chain.mockResolvedValue(chain(2));
     await expect(getOptionChain({ symbol: "SPY" })).resolves.toEqual(chain(2));
@@ -59,7 +84,7 @@ describe("market data router", () => {
     sw.history.mockResolvedValueOnce([{ close: 1 }]);
     await expect(getPriceHistory({ symbol: "SPY", periodType: "day", period: 1, frequencyType: "minute", frequency: 5 }))
       .resolves.toEqual([{ close: 1 }]);
-    expect(dataSourceStatus().fallbacks).toBe(2);
+    expect(dataSourceStatus().fallbacks).toBe(4);
   });
 
   it("keeps Tastytrade quotes and asks Schwab only for the symbols Tastytrade missed", async () => {

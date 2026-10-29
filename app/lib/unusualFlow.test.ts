@@ -416,6 +416,10 @@ describe("unusual flow list", () => {
     expect(fromRow.tradeAggressor).toBe("bid");
     expect(fromRow.mark).toBe(1.95);
     expect(passesCommon(fromRowMetrics(fromRow))).toBe(false);
+    const [tape] = intervalsFromFlowRows([Object.assign(row({ last: 1.9 }), { aggressorSide: "buy" })]);
+    expect(tape.tradeAggressor).toBe("ask");
+    const [unknown] = intervalsFromFlowRows([Object.assign(row({ last: 1.9 }), { aggressorSide: "unknown" })]);
+    expect(unknown.tradeAggressor).toBeNull();
   });
 });
 
