@@ -71,6 +71,12 @@ describe("health report", () => {
         drawdownFlag: false,
         dailyStop: false,
         todayLossStreak: 0,
+        lastCheckAt: null,
+        symbols: {
+          SPY: { anchorDate: null, gap: null, reason: "not checked yet", entered: false },
+          IWM: { anchorDate: null, gap: null, reason: "not checked yet", entered: false },
+          QQQ: { anchorDate: null, gap: null, reason: "not checked yet", entered: false },
+        },
       },
       callsPaper: emptyCallsPaperHealth(),
     });

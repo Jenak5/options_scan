@@ -4,6 +4,8 @@ import {
   avwapPaperSection,
   avwapSkipReason,
   formatAvwapPaperAlert,
+  latestGapDay,
+  minuteHistoryChunks,
   parseAvwapPaperBook,
   quotePlan,
   serializeAvwapPaperBook,
@@ -13,6 +15,7 @@ import {
   type AvwapQuoteRequest,
   type AvwapSnapshot,
 } from "@/app/lib/avwapPaper";
+import { newYorkDate } from "@/app/lib/flow";
 import { getPriceHistory, getQuoteEntries } from "@/app/lib/schwab";
 import type { PriceCandle } from "@/app/lib/schwabParse";
 import { normalizeOptionSymbol } from "@/app/lib/optionSymbol";
@@ -32,7 +35,8 @@ export interface AvwapQuote {
 
 export interface AvwapPaperDeps {
   daily: (symbol: string, now: Date) => Promise<CandleBar[]>;
-  minutes: (symbol: string, now: Date) => Promise<CandleBar[]>;
+  /** Five-minute bars from the gap day through now. anchorDate is null when that symbol has no gap. */
+  minutes: (symbol: string, now: Date, anchorDate: string | null) => Promise<CandleBar[]>;
   quotes: (symbols: readonly string[]) => Promise<Map<string, AvwapQuote>>;
   readBook: () => Promise<string | null>;
   writeBook: (change: (current: string | null) => string) => Promise<boolean>;
@@ -48,6 +52,14 @@ export interface AvwapRunResult {
   logNote: string;
 }
 
+/** One runtime-log line. The cron prints this with console.info so it shows up in Vercel logs. */
+export function formatAvwapPaperLog(result: AvwapRunResult): string {
+  const noun = result.opened === 1 ? "entry" : "entries";
+  const flag = result.drawdownFlag ? " Drawdown flag over $1,500." : "";
+  const skip = result.skipped === "holiday" ? " Market holiday." : result.skipped === "closed" ? " Outside market hours." : "";
+  return `AVWAP paper: ${result.opened} new ${noun}, ${result.closed} closed (${result.saved ? "saved" : "not saved"}, PAPER ONLY).${flag}${skip} ${result.logNote}`.replace(/[ \t]+/g, " ").trim();
+}
+
 export async function loadAvwapPaperSection(now: Date = new Date()): Promise<AvwapPaperSection> {
   const text = await readAvwapPaperBookText();
   const stored = resolveStoreKind() !== "unconfigured";
@@ -60,19 +72,18 @@ export async function runAvwapPaper(now: Date, deps: AvwapPaperDeps = defaultDep
     return { opened: 0, closed: 0, saved: true, skipped: skip, drawdownFlag: false, logNote: skip === "holiday" ? "market holiday" : "outside market hours" };
   }
 
-  const markets: AvwapMarket[] = [];
-  for (let i = 0; i < AVWAP_SYMBOLS.length; i++) {
-    const symbol = AVWAP_SYMBOLS[i];
-    const [dailyBars, minuteBars] = await Promise.all([
-      deps.daily(symbol, now).catch(() => [] as CandleBar[]),
-      deps.minutes(symbol, now).catch(() => [] as CandleBar[]),
-    ]);
-    markets.push({
-      symbol,
-      daily: dailyBars.map((bar) => ({ t: bar.t, open: bar.o, close: bar.c })),
-      bars: minuteBars,
-    });
-  }
+  const today = newYorkDate(now);
+  const markets: AvwapMarket[] = await Promise.all(AVWAP_SYMBOLS.map(async (symbol) => {
+    try {
+      const dailyBars = await deps.daily(symbol, now);
+      const daily = dailyBars.map((bar) => ({ t: bar.t, open: bar.o, close: bar.c }));
+      const gap = latestGapDay(daily, today);
+      const minuteBars = await deps.minutes(symbol, now, gap?.date ?? null);
+      return { symbol, daily, bars: minuteBars, historyFailed: false };
+    } catch {
+      return { symbol, daily: [], bars: [], historyFailed: true };
+    }
+  }));
 
   const current = parseAvwapPaperBook(await deps.readBook());
   const plan = quotePlan(current, markets, now);
@@ -160,18 +171,29 @@ async function loadDaily(symbol: string, now: Date): Promise<CandleBar[]> {
   return candles.map(toBar);
 }
 
-async function loadMinutes(symbol: string, now: Date): Promise<CandleBar[]> {
-  const candles = await getPriceHistory({
-    symbol,
-    periodType: "day",
-    period: 10,
-    frequencyType: "minute",
-    frequency: 5,
-    needExtendedHoursData: false,
-    startDate: now.getTime() - 12 * 24 * 60 * 60 * 1000,
-    endDate: now.getTime(),
-  });
-  return candles.map(toBar);
+async function loadMinutes(symbol: string, now: Date, anchorDate: string | null): Promise<CandleBar[]> {
+  if (!anchorDate) return [];
+  const chunks = minuteHistoryChunks(anchorDate, now.getTime());
+  const byTime = new Map<number, CandleBar>();
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const candles = await getPriceHistory({
+      symbol,
+      periodType: "day",
+      period: 10,
+      frequencyType: "minute",
+      frequency: 5,
+      needExtendedHoursData: false,
+      startDate: chunk.startDate,
+      endDate: chunk.endDate,
+    });
+    for (let c = 0; c < candles.length; c++) {
+      const bar = toBar(candles[c]);
+      const prior = byTime.get(bar.t);
+      if (!prior || (bar.v ?? 0) >= (prior.v ?? 0)) byTime.set(bar.t, bar);
+    }
+  }
+  return Array.from(byTime.values()).sort((a, b) => a.t - b.t);
 }
 
 async function loadQuotes(symbols: readonly string[]): Promise<Map<string, AvwapQuote>> {

@@ -63,7 +63,7 @@ export async function GET(request: NextRequest) {
     now,
     paperQuotes: paperQuoteBatch.quotes,
     paperQuoteMisses: paperQuoteBatch.misses,
-    avwapTrades: parseAvwapPaperBook(avwapText).trades,
+    avwapBook: parseAvwapPaperBook(avwapText),
     callsBook: parseCallsPaperBook(callsText),
   }));
 }

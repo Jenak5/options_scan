@@ -45,8 +45,18 @@ export const AVWAP_ALT_DTE_TARGET = 14;
 export const AVWAP_DRAWDOWN_FLAG_DOLLARS = 1_500;
 export const AVWAP_DAILY_STOP_LOSSES = 2;
 export const AVWAP_BAR_MS = 5 * 60_000;
-/** The crossing bar can still be filled on this scan or the next 5-minute scan. */
-export const AVWAP_SIGNAL_FRESH_MS = 10 * 60_000;
+/**
+ * A cross can still be filled on this scan or the next two.
+ * The check runs at the start of the cron so a long flow scan does not age it out.
+ */
+export const AVWAP_SIGNAL_FRESH_MS = 15 * 60_000;
+/**
+ * Schwab minute history accepts about 10 days per request.
+ * Each piece stays inside that limit. The anchor day itself is included.
+ */
+export const AVWAP_MINUTE_CHUNK_DAYS = 8;
+/** How far back 5-minute bars are requested. Sep 17 is inside this window on Oct 29. */
+export const AVWAP_MINUTE_MAX_LOOKBACK_DAYS = 120;
 export const AVWAP_ROW_CAP = 1_500;
 
 const RTH_OPEN = 9 * 60 + 30;
@@ -59,7 +69,7 @@ const EARLY_FINAL_SCAN_MINUTE = 12 * 60 + 55;
 const EARLY_CLOSE_ET = new Set(["2026-11-27", "2026-12-24", "2027-11-26"]);
 
 export const AVWAP_PAPER_NOTE =
-  `Paper only. No order is placed. Symbols are SPY, IWM, and QQQ. A gap day is a session whose open is more than ${AVWAP_GAP_FRACTION * 100}% from the prior close. Anchored VWAP starts at that day's regular-hours open and uses 5-minute bars (1-minute bars are rolled up), typical price (high + low + close) / 3, with volume floored at 1. The signal is the first regular-hours 5-minute close below that VWAP after the prior close was at or above it. The paper trade buys the at-the-money put whose expiry is nearest 7 calendar days and inside 5–10 days, at the ask, in whole contracts whose debit is $${AVWAP_BUDGET_DOLLARS} or less. One contract over $${AVWAP_BUDGET_DOLLARS} is skipped. One open paper position per symbol. Sell at the bid when the bid is at least 50% above the entry ask, otherwise on the expiry-day final scan (3:55 PM ET, or 12:55 PM ET on an early close). What-ifs on the same signal: sell the 7-day put at +25% or after 3 trading days, and the same rule on a put nearest 14 calendar days (12–16). Fees are $${AVWAP_FEE_PER_SIDE.toFixed(2)} per contract per side. Two losing closes in a row block new entries for the rest of that Chicago day. Cumulative paper drawdown over $${AVWAP_DRAWDOWN_FLAG_DOLLARS.toLocaleString("en-US")} is flagged.`;
+  `Paper only. No order is placed. Symbols are SPY, IWM, and QQQ. A gap day is a session whose open is more than ${AVWAP_GAP_FRACTION * 100}% from the prior close. Anchored VWAP starts at that day's regular-hours open and uses 5-minute bars (1-minute bars are rolled up), typical price (high + low + close) / 3, with volume floored at 1. The signal is a regular-hours 5-minute close below that VWAP when the previous completed close was at or above it. A later cross counts. Five-minute bars are loaded back to the gap day. The paper trade buys the at-the-money put whose expiry is nearest 7 calendar days and inside 5–10 days, at the ask, in whole contracts whose debit is $${AVWAP_BUDGET_DOLLARS} or less. One contract over $${AVWAP_BUDGET_DOLLARS} is skipped. One open paper position per symbol. Sell at the bid when the bid is at least 50% above the entry ask, otherwise on the expiry-day final scan (3:55 PM ET, or 12:55 PM ET on an early close). What-ifs on the same signal: sell the 7-day put at +25% or after 3 trading days, and the same rule on a put nearest 14 calendar days (12–16). Fees are $${AVWAP_FEE_PER_SIDE.toFixed(2)} per contract per side. Two losing closes in a row block new entries for the rest of that Chicago day. Cumulative paper drawdown over $${AVWAP_DRAWDOWN_FLAG_DOLLARS.toLocaleString("en-US")} is flagged.`;
 
 export function isAvwapSymbol(value: string): value is AvwapSymbol {
   return value === "SPY" || value === "IWM" || value === "QQQ";
@@ -200,26 +210,70 @@ export interface AvwapSignal {
 }
 
 /**
- * First completed 5-minute close below the anchored VWAP whose previous
- * completed close was at or above the VWAP at that previous bar.
- * Regular hours only. Later crosses of the same anchor are ignored.
+ * Crosses below the anchored VWAP. Each one is a completed 5-minute close
+ * below that bar's VWAP whose previous completed close was at or above its VWAP.
  */
-export function firstAvwapReject(bars: readonly CandleBar[], anchorDate: string, nowMs: number): AvwapSignal | null {
+export function avwapCrosses(bars: readonly CandleBar[], anchorDate: string, nowMs: number): AvwapSignal[] {
   const points = avwapPoints(bars, anchorDate, nowMs);
+  const found: AvwapSignal[] = [];
   for (let i = 1; i < points.length; i++) {
     const prior = points[i - 1];
     const current = points[i];
     if (prior.close >= prior.vwap && current.close < current.vwap) {
-      return {
+      found.push({
         at: current.t,
         close: current.close,
         vwap: current.vwap,
         priorClose: prior.close,
         priorVwap: prior.vwap,
-      };
+      });
     }
   }
-  return null;
+  return found;
+}
+
+/** The earliest cross since the anchor. Later crosses are kept by latestAvwapCross. */
+export function firstAvwapReject(bars: readonly CandleBar[], anchorDate: string, nowMs: number): AvwapSignal | null {
+  return avwapCrosses(bars, anchorDate, nowMs)[0] ?? null;
+}
+
+/** The most recent prior-bar cross. This is the live signal, not only the first one since the gap day. */
+export function latestAvwapCross(bars: readonly CandleBar[], anchorDate: string, nowMs: number): AvwapSignal | null {
+  const found = avwapCrosses(bars, anchorDate, nowMs);
+  return found.length > 0 ? found[found.length - 1] : null;
+}
+
+/**
+ * True when the 5-minute series includes the anchor session.
+ * A series that starts on a later day is not an anchored VWAP.
+ */
+export function anchorCovered(bars: readonly CandleBar[], anchorDate: string, nowMs: number): { covered: boolean; firstDate: string | null } {
+  const points = avwapPoints(bars, anchorDate, nowMs);
+  if (points.length === 0) return { covered: false, firstDate: null };
+  const firstDate = newYorkDate(new Date(points[0].t));
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(firstDate)) return { covered: false, firstDate: null };
+  return { covered: firstDate <= anchorDate, firstDate };
+}
+
+/**
+ * Schwab minute requests of about 10 days, from the gap day through now.
+ * The first piece starts at the anchor date, or at the lookback cap when that date is older.
+ */
+export function minuteHistoryChunks(anchorDate: string, nowMs: number): { startDate: number; endDate: number }[] {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(anchorDate) || !Number.isFinite(nowMs)) return [];
+  const anchorStart = Date.parse(`${anchorDate}T00:00:00.000Z`);
+  if (!Number.isFinite(anchorStart) || nowMs <= anchorStart) return [];
+  const earliest = nowMs - AVWAP_MINUTE_MAX_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  const chunkMs = AVWAP_MINUTE_CHUNK_DAYS * 24 * 60 * 60 * 1000;
+  let cursor = Math.max(anchorStart, earliest);
+  const chunks: { startDate: number; endDate: number }[] = [];
+  while (cursor < nowMs && chunks.length < 16) {
+    const endDate = Math.min(nowMs, cursor + chunkMs);
+    chunks.push({ startDate: cursor, endDate });
+    if (endDate >= nowMs) break;
+    cursor = endDate;
+  }
+  return chunks;
 }
 
 /** True when the crossing bar has finished and is still inside the scan window. */
@@ -375,10 +429,20 @@ export interface AvwapPaperTrade {
   whatIfs: AvwapWhatIf[];
 }
 
+export interface AvwapSymbolCheck {
+  anchorDate: string | null;
+  /** Signed gap. Null when this scan did not find an anchor. */
+  gap: number | null;
+  /** Why this scan did not open a paper put, or that it did. */
+  reason: string;
+  entered: boolean;
+}
+
 export interface AvwapPaperBook {
   version: 1;
   trades: AvwapPaperTrade[];
   notes: Partial<Record<AvwapSymbol, string>>;
+  checks: Partial<Record<AvwapSymbol, AvwapSymbolCheck>>;
   updatedAt: number | null;
 }
 
@@ -393,6 +457,8 @@ export interface AvwapMarket {
   symbol: AvwapSymbol;
   daily: readonly AvwapDailyBar[];
   bars: readonly CandleBar[];
+  /** True when daily or 5-minute history could not be read. */
+  historyFailed?: boolean;
 }
 
 export interface AvwapSnapshot extends AvwapMarket {
@@ -406,8 +472,20 @@ export interface AvwapQuoteRequest {
   strike: number;
 }
 
+export function emptySymbolCheck(reason = "not checked yet"): AvwapSymbolCheck {
+  return { anchorDate: null, gap: null, reason, entered: false };
+}
+
+export function emptySymbolChecks(): Record<AvwapSymbol, AvwapSymbolCheck> {
+  return {
+    SPY: emptySymbolCheck(),
+    IWM: emptySymbolCheck(),
+    QQQ: emptySymbolCheck(),
+  };
+}
+
 export function emptyAvwapPaperBook(): AvwapPaperBook {
-  return { version: 1, trades: [], notes: {}, updatedAt: null };
+  return { version: 1, trades: [], notes: {}, checks: {}, updatedAt: null };
 }
 
 export function serializeAvwapPaperBook(book: AvwapPaperBook): string {
@@ -415,6 +493,7 @@ export function serializeAvwapPaperBook(book: AvwapPaperBook): string {
     version: 1,
     trades: book.trades,
     notes: book.notes,
+    checks: book.checks,
     updatedAt: book.updatedAt,
   });
 }
@@ -438,6 +517,7 @@ export function parseAvwapPaperBook(text: string | null | undefined): AvwapPaper
     version: 1,
     trades: trimTrades(trades),
     notes: parseNotes(row.notes),
+    checks: parseChecks(row.checks),
     updatedAt: typeof row.updatedAt === "number" && Number.isFinite(row.updatedAt) ? row.updatedAt : null,
   };
 }
@@ -465,6 +545,7 @@ export function advanceAvwapPaper(
   let trades = book.trades.map(cloneTrade);
   const closed: AvwapPaperTrade[] = [];
   const notes: Partial<Record<AvwapSymbol, string>> = {};
+  const checks: Partial<Record<AvwapSymbol, AvwapSymbolCheck>> = {};
 
   for (let i = 0; i < AVWAP_SYMBOLS.length; i++) {
     const symbol = AVWAP_SYMBOLS[i];
@@ -484,6 +565,12 @@ export function advanceAvwapPaper(
     const snap = bySymbol.get(symbol) ?? null;
     const decision = entryDecision(trades, snap, today, nowMs, stopped);
     notes[symbol] = decision.note;
+    checks[symbol] = {
+      anchorDate: decision.anchorDate,
+      gap: decision.gap,
+      reason: decision.note,
+      entered: decision.trade != null,
+    };
     if (!decision.trade) continue;
     trades.push(decision.trade);
     opened.push(decision.trade);
@@ -494,6 +581,7 @@ export function advanceAvwapPaper(
       version: 1,
       trades: trimTrades(trades),
       notes,
+      checks,
       updatedAt: nowMs,
     },
     opened,
@@ -530,7 +618,7 @@ export function quotePlan(book: AvwapPaperBook, markets: readonly AvwapMarket[],
     const market = markets[i];
     if (hasOpen(book.trades, market.symbol)) continue;
     const setup = setupOf(market, today, nowMs);
-    if (!setup || !setup.fresh || setup.strike == null || setup.signal == null) continue;
+    if (!setup || !setup.covered || !setup.fresh || setup.strike == null || setup.signal == null) continue;
     if (alreadySignaled(book.trades, market.symbol, setup.signal.at)) continue;
     const primary = expiryCandidates(today, AVWAP_PRIMARY_DTE_MIN, AVWAP_PRIMARY_DTE_MAX, AVWAP_PRIMARY_DTE_TARGET);
     const alt = expiryCandidates(today, AVWAP_ALT_DTE_MIN, AVWAP_ALT_DTE_MAX, AVWAP_ALT_DTE_TARGET);
@@ -629,6 +717,10 @@ export interface AvwapPaperHealth {
   drawdownFlag: boolean;
   dailyStop: boolean;
   todayLossStreak: number;
+  /** ISO time of the last in-session paper check. Null until one has been saved. */
+  lastCheckAt: string | null;
+  /** Why each symbol did not open a paper put on that check. */
+  symbols: Record<AvwapSymbol, AvwapSymbolCheck>;
 }
 
 export function emptyAvwapPaperHealth(): AvwapPaperHealth {
@@ -641,10 +733,16 @@ export function emptyAvwapPaperHealth(): AvwapPaperHealth {
     drawdownFlag: false,
     dailyStop: false,
     todayLossStreak: 0,
+    lastCheckAt: null,
+    symbols: emptySymbolChecks(),
   };
 }
 
-export function avwapPaperHealth(trades: readonly AvwapPaperTrade[], now: Date): AvwapPaperHealth {
+export function avwapPaperHealth(
+  trades: readonly AvwapPaperTrade[],
+  now: Date,
+  book?: Pick<AvwapPaperBook, "updatedAt" | "notes" | "checks"> | null,
+): AvwapPaperHealth {
   const drawdown = avwapDrawdown(trades);
   const stop = avwapDailyStop(trades, now);
   let open = 0;
@@ -653,6 +751,20 @@ export function avwapPaperHealth(trades: readonly AvwapPaperTrade[], now: Date):
     if (trades[i].status === "open") open += 1;
     else closed += 1;
   }
+  const symbols = emptySymbolChecks();
+  for (let i = 0; i < AVWAP_SYMBOLS.length; i++) {
+    const symbol = AVWAP_SYMBOLS[i];
+    const check = book?.checks?.[symbol];
+    if (check) {
+      symbols[symbol] = check;
+      continue;
+    }
+    const note = book?.notes?.[symbol];
+    if (note) symbols[symbol] = { anchorDate: null, gap: null, reason: note, entered: note.startsWith("paper entry") };
+  }
+  const lastCheckAt = book?.updatedAt != null && Number.isFinite(book.updatedAt)
+    ? new Date(book.updatedAt).toISOString()
+    : null;
   return {
     paperOnly: true,
     open,
@@ -662,6 +774,8 @@ export function avwapPaperHealth(trades: readonly AvwapPaperTrade[], now: Date):
     drawdownFlag: drawdown.flagged,
     dailyStop: stop.dailyStop,
     todayLossStreak: stop.consecutiveLosses,
+    lastCheckAt,
+    symbols,
   };
 }
 
@@ -693,8 +807,12 @@ export interface AvwapPaperBrief extends AvwapPaperHealth {
   closedToday: AvwapBriefRow[];
 }
 
-export function avwapPaperBrief(trades: readonly AvwapPaperTrade[], now: Date): AvwapPaperBrief {
-  const health = avwapPaperHealth(trades, now);
+export function avwapPaperBrief(
+  trades: readonly AvwapPaperTrade[],
+  now: Date,
+  book?: Pick<AvwapPaperBook, "updatedAt" | "notes" | "checks"> | null,
+): AvwapPaperBrief {
+  const health = avwapPaperHealth(trades, now, book);
   const day = chicagoDate(now);
   const openRows = trades.filter((trade) => trade.status === "open").map(briefRow);
   const closedToday = trades.filter((trade) => {
@@ -772,7 +890,7 @@ export function avwapPaperSection(book: AvwapPaperBook, now: Date, stored: boole
     budgetDollars: AVWAP_BUDGET_DOLLARS,
     feePerSide: AVWAP_FEE_PER_SIDE,
     drawdownFlagDollars: AVWAP_DRAWDOWN_FLAG_DOLLARS,
-    health: avwapPaperHealth(book.trades, now),
+    health: avwapPaperHealth(book.trades, now, book),
     drawdown,
     whatIf25PnlDollars: whatIfTotal(book.trades, "target25-or-3d"),
     whatIf14PnlDollars: whatIfTotal(book.trades, "dte14"),
@@ -805,25 +923,41 @@ interface Setup {
   gap: GapDay;
   signal: AvwapSignal | null;
   fresh: boolean;
+  covered: boolean;
+  firstDate: string | null;
   spot: number | null;
   strike: number | null;
   points: number;
+}
+
+interface EntryDecision {
+  trade: AvwapPaperTrade | null;
+  note: string;
+  anchorDate: string | null;
+  gap: number | null;
 }
 
 function setupOf(market: AvwapMarket, today: string, nowMs: number): Setup | null {
   const gap = latestGapDay(market.daily, today);
   if (!gap) return null;
   const points = avwapPoints(market.bars, gap.date, nowMs);
-  const signal = firstAvwapReject(market.bars, gap.date, nowMs);
+  const coverage = anchorCovered(market.bars, gap.date, nowMs);
+  const signal = coverage.covered ? latestAvwapCross(market.bars, gap.date, nowMs) : null;
   const spot = points.length > 0 ? points[points.length - 1].close : null;
   return {
     gap,
     signal,
     fresh: signal != null && signalIsFresh(signal, nowMs),
+    covered: coverage.covered,
+    firstDate: coverage.firstDate,
     spot,
     strike: spot == null ? null : atmStrike(spot),
     points: points.length,
   };
+}
+
+function decide(note: string, anchorDate: string | null = null, gap: number | null = null, trade: AvwapPaperTrade | null = null): EntryDecision {
+  return { trade, note, anchorDate, gap };
 }
 
 function entryDecision(
@@ -832,27 +966,31 @@ function entryDecision(
   today: string,
   nowMs: number,
   stopped: boolean,
-): { trade: AvwapPaperTrade | null; note: string } {
+): EntryDecision {
   const symbol = snap?.symbol;
-  if (!snap || !symbol) return { trade: null, note: "no bars on this scan" };
+  if (!snap || !symbol) return decide("no bars on this scan");
+  if (snap.historyFailed) return decide("price history failed");
   const setup = setupOf(snap, today, nowMs);
-  if (!setup) return { trade: null, note: "no gap of more than 1% in the daily bars" };
-  if (setup.points === 0) return { trade: null, note: `gap ${setup.gap.date} has no completed regular-hours bars in this fetch` };
-  if (!setup.signal) return { trade: null, note: `anchored at ${setup.gap.date}; no close below the anchored VWAP yet` };
-  if (hasOpen(trades, symbol)) return { trade: null, note: "one paper position is already open" };
-  if (setup.signal && alreadySignaled(trades, symbol, setup.signal.at)) {
-    return { trade: null, note: "this cross was already papered" };
+  if (!setup) return decide("no gap of more than 1% in the daily bars");
+  const anchorDate = setup.gap.date;
+  const gap = setup.gap.gap;
+  if (setup.points === 0) return decide(`gap ${anchorDate} has no completed regular-hours bars in this fetch`, anchorDate, gap);
+  if (!setup.covered) {
+    return decide(`gap ${anchorDate} is before the 5-minute history (starts ${setup.firstDate}). Anchored VWAP was not computed.`, anchorDate, gap);
   }
-  if (!setup.fresh) return { trade: null, note: "the first cross below the anchored VWAP is older than this scan" };
-  if (stopped) return { trade: null, note: "daily stop: two losing paper closes in a row" };
-  if (setup.strike == null || setup.spot == null) return { trade: null, note: "no underlying price for the at-the-money strike" };
+  if (!setup.signal) return decide(`anchored at ${anchorDate}; no close below the anchored VWAP after a prior close at or above it`, anchorDate, gap);
+  if (hasOpen(trades, symbol)) return decide("one paper position is already open", anchorDate, gap);
+  if (alreadySignaled(trades, symbol, setup.signal.at)) return decide("this cross was already papered", anchorDate, gap);
+  if (!setup.fresh) return decide("the latest cross below the anchored VWAP is older than this scan", anchorDate, gap);
+  if (stopped) return decide("daily stop: two losing paper closes in a row", anchorDate, gap);
+  if (setup.strike == null || setup.spot == null) return decide("no underlying price for the at-the-money strike", anchorDate, gap);
   const trade = openTrade(snap, setup, today, nowMs);
   if (!trade) {
     const priced = pickQuote(snap.quotes, today, AVWAP_PRIMARY_DTE_MIN, AVWAP_PRIMARY_DTE_MAX, AVWAP_PRIMARY_DTE_TARGET, setup.strike);
-    if (priced && avwapContractCount(priced.ask) === 0) return { trade: null, note: "one contract costs more than $875" };
-    return { trade: null, note: "no put quote in the 5–10 day window" };
+    if (priced && avwapContractCount(priced.ask) === 0) return decide("one contract costs more than $875", anchorDate, gap);
+    return decide("no put quote in the 5–10 day window", anchorDate, gap);
   }
-  return { trade, note: `paper entry, ${trade.contracts} contract${trade.contracts === 1 ? "" : "s"}` };
+  return decide(`paper entry, ${trade.contracts} contract${trade.contracts === 1 ? "" : "s"}`, anchorDate, gap, trade);
 }
 
 function openTrade(snap: AvwapSnapshot, setup: Setup, today: string, nowMs: number): AvwapPaperTrade | null {
@@ -1242,6 +1380,26 @@ function money(value: number): string {
 
 function escapeHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function parseChecks(value: unknown): Partial<Record<AvwapSymbol, AvwapSymbolCheck>> {
+  const checks: Partial<Record<AvwapSymbol, AvwapSymbolCheck>> = {};
+  if (!value || typeof value !== "object") return checks;
+  const row = value as Record<string, unknown>;
+  for (let i = 0; i < AVWAP_SYMBOLS.length; i++) {
+    const symbol = AVWAP_SYMBOLS[i];
+    const item = row[symbol];
+    if (!item || typeof item !== "object") continue;
+    const check = item as Record<string, unknown>;
+    const reason = typeof check.reason === "string" ? check.reason.slice(0, 240) : "";
+    if (!reason) continue;
+    const anchorDate = typeof check.anchorDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(check.anchorDate)
+      ? check.anchorDate
+      : null;
+    const gap = typeof check.gap === "number" && Number.isFinite(check.gap) ? check.gap : null;
+    checks[symbol] = { anchorDate, gap, reason, entered: check.entered === true };
+  }
+  return checks;
 }
 
 function parseNotes(value: unknown): Partial<Record<AvwapSymbol, string>> {

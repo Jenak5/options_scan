@@ -37,6 +37,7 @@ export async function GET(request: NextRequest) {
     readCallsPaperBookText().catch(() => null),
   ]);
   const shadowBook = parseShadowBook(shadowText);
+  const avwapBook = parseAvwapPaperBook(avwapText);
   const totals = countShadowTotals(shadowBook.records);
   const tracked = trackedAlertCounts(shadowBook.records, shadowBook.research ?? [], now);
   const report = buildHealthReport({
@@ -53,7 +54,7 @@ export async function GET(request: NextRequest) {
     candleAlertsCovered: candles.candleAlertsCovered,
     candleErrors: candles.candleErrors,
     candleErrorSample: candles.candleErrorSample,
-    avwapPaper: avwapPaperHealth(parseAvwapPaperBook(avwapText).trades, now),
+    avwapPaper: avwapPaperHealth(avwapBook.trades, now, avwapBook),
     callsPaper: callsPaperHealth(parseCallsPaperBook(callsText), now),
     now,
   });

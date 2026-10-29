@@ -62,6 +62,7 @@ describe("partial scan health", () => {
 
     const cron = await cronGet(authed("/api/cron?manual=true"));
     expect(cron.status).toBe(200);
+    expect(vi.mocked(console.info).mock.calls.some((call) => String(call[0]).includes("AVWAP paper:"))).toBe(true);
     const health = await readScanHealth();
     expect(health.lastOutcome).toBe("partial");
     expect(health.lastSkippedTickers).toEqual(["XLF"]);

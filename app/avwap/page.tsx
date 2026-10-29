@@ -67,6 +67,8 @@ interface Section {
     drawdownFlag: boolean;
     dailyStop: boolean;
     todayLossStreak: number;
+    lastCheckAt: string | null;
+    symbols: Record<string, { anchorDate: string | null; reason: string; entered: boolean }>;
   };
   drawdown: {
     currentDrawdownDollars: number;
@@ -170,10 +172,10 @@ export default function AvwapPage() {
               <Stat label="14 DTE what-if" value={money(page.whatIf14PnlDollars)} />
             </div>
             <p style={{ color: "#64748b", fontSize: 13, margin: "0 0 18px" }}>
-              Fees are ${page.feePerSide.toFixed(2)} per contract per side. Debit cap ${page.budgetDollars}. Last scan {when(page.updatedAt)}.
-              {page.notes.SPY ? ` SPY: ${page.notes.SPY}.` : ""}
-              {page.notes.IWM ? ` IWM: ${page.notes.IWM}.` : ""}
-              {page.notes.QQQ ? ` QQQ: ${page.notes.QQQ}.` : ""}
+              Fees are ${page.feePerSide.toFixed(2)} per contract per side. Debit cap ${page.budgetDollars}. Last check {page.health.lastCheckAt ? when(Date.parse(page.health.lastCheckAt)) : "—"}.
+              {page.health.symbols?.SPY ? ` SPY: ${page.health.symbols.SPY.reason}.` : ""}
+              {page.health.symbols?.IWM ? ` IWM: ${page.health.symbols.IWM.reason}.` : ""}
+              {page.health.symbols?.QQQ ? ` QQQ: ${page.health.symbols.QQQ.reason}.` : ""}
             </p>
             <h2 style={{ fontSize: 16, margin: "0 0 8px" }}>Open</h2>
             <TradeTable rows={page.open} empty="No open AVWAP paper position." />
