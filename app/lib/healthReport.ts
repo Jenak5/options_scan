@@ -1,4 +1,5 @@
 import type { StoredAlert } from "@/app/lib/alertBook";
+import { emptyAvwapPaperHealth, type AvwapPaperHealth } from "@/app/lib/avwapPaper";
 import { chicagoDate, isMarketDay, isNyseHoliday } from "@/app/lib/marketHours";
 import { RULES_VERSION } from "@/app/lib/rulesVersion";
 import { latestScan, type ScanHealth, type ScanOutcome } from "@/app/lib/scanHealth";
@@ -45,6 +46,8 @@ export interface HealthReport {
   candleErrors: number;
   /** Tastytrade OAuth error and error_description from the last candle run. Null on success. */
   candleErrorSample: string | null;
+  /** Gap-day anchored VWAP paper log. Counts only. No orders. */
+  avwapPaper: AvwapPaperHealth;
 }
 
 export function buildHealthReport(input: {
@@ -61,6 +64,7 @@ export function buildHealthReport(input: {
   candleAlertsCovered?: number;
   candleErrors?: number;
   candleErrorSample?: string | null;
+  avwapPaper?: AvwapPaperHealth;
   now: Date;
 }): HealthReport {
   const latest = latestScan(input.health);
@@ -98,6 +102,7 @@ export function buildHealthReport(input: {
     candleAlertsCovered: input.candleAlertsCovered ?? 0,
     candleErrors: input.candleErrors ?? 0,
     candleErrorSample: input.candleErrorSample ?? null,
+    avwapPaper: input.avwapPaper ?? emptyAvwapPaperHealth(),
   };
 }
 

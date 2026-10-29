@@ -1,5 +1,6 @@
 import type { StoredAlert } from "@/app/lib/alertBook";
 import { TRADE_RULES } from "@/app/lib/alertConfig";
+import { avwapPaperBrief, type AvwapPaperBrief, type AvwapPaperTrade } from "@/app/lib/avwapPaper";
 import { planExits } from "@/app/lib/exits";
 import { calendarDaysBetween, newYorkDate, notionalPremium } from "@/app/lib/flow";
 import type { HealthReport } from "@/app/lib/healthReport";
@@ -237,6 +238,8 @@ export interface MarketBrief {
     };
   };
   paper: BriefPaper;
+  /** Gap-day anchored VWAP paper trades. Separate from the manual trade log. */
+  avwapPaper: AvwapPaperBrief;
   /** Same fields as GET /api/health. */
   scan: HealthReport;
 }
@@ -251,6 +254,8 @@ export function buildMarketBrief(input: {
   paperQuotes?: Readonly<Record<string, BriefPaperQuote>>;
   /** Why a live quote is missing, keyed by trade id. Appended to a stored-mark note. */
   paperQuoteMisses?: Readonly<Record<string, string>>;
+  /** Gap-day anchored VWAP paper book. Empty when that log has no rows. */
+  avwapTrades?: readonly AvwapPaperTrade[];
 }): MarketBrief {
   const tradingDay = chicagoDate(input.now);
   const previous = tradingDay ? previousChicagoTradingDay(tradingDay) : null;
@@ -309,6 +314,7 @@ export function buildMarketBrief(input: {
       dailyStop: stop.dailyStop,
       dailyStopAfter: DAILY_STOP_CONSECUTIVE_LOSSES,
     },
+    avwapPaper: avwapPaperBrief(input.avwapTrades ?? [], input.now),
     scan: input.scan,
   };
 }
