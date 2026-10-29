@@ -12,6 +12,8 @@ import { parseShadowBook } from "@/app/lib/shadow";
 import { tastytradeEnabled } from "@/app/lib/tastytrade";
 import { quoteOpenPaperTrades } from "@/app/lib/tradeQuotes";
 import { parseTradeLog } from "@/app/lib/trades";
+import { readUnusualBook } from "@/app/lib/unusualFlowStore";
+import { unusualFlowHealth } from "@/app/lib/unusualFlow";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +25,7 @@ export const dynamic = "force-dynamic";
  * Open scorecard shadows keep the mark stored by the 5-minute scan.
  * This route does not write the trade log, the shadow book, the AVWAP paper log, the calls paper log, alerts, or scan health.
  * It does not call Tastytrade or place an order.
+ * Unusual-flow flags are the ones the scan already stored. This route does not rescan.
  */
 export async function GET(request: NextRequest) {
   if (!(await hasHealthBearer(request))) {
@@ -30,7 +33,7 @@ export async function GET(request: NextRequest) {
   }
 
   const now = new Date();
-  const [health, schwab, book, shadowText, tradeText, avwapText, callsText] = await Promise.all([
+  const [health, schwab, book, shadowText, tradeText, avwapText, callsText, unusualBook] = await Promise.all([
     readScanHealth().catch(() => emptyScanHealth()),
     getSchwabStatus().then(
       (status) => status.connected === true,
@@ -41,6 +44,7 @@ export async function GET(request: NextRequest) {
     readTradeLogText().catch(() => null),
     readAvwapPaperBookText().catch(() => null),
     readCallsPaperBookText().catch(() => null),
+    readUnusualBook().catch(() => null),
   ]);
   const shadows = parseShadowBook(shadowText).records;
   const trades = parseTradeLog(tradeText).trades;
@@ -53,6 +57,7 @@ export async function GET(request: NextRequest) {
     alerts: book.records,
     openShadows: totals.openShadows,
     resolvedShadows: totals.resolvedShadows,
+    unusualFlow: unusualBook ? unusualFlowHealth(unusualBook, now) : undefined,
     now,
   });
   return NextResponse.json(buildMarketBrief({
@@ -65,5 +70,6 @@ export async function GET(request: NextRequest) {
     paperQuoteMisses: paperQuoteBatch.misses,
     avwapBook: parseAvwapPaperBook(avwapText),
     callsBook: parseCallsPaperBook(callsText),
+    unusualFlags: unusualBook?.flags ?? [],
   }));
 }

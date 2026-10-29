@@ -79,6 +79,13 @@ describe("health report", () => {
         },
       },
       callsPaper: emptyCallsPaperHealth(),
+      unusualFlow: {
+        flagsToday: 0,
+        bullishToday: 0,
+        bearishToday: 0,
+        awaitingOutcome: 0,
+        lastFlagAt: null,
+      },
     });
     expect(JSON.stringify(report)).not.toContain("token");
     expect(JSON.stringify(report)).not.toContain("secret");

@@ -9,6 +9,8 @@ import { emptyScanHealth } from "@/app/lib/scanHealth";
 import { dataSourceStatus } from "@/app/lib/marketData";
 import { getSchwabStatus } from "@/app/lib/schwab";
 import { readAvwapPaperBookText, readCallsPaperBookText, readScanHealth, readShadowBookText } from "@/app/lib/schwabStore";
+import { readUnusualBook } from "@/app/lib/unusualFlowStore";
+import { unusualFlowHealth } from "@/app/lib/unusualFlow";
 import { parseShadowBook } from "@/app/lib/shadow";
 import { tastytradeEnabled } from "@/app/lib/tastytrade";
 
@@ -24,7 +26,7 @@ export async function GET(request: NextRequest) {
   }
 
   const now = new Date();
-  const [health, schwab, book, shadowText, candles, avwapText, callsText] = await Promise.all([
+  const [health, schwab, book, shadowText, candles, avwapText, callsText, unusualBook] = await Promise.all([
     readScanHealth().catch(() => emptyScanHealth()),
     getSchwabStatus().then(
       (status) => status.connected === true,
@@ -35,6 +37,7 @@ export async function GET(request: NextRequest) {
     readCandleHealth().catch(() => emptyCandleHealth()),
     readAvwapPaperBookText().catch(() => null),
     readCallsPaperBookText().catch(() => null),
+    readUnusualBook().catch(() => null),
   ]);
   const shadowBook = parseShadowBook(shadowText);
   const avwapBook = parseAvwapPaperBook(avwapText);
@@ -56,6 +59,7 @@ export async function GET(request: NextRequest) {
     candleErrorSample: candles.candleErrorSample,
     avwapPaper: avwapPaperHealth(avwapBook.trades, now, avwapBook),
     callsPaper: callsPaperHealth(parseCallsPaperBook(callsText), now),
+    unusualFlow: unusualBook ? unusualFlowHealth(unusualBook, now) : undefined,
     now,
   });
   return NextResponse.json({ ...report, dataSource: dataSourceStatus() });
