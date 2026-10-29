@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { StoredAlert } from "@/app/lib/alertBook";
 import { hasHealthBearer } from "@/app/lib/auth";
+import { emptyCallsPaperHealth } from "@/app/lib/callsPaper";
 import { buildHealthReport, countShadowTotals, trackedAlertCounts } from "@/app/lib/healthReport";
 import { emptyMarketDataHealth } from "@/app/lib/marketDataHealth";
 import { emptyScanHealth } from "@/app/lib/scanHealth";
@@ -71,7 +72,14 @@ describe("health report", () => {
         drawdownFlag: false,
         dailyStop: false,
         todayLossStreak: 0,
+        lastCheckAt: null,
+        symbols: {
+          SPY: { anchorDate: null, gap: null, reason: "not checked yet", entered: false },
+          IWM: { anchorDate: null, gap: null, reason: "not checked yet", entered: false },
+          QQQ: { anchorDate: null, gap: null, reason: "not checked yet", entered: false },
+        },
       },
+      callsPaper: emptyCallsPaperHealth(),
       marketData: emptyMarketDataHealth(),
     });
     expect(JSON.stringify(report)).not.toContain("token");

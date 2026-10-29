@@ -6,6 +6,7 @@ import {
   AVWAP_FEE_PER_SIDE,
   AVWAP_GAP_FRACTION,
   advanceAvwapPaper,
+  anchorCovered,
   atmStrike,
   avwapContractCount,
   avwapDailyStop,
@@ -20,16 +21,19 @@ import {
   fiveMinuteBars,
   formatAvwapPaperAlert,
   isGapSession,
+  latestAvwapCross,
   latestGapDay,
+  minuteHistoryChunks,
   parseAvwapPaperBook,
   quotePlan,
   serializeAvwapPaperBook,
+  avwapPaperSection,
   signalIsFresh,
   timeStopDue,
   type AvwapPaperTrade,
   type AvwapSnapshot,
 } from "@/app/lib/avwapPaper";
-import { runAvwapPaper, type AvwapPaperDeps } from "@/app/lib/avwapPaperRun";
+import { formatAvwapPaperLog, runAvwapPaper, type AvwapPaperDeps } from "@/app/lib/avwapPaperRun";
 import { normalizeOptionSymbol } from "@/app/lib/optionSymbol";
 import { clearMemoryStoreForTests } from "@/app/lib/schwabStore";
 
@@ -181,7 +185,7 @@ describe("gap day and signal", () => {
     expect(signal && signal.priorClose >= signal.priorVwap).toBe(true);
     expect(firstAvwapReject(bars.slice(0, 2), "2026-10-28", now)).toBeNull();
     expect(signal && signalIsFresh(signal, Date.parse("2026-10-28T13:45:00.000Z"))).toBe(true);
-    expect(signal && signalIsFresh(signal, Date.parse("2026-10-28T13:56:00.000Z"))).toBe(false);
+    expect(signal && signalIsFresh(signal, Date.parse("2026-10-28T14:01:00.000Z"))).toBe(false);
   });
 
   it("picks the expiry nearest 7 and 14 calendar days, skipping weekends and Thanksgiving", () => {
@@ -192,6 +196,83 @@ describe("gap day and signal", () => {
     expect(expiryCandidates("2026-11-20", 5, 10, 7)).not.toContain("2026-11-26");
     expect(atmStrike(448.4)).toBe(448);
     expect(atmStrike(448.5)).toBe(449);
+  });
+
+  it("loads 5-minute bars back to a Sep 17 anchor instead of the last 12 days", () => {
+    const now = Date.parse("2026-10-29T19:35:00.000Z");
+    const chunks = minuteHistoryChunks("2026-09-17", now);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks[0].startDate).toBe(Date.parse("2026-09-17T00:00:00.000Z"));
+    expect(chunks[chunks.length - 1].endDate).toBe(now);
+    expect(chunks.every((chunk) => chunk.endDate - chunk.startDate <= 8 * 24 * 60 * 60 * 1000)).toBe(true);
+    expect(now - 12 * 24 * 60 * 60 * 1000).toBeGreaterThan(Date.parse("2026-09-18T00:00:00.000Z"));
+  });
+
+  it("papers the latest prior-bar cross even when an older cross already happened", () => {
+    const older = [
+      bar("2026-10-26T13:30:00.000Z", 100, 100, 100, 100, 100),
+      bar("2026-10-26T13:35:00.000Z", 90, 100, 90, 90, 100),
+    ];
+    const again = [
+      ...older,
+      bar("2026-10-28T13:30:00.000Z", 110, 110, 110, 110, 100),
+      bar("2026-10-28T13:35:00.000Z", 95, 100, 90, 95, 100),
+    ];
+    const now = Date.parse("2026-10-28T13:40:00.000Z");
+    const first = firstAvwapReject(again, "2026-10-26", now);
+    const latest = latestAvwapCross(again, "2026-10-26", now);
+    expect(first?.at).toBe(Date.parse("2026-10-26T13:35:00.000Z"));
+    expect(latest?.at).toBe(Date.parse("2026-10-28T13:35:00.000Z"));
+    expect(latest && latest.priorClose >= latest.priorVwap && latest.close < latest.vwap).toBe(true);
+    const opened = advanceAvwapPaper(emptyAvwapPaperBook(), [snapshot({
+      daily: [
+        { date: "2026-10-23", open: 100, close: 100 },
+        { date: "2026-10-26", open: 102, close: 100 },
+        { date: "2026-10-27", open: 100.2, close: 100 },
+        { date: "2026-10-28", open: 100.4, close: 95 },
+      ],
+      bars: again,
+      quotes: [
+        { expiration: "2026-11-04", strike: 95, bid: 2, ask: 2.2 },
+        { expiration: "2026-11-11", strike: 95, bid: 2.1, ask: 2.3 },
+      ],
+    })], new Date(now));
+    expect(opened.opened).toHaveLength(1);
+    expect(opened.opened[0].signalAt).toBe(latest?.at);
+    expect(opened.book.checks.SPY).toMatchObject({ anchorDate: "2026-10-26", entered: true });
+  });
+
+  it("does not invent an anchored VWAP when the 5-minute bars start after the gap day", () => {
+    const now = new Date(DAY);
+    const missed = advanceAvwapPaper(emptyAvwapPaperBook(), [snapshot({
+      daily: [
+        { date: "2026-09-16", open: 500, close: 500 },
+        { date: "2026-09-17", open: 520, close: 530 },
+        { date: "2026-10-27", open: 532, close: 670 },
+        { date: "2026-10-28", open: 671, close: 668 },
+      ],
+      bars: signalBars(),
+    })], now);
+    expect(anchorCovered(signalBars(), "2026-09-17", now.getTime()).covered).toBe(false);
+    expect(missed.opened).toHaveLength(0);
+    expect(missed.book.checks.SPY).toMatchObject({
+      anchorDate: "2026-09-17",
+      entered: false,
+    });
+    expect(missed.book.checks.SPY?.reason).toMatch(/before the 5-minute history/);
+    expect(missed.book.checks.SPY?.reason).toMatch(/Anchored VWAP was not computed/);
+    const section = avwapPaperSection(missed.book, now, true);
+    expect(section.health.lastCheckAt).toBe(now.toISOString());
+    expect(section.health.symbols.SPY.reason).toMatch(/2026-09-17/);
+    expect(section.health.symbols.QQQ.reason).toMatch(/no bars/);
+    expect(formatAvwapPaperLog({
+      opened: 0,
+      closed: 0,
+      saved: true,
+      skipped: null,
+      drawdownFlag: false,
+      logNote: section.health.symbols.SPY.reason,
+    })).toMatch(/^AVWAP paper:/);
   });
 });
 

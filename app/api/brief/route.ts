@@ -1,13 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { loadAlertBook } from "@/app/lib/alertStore";
 import { parseAvwapPaperBook } from "@/app/lib/avwapPaper";
+import { parseCallsPaperBook } from "@/app/lib/callsPaper";
 import { hasHealthBearer } from "@/app/lib/auth";
 import { buildMarketBrief } from "@/app/lib/brief";
 import { loadMarketDataHealth } from "@/app/lib/marketData";
 import { buildHealthReport, countShadowTotals } from "@/app/lib/healthReport";
 import { emptyScanHealth } from "@/app/lib/scanHealth";
 import { getSchwabStatus } from "@/app/lib/schwab";
-import { readAvwapPaperBookText, readScanHealth, readShadowBookText, readTradeLogText } from "@/app/lib/schwabStore";
+import { readAvwapPaperBookText, readCallsPaperBookText, readScanHealth, readShadowBookText, readTradeLogText } from "@/app/lib/schwabStore";
 import { parseShadowBook } from "@/app/lib/shadow";
 import { tastytradeEnabled } from "@/app/lib/tastytrade";
 import { quoteOpenPaperTrades } from "@/app/lib/tradeQuotes";
@@ -21,7 +22,7 @@ export const dynamic = "force-dynamic";
  * No session cookie. No secrets in the body.
  * Open paper trades get one batched quote from the market-data provider, with a short timeout.
  * Open scorecard shadows keep the mark stored by the 5-minute scan.
- * This route does not write the trade log, the shadow book, the AVWAP paper log, alerts, or scan health.
+ * This route does not write the trade log, the shadow book, the AVWAP paper log, the calls paper log, alerts, or scan health.
  * It does not place an order.
  */
 export async function GET(request: NextRequest) {
@@ -30,7 +31,7 @@ export async function GET(request: NextRequest) {
   }
 
   const now = new Date();
-  const [health, schwab, book, shadowText, tradeText, avwapText, marketData] = await Promise.all([
+  const [health, schwab, book, shadowText, tradeText, avwapText, callsText, marketData] = await Promise.all([
     readScanHealth().catch(() => emptyScanHealth()),
     getSchwabStatus().then(
       (status) => status.connected === true,
@@ -40,6 +41,7 @@ export async function GET(request: NextRequest) {
     readShadowBookText().catch(() => null),
     readTradeLogText().catch(() => null),
     readAvwapPaperBookText().catch(() => null),
+    readCallsPaperBookText().catch(() => null),
     loadMarketDataHealth().catch(() => null),
   ]);
   const shadows = parseShadowBook(shadowText).records;
@@ -64,6 +66,7 @@ export async function GET(request: NextRequest) {
     now,
     paperQuotes: paperQuoteBatch.quotes,
     paperQuoteMisses: paperQuoteBatch.misses,
-    avwapTrades: parseAvwapPaperBook(avwapText).trades,
+    avwapBook: parseAvwapPaperBook(avwapText),
+    callsBook: parseCallsPaperBook(callsText),
   }));
 }
