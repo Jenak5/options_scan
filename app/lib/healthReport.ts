@@ -1,5 +1,6 @@
 import type { StoredAlert } from "@/app/lib/alertBook";
 import { emptyAvwapPaperHealth, type AvwapPaperHealth } from "@/app/lib/avwapPaper";
+import { emptyCallsPaperHealth, type CallsPaperHealth } from "@/app/lib/callsPaper";
 import { chicagoDate, isMarketDay, isNyseHoliday } from "@/app/lib/marketHours";
 import { RULES_VERSION } from "@/app/lib/rulesVersion";
 import { latestScan, type ScanHealth, type ScanOutcome } from "@/app/lib/scanHealth";
@@ -48,6 +49,8 @@ export interface HealthReport {
   candleErrorSample: string | null;
   /** Gap-day anchored VWAP paper log. Counts only. No orders. */
   avwapPaper: AvwapPaperHealth;
+  /** Flush-then-reclaim call paper log. Counts only. No orders. lastCheckAt is the last scan that evaluated the session. */
+  callsPaper: CallsPaperHealth;
 }
 
 export function buildHealthReport(input: {
@@ -65,6 +68,7 @@ export function buildHealthReport(input: {
   candleErrors?: number;
   candleErrorSample?: string | null;
   avwapPaper?: AvwapPaperHealth;
+  callsPaper?: CallsPaperHealth;
   now: Date;
 }): HealthReport {
   const latest = latestScan(input.health);
@@ -103,6 +107,7 @@ export function buildHealthReport(input: {
     candleErrors: input.candleErrors ?? 0,
     candleErrorSample: input.candleErrorSample ?? null,
     avwapPaper: input.avwapPaper ?? emptyAvwapPaperHealth(),
+    callsPaper: input.callsPaper ?? emptyCallsPaperHealth(),
   };
 }
 
