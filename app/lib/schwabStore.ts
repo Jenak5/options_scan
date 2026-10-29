@@ -19,6 +19,7 @@ import {
   SCHWAB_BLOB_FLOW_PATH,
   SCHWAB_BLOB_STORE_STATUS_PATH,
   SCHWAB_BLOB_JG_VWAP_PATH,
+  SCHWAB_BLOB_AVWAP_PAPER_PATH,
   SCHWAB_BLOB_SHADOW_BOOK_PATH,
   SCHWAB_BLOB_TRADE_LOG_PATH,
   SCHWAB_BLOB_TOKEN_ENV,
@@ -84,6 +85,7 @@ const ALERT_BOOK_KEY = "oes:alert:records";
 const TRADE_LOG_KEY = "oes:trade:log";
 const SHADOW_BOOK_KEY = "oes:alert:shadows";
 const JG_VWAP_BOOK_KEY = "oes:paper:jg-vwap";
+const AVWAP_PAPER_BOOK_KEY = "oes:paper:avwap";
 const BLOB_WRITE_ATTEMPTS = 4;
 const JSON_CONDITIONAL_ATTEMPTS = 3;
 /** Re-read the token store only inside this window before access-token expiry. */
@@ -133,6 +135,7 @@ interface MemoryBag {
   tradeLog: string | null;
   shadowBook: string | null;
   jgVwapBook: string | null;
+  avwapPaperBook: string | null;
 }
 
 interface TokenEnvelope {
@@ -254,7 +257,7 @@ export function setSchwabBlobClientForTests(next: SchwabBlobClient | null): void
 function memoryBag(): MemoryBag {
   const g = globalThis as typeof globalThis & { __oesSchwabMemory?: MemoryBag };
   if (!g.__oesSchwabMemory) {
-    g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null };
+    g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null, avwapPaperBook: null };
   } else if (!g.__oesSchwabMemory.flowSnapshots) {
     g.__oesSchwabMemory.flowSnapshots = {};
   }
@@ -262,12 +265,13 @@ function memoryBag(): MemoryBag {
   if (g.__oesSchwabMemory.tradeLog === undefined) g.__oesSchwabMemory.tradeLog = null;
   if (g.__oesSchwabMemory.shadowBook === undefined) g.__oesSchwabMemory.shadowBook = null;
   if (g.__oesSchwabMemory.jgVwapBook === undefined) g.__oesSchwabMemory.jgVwapBook = null;
+  if (g.__oesSchwabMemory.avwapPaperBook === undefined) g.__oesSchwabMemory.avwapPaperBook = null;
   return g.__oesSchwabMemory;
 }
 
 export function clearMemoryStoreForTests(): void {
   const g = globalThis as typeof globalThis & { __oesSchwabMemory?: MemoryBag };
-  g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null };
+  g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null, avwapPaperBook: null };
   memoryStoreStatus = null;
   tokenCache = null;
   tokenBlobBlockedUntil = 0;
@@ -896,6 +900,79 @@ export async function updateJgVwapBook(change: (current: string | null) => strin
   }
 }
 
+/**
+ * Gap-day anchored VWAP paper log. Same store order as the shadow book, in its own document.
+ * A failed read does not overwrite it. This is not an order and not the A/B scorecard.
+ */
+export async function readAvwapPaperBookText(): Promise<string | null> {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") return null;
+  if (kind === "memory") return memoryBag().avwapPaperBook;
+  if (kind === "blob") {
+    const token = blobToken();
+    if (!token) return null;
+    const read = await readBlobJson(SCHWAB_BLOB_AVWAP_PAPER_PATH, token);
+    if (read.state === "error") {
+      await recordStoreFailure("avwap-paper", "read", read.error);
+      return null;
+    }
+    if (read.state !== "ok") return null;
+    return read.text;
+  }
+  try {
+    const raw = await kvCommand(["GET", AVWAP_PAPER_BOOK_KEY]);
+    return typeof raw === "string" && raw.length > 0 ? raw : null;
+  } catch (err) {
+    await recordStoreFailure("avwap-paper", "read", err);
+    return null;
+  }
+}
+
+export async function updateAvwapPaperBook(change: (current: string | null) => string): Promise<boolean> {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") {
+    await recordStoreFailure("avwap-paper", "write", new Error("AVWAP paper log storage is not configured"));
+    return false;
+  }
+  const guarded = (current: string | null): string | null => {
+    if (!hasJsonArray(current, "trades")) return null;
+    return change(current);
+  };
+  if (kind === "memory") {
+    const bag = memoryBag();
+    const next = guarded(bag.avwapPaperBook);
+    if (next == null) {
+      await recordStoreFailure("avwap-paper", "write", new Error("Refusing to overwrite an unreadable AVWAP paper log"));
+      return false;
+    }
+    bag.avwapPaperBook = next;
+    await clearStoreFailure("avwap-paper");
+    return true;
+  }
+  if (kind === "blob") return writeBlobJson(SCHWAB_BLOB_AVWAP_PAPER_PATH, "avwap-paper", "AVWAP paper log", guarded);
+  let current: string | null;
+  try {
+    const raw = await kvCommand(["GET", AVWAP_PAPER_BOOK_KEY]);
+    current = typeof raw === "string" && raw.length > 0 ? raw : null;
+  } catch (err) {
+    await recordStoreFailure("avwap-paper", "read", err);
+    return false;
+  }
+  const next = guarded(current);
+  if (next == null) {
+    await recordStoreFailure("avwap-paper", "write", new Error("Refusing to overwrite an unreadable AVWAP paper log"));
+    return false;
+  }
+  try {
+    await kvCommand(["SET", AVWAP_PAPER_BOOK_KEY, next]);
+    await clearStoreFailure("avwap-paper");
+    return true;
+  } catch (err) {
+    await recordStoreFailure("avwap-paper", "write", err);
+    return false;
+  }
+}
+
 async function updateBlobAlertBook(change: (current: string | null) => string | null): Promise<boolean> {
   return writeBlobJson(SCHWAB_BLOB_ALERT_BOOK_PATH, "alert-book", "Alert book", change);
 }
@@ -1400,7 +1477,7 @@ async function readBlobJson(pathname: string, token: string, bypassCache = false
   }
 }
 
-type JsonStoreTarget = "alert-book" | "flow-snapshots" | "trade-log" | "shadow-book" | "jg-vwap";
+type JsonStoreTarget = "alert-book" | "flow-snapshots" | "trade-log" | "shadow-book" | "jg-vwap" | "avwap-paper";
 
 interface StoreFailureRecord {
   target: JsonStoreTarget;
@@ -1416,7 +1493,7 @@ interface PersistedStoreStatus {
   scan: ScanHealth;
 }
 
-const JSON_STORE_TARGETS: JsonStoreTarget[] = ["alert-book", "flow-snapshots", "trade-log", "shadow-book", "jg-vwap"];
+const JSON_STORE_TARGETS: JsonStoreTarget[] = ["alert-book", "flow-snapshots", "trade-log", "shadow-book", "jg-vwap", "avwap-paper"];
 
 /**
  * Conditional put using the strong etag from head(). On 412, re-read and retry.
@@ -1779,6 +1856,7 @@ function storeLabel(target: JsonStoreTarget): string {
   if (target === "trade-log") return "Trade log";
   if (target === "shadow-book") return "Alert scorecard";
   if (target === "jg-vwap") return "JG-VWAP paper log";
+  if (target === "avwap-paper") return "AVWAP paper log";
   return "Flow snapshot store";
 }
 

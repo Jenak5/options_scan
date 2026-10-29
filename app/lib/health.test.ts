@@ -61,6 +61,16 @@ describe("health report", () => {
       candleAlertsCovered: 0,
       candleErrors: 0,
       candleErrorSample: null,
+      avwapPaper: {
+        paperOnly: true,
+        open: 0,
+        closed: 0,
+        cumulativePnlDollars: 0,
+        maxDrawdownDollars: 0,
+        drawdownFlag: false,
+        dailyStop: false,
+        todayLossStreak: 0,
+      },
     });
     expect(JSON.stringify(report)).not.toContain("token");
     expect(JSON.stringify(report)).not.toContain("secret");
