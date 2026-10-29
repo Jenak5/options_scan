@@ -623,7 +623,7 @@ describe("reports and market-data boundary", () => {
     expect(brief.callsPaper.note).toMatch(/Paper only/);
   });
 
-  it("reads Schwab price history, chains, and quotes, and no order endpoint", () => {
+  it("reads price history, chains, and quotes through the provider, and no order endpoint", () => {
     expect(CALLS_MARKET_DATA_PATHS).toEqual(["pricehistory", "chains", "quotes"]);
     const files = [
       "app/lib/callsPaper.ts",
@@ -640,13 +640,18 @@ describe("reports and market-data boundary", () => {
       expect(source).not.toMatch(/placeOrder|createOrder|cancelOrder/);
     }
     const runner = readFileSync(join(process.cwd(), "app/lib/callsPaperRun.ts"), "utf8");
-    expect(runner).toContain('from "@/app/lib/schwab"');
+    expect(runner).toContain('from "@/app/lib/marketData"');
+    expect(runner).not.toContain('from "@/app/lib/schwab"');
     expect(runner).toContain("getPriceHistory");
     expect(runner).toContain("getOptionChain");
     expect(runner).toContain("getQuoteEntries");
-    expect(runner).not.toContain("marketData");
-    expect(runner).not.toMatch(/tastytrade/i);
     const cron = readFileSync(join(process.cwd(), "app/api/cron/route.ts"), "utf8");
+    const avwapAt = cron.indexOf("await runAvwapPaper");
+    const flowAt = cron.indexOf("await scanEstimatedFlow");
+    const callsAt = cron.indexOf("await runCallsPaper");
+    expect(avwapAt).toBeGreaterThan(-1);
+    expect(avwapAt).toBeLessThan(flowAt);
+    expect(avwapAt).toBeLessThan(callsAt);
     expect(cron).toContain("runCallsPaper");
     const health = readFileSync(join(process.cwd(), "app/api/health/route.ts"), "utf8");
     const brief = readFileSync(join(process.cwd(), "app/api/brief/route.ts"), "utf8");

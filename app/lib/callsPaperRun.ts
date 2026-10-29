@@ -20,16 +20,17 @@ import {
 import { addCalendarDays, newYorkDate } from "@/app/lib/flow";
 import type { OptionContract } from "@/app/lib/contract";
 import { normalizeOptionSymbol } from "@/app/lib/optionSymbol";
-import { getOptionChain, getPriceHistory, getQuoteEntries } from "@/app/lib/schwab";
+import { getOptionChain, getPriceHistory, getQuoteEntries } from "@/app/lib/marketData";
 import type { PriceCandle } from "@/app/lib/schwabParse";
 import { readCallsPaperBookText, resolveStoreKind, updateCallsPaperBook } from "@/app/lib/schwabStore";
 import { sendTelegramAlert } from "@/app/lib/telegram";
 
 /**
  * Scheduled paper pass for the flush-then-reclaim call and bull call spread.
- * Price history, option chains, and option quotes only. It does not call an
- * account, an order, or a transaction endpoint, and it does not write the A/B alert book.
- * Schwab market-data paths: pricehistory, chains, quotes.
+ * Price history, option chains, and option quotes go through the market-data
+ * provider (Tastytrade, then Schwab). It does not call an account, an order,
+ * or a transaction endpoint, and it does not write the A/B alert book.
+ * Read kinds: pricehistory, chains, quotes.
  */
 
 export const CALLS_MARKET_DATA_PATHS = ["pricehistory", "chains", "quotes"] as const;

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Limiter, mapLimit, resetTastytradeMarketForTests, tastytradePeakConcurrency, ttQuotes, TT_MAX_CONCURRENT, withTastytradeAuth } from "@/app/lib/tastytradeMarket";
+import { writeStoredTastytradeAccess } from "@/app/lib/tastytradeStore";
 
 const ENV = { TASTYTRADE_CLIENT_ID: "id", TASTYTRADE_CLIENT_SECRET: "secret", TASTYTRADE_REFRESH_TOKEN: "refresh" };
 
@@ -63,38 +64,38 @@ describe("Tastytrade auth", () => {
     expect(t.calls).toEqual(["t1", "t2"]);
   });
 
-  it("treats a 401 that survives a fresh token as a rate limit and backs off with jitter", async () => {
+  it("refreshes once on a 401 and then gives up so the caller can fall back", async () => {
     const waits: number[] = [];
-    resetTastytradeMarketForTests({ sleep: async (ms) => void waits.push(ms), random: () => 0.5 });
-    const t = fakeTasty({ failFirst: 2 });
+    resetTastytradeMarketForTests({ sleep: async (ms) => void waits.push(ms) });
+    const t = fakeTasty({ failFirst: 99 });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    await ttQuotes({ equity: ["XLF"] }, t.fetchImpl);
-    expect(t.calls).toEqual(["t1", "t2", "t2"]);
+    await expect(ttQuotes({ equity: ["XLF"] }, t.fetchImpl)).rejects.toThrow("Tastytrade market data request failed (401)");
+    expect(t.calls).toEqual(["t1", "t2"]);
     expect(t.minted()).toBe(2);
-    expect(waits).toEqual([250, 1875]);
+    expect(waits).toEqual([250]);
     const logs = warn.mock.calls.map((c) => String(c[0]));
     expect(logs.some((l) => /401 on attempt 2 \(token age \d+s\)/.test(l))).toBe(true);
-    expect(logs.some((l) => /treating 401 as rate limit, backing off 1875ms/.test(l))).toBe(true);
+    expect(logs.some((l) => /still 401 after one refresh/.test(l))).toBe(true);
+    expect(logs.some((l) => /rate limit/.test(l))).toBe(false);
     warn.mockRestore();
   });
 
-  it("jitter stays within base to 1.5x base", async () => {
-    for (const r of [0, 0.999]) {
-      const waits: number[] = [];
-      resetTastytradeMarketForTests({ sleep: async (ms) => void waits.push(ms), random: () => r });
-      const t = fakeTasty({ failFirst: 3 });
-      await ttQuotes({ equity: ["XLF"] }, t.fetchImpl);
-      expect(waits[1]).toBeGreaterThanOrEqual(1500);
-      expect(waits[1]).toBeLessThanOrEqual(2250);
-      expect(waits[2]).toBeGreaterThanOrEqual(3000);
-      expect(waits[2]).toBeLessThanOrEqual(4500);
-    }
-  });
-
-  it("gives up after four 401s so the caller can fall back to Schwab", async () => {
-    const t = fakeTasty({ failFirst: 99 });
-    await expect(ttQuotes({ equity: ["XLF"] }, t.fetchImpl)).rejects.toThrow("Tastytrade market data request failed (401)");
-    expect(t.calls.length).toBe(4);
+  it("reuses a cached access token and does not print it", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    await writeStoredTastytradeAccess({
+      access: "stored-access-token",
+      mintedAt: Date.now(),
+      expiresAt: Date.now() + 10 * 60_000,
+    });
+    const t = fakeTasty();
+    await ttQuotes({ equity: ["SPY"] }, t.fetchImpl);
+    expect(t.minted()).toBe(0);
+    expect(t.calls).toEqual(["stored-access-token"]);
+    const logs = [...warn.mock.calls, ...info.mock.calls].map((c) => String(c[0])).join(" ");
+    expect(logs).not.toContain("stored-access-token");
+    warn.mockRestore();
+    info.mockRestore();
   });
 
   it("parallel 401s on one token mint only one replacement", async () => {

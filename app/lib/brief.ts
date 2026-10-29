@@ -19,13 +19,13 @@ import {
 /**
  * Read-only packet for a pre-market, midday, or close brief.
  * Alerts, shadows, and the paper log come from what is already stored.
- * The route passes a Schwab quote for each open paper trade. This function
+ * The route passes a provider quote for each open paper trade. This function
  * does not fetch, and it does not write a trade, a shadow, or an alert.
  * Open scorecard shadows stay on the mark the 5-minute scan stored.
  */
 
 export const MARKS_NOTE =
-  "Open paper trades are quoted from Schwab: bid, ask, mid, and the quote time. The headline mark is the bid. P&L and the distance to the stop and target are also given at the mid. During the Central regular session that quote is current. Outside that session it is the latest quote Schwab returned. Open scorecard shadows keep the mark stored by the 5-minute scan, and this brief does not refresh them. If a paper trade has no quote, it falls back to that stored mark and is labeled stored, with the time the mark was saved and why the quote was missing.";
+  "Open paper trades are quoted from the market-data provider (Tastytrade, then Schwab if that call fails): bid, ask, mid, and the quote time. The headline mark is the bid. P&L and the distance to the stop and target are also given at the mid. During the Central regular session that quote is current. Outside that session it is the latest quote the provider returned. Open scorecard shadows keep the mark stored by the 5-minute scan, and this brief does not refresh them. If a paper trade has no quote, it falls back to that stored mark and is labeled stored, with the time the mark was saved and why the quote was missing.";
 
 export const NO_TRADES_NOTE =
   "No paper trades are in the log. Open positions, this week's realized P&L, and today's loss streak are zeros, not estimates.";
@@ -34,7 +34,7 @@ export const NO_STORED_MARK_NOTE =
   "No current quote and no stored mark.";
 
 export const LATEST_QUOTE_NOTE =
-  "Market is closed. This is the latest Schwab quote, not a regular-session price.";
+  "Market is closed. This is the latest quote the provider returned, not a regular-session price.";
 
 /** Age label for a stored fallback. markAsOf is the ISO time the mark was saved. */
 export function storedMarkNote(markAsOf: string | null, now: Date): string {

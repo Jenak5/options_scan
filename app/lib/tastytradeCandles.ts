@@ -84,7 +84,7 @@ export interface TastytradeTokenRequest {
   url: string;
   method: "POST";
   headers: Record<string, string>;
-  /** application/x-www-form-urlencoded body. A string, so fetch does not add a charset. */
+  /** JSON body. A string, so fetch does not add a charset. */
   body: string;
 }
 
@@ -131,28 +131,31 @@ export function readTastytradeCredentials(
 }
 
 /**
- * Documented Tastytrade refresh:
+ * Documented Tastytrade refresh (OAuth2, current guide):
  * POST https://api.tastyworks.com/oauth/token
- * Content-Type: application/x-www-form-urlencoded
- * grant_type=refresh_token, refresh_token, client_secret, and client_id.
- * User-Agent is required. The body is a string so the content type stays without ";charset".
+ * Content-Type: application/json
+ * grant_type, refresh_token, and client_secret. client_id is optional and must match if sent.
+ * User-Agent is required. A missing User-Agent is rejected with 401.
+ * The body is a string so the content type stays without ";charset".
+ * Username login was removed on 2026-02-11. This client only refreshes an OAuth access token.
+ * Refreshing does not return a new refresh token. Do not overwrite the one in the environment.
  */
 export function tastytradeTokenRequest(creds: TastytradeCredentials): TastytradeTokenRequest {
-  const body = new URLSearchParams({
+  const payload: Record<string, string> = {
     grant_type: "refresh_token",
     refresh_token: creds.refreshToken,
     client_secret: creds.clientSecret,
-    client_id: creds.clientId,
-  }).toString();
+  };
+  if (creds.clientId) payload.client_id = creds.clientId;
   return {
     url: TOKEN_URL,
     method: "POST",
     headers: {
       "User-Agent": USER_AGENT,
-      "Content-Type": "application/x-www-form-urlencoded",
+      "Content-Type": "application/json",
       Accept: "application/json",
     },
-    body,
+    body: JSON.stringify(payload),
   };
 }
 

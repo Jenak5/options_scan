@@ -11,6 +11,16 @@ export interface OptionContract {
   volume: number;
   openInterest: number;
   delta: number | null;
+  /** DXLink Greeks. Null when that feed did not send the field. */
+  gamma?: number | null;
+  theta?: number | null;
+  vega?: number | null;
+  rho?: number | null;
+  /**
+   * TimeAndSale aggressor. buy/sell when the print named a side.
+   * unknown when the feed sent a print without a side. Absent on Schwab quotes.
+   */
+  aggressorSide?: "buy" | "sell" | "unknown" | null;
   iv: number | null;
   strike: number;
   /** Calendar date, YYYY-MM-DD. */

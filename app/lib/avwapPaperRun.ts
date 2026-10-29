@@ -16,7 +16,7 @@ import {
   type AvwapSnapshot,
 } from "@/app/lib/avwapPaper";
 import { newYorkDate } from "@/app/lib/flow";
-import { getPriceHistory, getQuoteEntries } from "@/app/lib/schwab";
+import { getPriceHistory, getQuoteEntries } from "@/app/lib/marketData";
 import type { PriceCandle } from "@/app/lib/schwabParse";
 import { normalizeOptionSymbol } from "@/app/lib/optionSymbol";
 import { readAvwapPaperBookText, resolveStoreKind, updateAvwapPaperBook } from "@/app/lib/schwabStore";
@@ -24,7 +24,8 @@ import { sendTelegramAlert } from "@/app/lib/telegram";
 
 /**
  * Scheduled paper pass for the gap-day anchored VWAP put.
- * Price history and option quotes only. It does not call a chain, an account,
+ * Price history and option quotes go through the market-data provider
+ * (Tastytrade, then Schwab). It does not call a chain, an account,
  * or any order endpoint, and it does not write the A/B alert book.
  */
 

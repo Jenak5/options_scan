@@ -5,7 +5,21 @@ import {
   dxlinkOpening,
   openCandleAccess,
   openQuoteSession,
+  TASTYTRADE_REST_TIMEOUT_MS,
 } from "@/app/lib/tastytradeCandles";
+import {
+  applyDxlinkOverlay,
+  collectDxlinkFeed,
+  noteDxlinkTradeSide,
+  tradePrintWindowMs,
+  type DxlinkSnapshot,
+} from "@/app/lib/tastytradeDxlink";
+import {
+  clearStoredTastytradeAccess,
+  readStoredTastytradeAccess,
+  resetTastytradeStoreForTests,
+  writeStoredTastytradeAccess,
+} from "@/app/lib/tastytradeStore";
 import {
   buildChainResult,
   candlePeriod,
@@ -44,15 +58,8 @@ export const QUOTE_BATCH = 100;
 /** Tastytrade access tokens last 15 minutes. Refresh a minute early. */
 const TOKEN_FALLBACK_TTL_MS = 15 * 60 * 1000;
 const TOKEN_EXPIRY_BUFFER_MS = 60 * 1000;
-/** Wait before the first retry after a 401 (fresh token). */
+/** Wait before the single retry after a 401 (fresh token). */
 const AUTH_RETRY_DELAY_MS = 250;
-/**
- * A 401 that survives a fresh-token retry is treated as a rate limit:
- * back off longer, with jitter, before trying again. After these, give up
- * so the caller can fall back to Schwab.
- */
-const RATE_LIMIT_BACKOFF_MS = [1500, 3000];
-const RATE_LIMIT_JITTER = 0.5;
 /**
  * Tastytrade requests in flight at once per instance (one scan).
  * Two, so a burst right after login does not come back as 401.
@@ -69,7 +76,6 @@ interface CachedToken {
 
 let cachedToken: CachedToken | null = null;
 let refreshing: Promise<CachedToken> | null = null;
-let randomImpl: () => number = Math.random;
 let sleepImpl: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class TastytradeDataError extends Error {
@@ -119,11 +125,17 @@ async function currentToken(fetchImpl: typeof fetch): Promise<CachedToken> {
   if (!refreshing) {
     refreshing = (async () => {
       try {
+        const stored = await readStoredTastytradeAccess();
+        if (stored && tokenUsable(stored, Date.now())) {
+          cachedToken = stored;
+          return stored;
+        }
         const opened = await openCandleAccess({ fetchImpl });
         if (!opened.access) throw new TastytradeDataError(opened.errorSample);
         const now = Date.now();
         const ttl = opened.access.expiresInMs ?? TOKEN_FALLBACK_TTL_MS;
         cachedToken = { access: opened.access.access, mintedAt: now, expiresAt: now + ttl };
+        await writeStoredTastytradeAccess(cachedToken);
         return cachedToken;
       } finally {
         refreshing = null;
@@ -134,53 +146,62 @@ async function currentToken(fetchImpl: typeof fetch): Promise<CachedToken> {
 }
 
 /** Drop the cached token only if it is still the one that got the 401. */
-function invalidateToken(access: string): void {
+async function invalidateToken(access: string): Promise<void> {
   if (cachedToken?.access === access) cachedToken = null;
+  await clearStoredTastytradeAccess(access);
 }
 
 /**
- * Run an authorized call. On a 401, drop that token, wait briefly, and try
- * again with a fresh one, up to two retries. The token age is logged (never
- * the token) so repeated 401s on new tokens can be told apart from expiry.
+ * Run an authorized call. On a 401, drop that token, refresh once, and retry
+ * the request once. A second 401 is returned to the caller so it can fall
+ * back to Schwab. Do not loop the token endpoint: repeated failures can get
+ * the address blocked. The token value is never logged. Age is, so a 401 on
+ * a new token can be told apart from expiry.
  */
 export async function withTastytradeAuth<T>(
   label: string,
   fetchImpl: typeof fetch,
   call: (access: string) => Promise<{ status: number; value?: T }>,
 ): Promise<T> {
-  const maxAttempts = 2 + RATE_LIMIT_BACKOFF_MS.length;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+  let refreshed = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
     const token = await currentToken(fetchImpl);
     const result = await globalLimiter.run(() => call(token.access));
     if (result.status !== 401) {
-      if (attempt > 0) console.info(`[tastytrade-auth] ${label} ok after ${attempt} retr${attempt === 1 ? "y" : "ies"}`);
+      if (attempt > 0) console.info(`[tastytrade-auth] ${label} ok after refresh`);
       return result.value as T;
     }
     const age = Math.round((Date.now() - token.mintedAt) / 1000);
     console.warn(`[tastytrade-auth] ${label} 401 on attempt ${attempt + 1} (token age ${age}s)`);
-    if (attempt === 0) {
-      // First 401: maybe a stale token. Drop it and retry with a fresh one.
-      invalidateToken(token.access);
-      await sleepImpl(AUTH_RETRY_DELAY_MS);
-      continue;
-    }
-    // 401 survived a fresh-token retry: treat it as a rate limit.
-    const base = RATE_LIMIT_BACKOFF_MS[attempt - 1];
-    if (base == null) break;
-    const wait = Math.round(base * (1 + RATE_LIMIT_JITTER * randomImpl()));
-    console.warn(`[tastytrade-auth] ${label} treating 401 as rate limit, backing off ${wait}ms`);
-    await sleepImpl(wait);
+    await invalidateToken(token.access);
+    if (refreshed) break;
+    refreshed = true;
+    await sleepImpl(AUTH_RETRY_DELAY_MS);
   }
-  console.warn(`[tastytrade-auth] ${label} still 401 after ${maxAttempts} attempts, giving up`);
+  console.warn(`[tastytrade-auth] ${label} still 401 after one refresh, giving up`);
   throw new TastytradeDataError(label === "quote token" ? "Tastytrade quote token failed (401)" : `Tastytrade ${label} failed (401)`);
+}
+
+function isTimeoutError(err: unknown): boolean {
+  if (err instanceof DOMException && (err.name === "TimeoutError" || err.name === "AbortError")) return true;
+  return err instanceof Error && /timed out|TimeoutError/i.test(err.message);
 }
 
 async function ttGet(path: string, fetchImpl: typeof fetch = fetch, signal?: AbortSignal): Promise<unknown> {
   return withTastytradeAuth("market data request", fetchImpl, async (token) => {
-    const res = await fetchImpl(`${TASTYTRADE_LIVE_ORIGIN}${path}`, {
-      headers: { "User-Agent": USER_AGENT, Authorization: `Bearer ${token}`, Accept: "application/json" },
-      signal,
-    });
+    const timeout = AbortSignal.timeout(TASTYTRADE_REST_TIMEOUT_MS);
+    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    let res: Response;
+    try {
+      res = await fetchImpl(`${TASTYTRADE_LIVE_ORIGIN}${path}`, {
+        headers: { "User-Agent": USER_AGENT, Authorization: `Bearer ${token}`, Accept: "application/json" },
+        signal: combined,
+      });
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      if (isTimeoutError(err)) throw new TastytradeDataError("Tastytrade market data request timed out");
+      throw err;
+    }
     if (res.status === 401) return { status: 401 };
     if (!res.ok) throw new TastytradeDataError(`Tastytrade market data request failed (${res.status})`);
     return { status: res.status, value: await res.json() };
@@ -230,27 +251,55 @@ export async function ttOptionChain(
   const selected = selectChainSymbols(parseNestedChain(nested), input, spot);
   if (selected.length === 0) return { contracts: [], delayed: false, underlyingPrice: spot };
   const symbols = selected.map((s) => s.symbol);
-  const [quotes, trades] = await Promise.all([
+  const [quotes, feed] = await Promise.all([
     ttQuotes({ options: symbols }, fetchImpl),
-    ttLastTradesSafe(symbols, fetchImpl),
+    dxlinkEnrichSafe(symbols, fetchImpl),
   ]);
-  return buildChainResult(selected, quotes, spot, trades);
+  if (!feed) return buildChainResult(selected, quotes, spot);
+  const overlaid = applyDxlinkOverlay(quotes, feed);
+  return buildChainResult(selected, overlaid.items, spot, overlaid.trades);
 }
 
-/** Last trades never block a chain. Any DXLink problem leaves size and time empty, as before. */
-async function ttLastTradesSafe(occSymbols: string[], fetchImpl: typeof fetch): Promise<Map<string, TtLastTrade>> {
+/**
+ * Quote, Greeks, Summary, and TimeAndSale for this chain.
+ * A feed failure leaves the REST quote in place and reports trade-side data as no.
+ * The socket stays open only for the bounded print window.
+ */
+async function dxlinkEnrichSafe(occSymbols: string[], fetchImpl: typeof fetch): Promise<DxlinkSnapshot | null> {
+  const windowMs = tradePrintWindowMs();
+  if (windowMs <= 0) {
+    noteDxlinkTradeSide("no");
+    return null;
+  }
   try {
-    return await ttLastTrades(occSymbols, { fetchImpl });
+    const streamers = Array.from(new Set(occSymbols.map(streamerFromOcc).filter((s): s is string => s != null)));
+    if (streamers.length === 0) {
+      noteDxlinkTradeSide("no");
+      return null;
+    }
+    const session = await quoteSession(fetchImpl);
+    const transport = await connectNodeWebSocket(session.url);
+    try {
+      const snap = await collectDxlinkFeed(transport, session.token, streamers, windowMs);
+      noteDxlinkTradeSide(snap.tradeSideDataAvailable);
+      return snap;
+    } finally {
+      transport.close();
+    }
   } catch (err) {
-    console.warn(`[market-data] last trades unavailable: ${err instanceof Error ? err.message : "unknown"}`);
-    return new Map();
+    noteDxlinkTradeSide("no");
+    const text = err instanceof Error ? err.message : "unknown";
+    const safe = text.replace(/bearer\s+\S+/gi, "bearer [redacted]").replace(/\s+/g, " ").slice(0, 160);
+    console.warn(`[market-data] DXLink feed unavailable: ${safe}`);
+    return null;
   }
 }
 
 /**
- * Last trade per option from DXLink Trade events. DXLink answers a Trade
- * subscription with the latest trade right away, so this waits until every
- * symbol answered, the feed goes quiet, or the timeout.
+ * Last trade per option from DXLink Trade events. The chain path uses
+ * TimeAndSale instead, which also carries aggressor side. This stays for a
+ * one-shot Trade snapshot. DXLink answers with the latest trade right away,
+ * so this waits until every symbol answered, the feed goes quiet, or the timeout.
  */
 export async function ttLastTrades(
   occSymbols: string[],
@@ -422,14 +471,13 @@ async function streamCandles(
 
 export function resetTastytradeMarketForTests(options?: {
   sleep?: (ms: number) => Promise<void>;
-  random?: () => number;
   maxConcurrent?: number;
 }): void {
   cachedToken = null;
-  randomImpl = options?.random ?? Math.random;
   globalLimiter = new Limiter(options?.maxConcurrent ?? TT_MAX_CONCURRENT);
   refreshing = null;
   sleepImpl = options?.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  resetTastytradeStoreForTests();
 }
 
 /** Highest number of Tastytrade requests seen in flight at once (tests/diagnostics). */
