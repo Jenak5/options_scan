@@ -17,7 +17,7 @@ import { TICKER_GROUP_PAUSE_MS, flowCronSliceNote, planCronScan, selectAlertRows
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import type { ResearchCandidate } from "@/app/lib/researchTrack";
 import { earningsDateMapForRows, windowEarningsDateForContract } from "@/app/lib/earningsWindow";
-import { runAvwapPaper } from "@/app/lib/avwapPaperRun";
+import { formatAvwapPaperLog, runAvwapPaper } from "@/app/lib/avwapPaperRun";
 import { runJgVwapPaper } from "@/app/lib/jgVwapRun";
 import { openMissingShadows, openScanTickers, recordEarningsWindowShadows, recordExperimentalShadows, recordVwapRejectionPuts, runShadowPass } from "@/app/lib/shadowStore";
 import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow, isMarketDay } from "@/app/lib/marketHours";
@@ -234,6 +234,22 @@ async function handleCron(request: NextRequest) {
   let shadowAt: number | null = null;
 
   try {
+    // Paper check first. The flow scan can run long enough that a cross would
+    // otherwise age out, and a thrown flow scan used to skip this entirely.
+    // The line is written to the runtime log, not only the JSON body.
+    if (inSession || isManual) {
+      try {
+        const avwap = await runAvwapPaper(now);
+        const line = formatAvwapPaperLog(avwap);
+        console.info(line);
+        log.push(line);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message.slice(0, 160) : "AVWAP paper update failed";
+        const line = `AVWAP paper update failed: ${detail}`;
+        console.info(line);
+        log.push(line);
+      }
+    }
     let followUps = { updated: 0, quoted: 0 };
     try {
       followUps = await runAlertFollowUps(now);
@@ -427,15 +443,6 @@ async function handleCron(request: NextRequest) {
       } else {
         log.push(`${row.ticker}: saved in the alert book, but Telegram send failed — check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID`);
       }
-    }
-    try {
-      const avwap = await runAvwapPaper(now);
-      const avwapNoun = avwap.opened === 1 ? "entry" : "entries";
-      const flag = avwap.drawdownFlag ? " Drawdown flag over $1,500." : "";
-      log.push(`AVWAP paper: ${avwap.opened} new ${avwapNoun}, ${avwap.closed} closed (${avwap.saved ? "saved" : "not saved"}, PAPER ONLY).${flag} ${avwap.logNote}`);
-    } catch (err) {
-      const line = err instanceof Error ? err.message.slice(0, 160) : "AVWAP paper update failed";
-      log.push(`AVWAP paper update failed: ${line}`);
     }
     try {
       const jg = await runJgVwapPaper(now);

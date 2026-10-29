@@ -46,7 +46,7 @@ export interface HealthReport {
   candleErrors: number;
   /** Tastytrade OAuth error and error_description from the last candle run. Null on success. */
   candleErrorSample: string | null;
-  /** Gap-day anchored VWAP paper log. Counts only. No orders. */
+  /** Gap-day anchored VWAP paper log, including the last check and why each symbol did not enter. No orders. */
   avwapPaper: AvwapPaperHealth;
 }
 
