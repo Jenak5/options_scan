@@ -5,7 +5,7 @@ import { hasHealthBearer } from "@/app/lib/auth";
 import { emptyCandleHealth, readCandleHealth } from "@/app/lib/candleStore";
 import { buildHealthReport, countShadowTotals, trackedAlertCounts } from "@/app/lib/healthReport";
 import { emptyScanHealth } from "@/app/lib/scanHealth";
-import { dataSourceStatus } from "@/app/lib/marketData";
+import { loadMarketDataHealth } from "@/app/lib/marketData";
 import { getSchwabStatus } from "@/app/lib/schwab";
 import { readAvwapPaperBookText, readScanHealth, readShadowBookText } from "@/app/lib/schwabStore";
 import { parseShadowBook } from "@/app/lib/shadow";
@@ -23,7 +23,7 @@ export async function GET(request: NextRequest) {
   }
 
   const now = new Date();
-  const [health, schwab, book, shadowText, candles, avwapText] = await Promise.all([
+  const [health, schwab, book, shadowText, candles, avwapText, marketData] = await Promise.all([
     readScanHealth().catch(() => emptyScanHealth()),
     getSchwabStatus().then(
       (status) => status.connected === true,
@@ -33,6 +33,7 @@ export async function GET(request: NextRequest) {
     readShadowBookText().catch(() => ""),
     readCandleHealth().catch(() => emptyCandleHealth()),
     readAvwapPaperBookText().catch(() => null),
+    loadMarketDataHealth().catch(() => null),
   ]);
   const shadowBook = parseShadowBook(shadowText);
   const totals = countShadowTotals(shadowBook.records);
@@ -52,7 +53,8 @@ export async function GET(request: NextRequest) {
     candleErrors: candles.candleErrors,
     candleErrorSample: candles.candleErrorSample,
     avwapPaper: avwapPaperHealth(parseAvwapPaperBook(avwapText).trades, now),
+    marketData: marketData ?? undefined,
     now,
   });
-  return NextResponse.json({ ...report, dataSource: dataSourceStatus() });
+  return NextResponse.json({ ...report, dataSource: report.marketData });
 }

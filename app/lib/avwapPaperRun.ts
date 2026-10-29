@@ -13,7 +13,7 @@ import {
   type AvwapQuoteRequest,
   type AvwapSnapshot,
 } from "@/app/lib/avwapPaper";
-import { getPriceHistory, getQuoteEntries } from "@/app/lib/schwab";
+import { getPriceHistory, getQuoteEntries } from "@/app/lib/marketData";
 import type { PriceCandle } from "@/app/lib/schwabParse";
 import { normalizeOptionSymbol } from "@/app/lib/optionSymbol";
 import { readAvwapPaperBookText, resolveStoreKind, updateAvwapPaperBook } from "@/app/lib/schwabStore";

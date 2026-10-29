@@ -114,8 +114,9 @@ describe("tastytrade candle protocol", () => {
         expect(init?.method).toBe("POST");
         const headers = init?.headers as Record<string, string>;
         expect(headers["User-Agent"]).toBe("options-scan/1.0");
-        expect(String(init?.body)).toContain("grant_type=refresh_token");
-        expect(String(init?.body)).toContain("client_id=client-id");
+        const payload = JSON.parse(String(init?.body)) as Record<string, string>;
+        expect(payload.grant_type).toBe("refresh_token");
+        expect(payload.client_id).toBe("client-id");
         return json({ access_token: "access-token" });
       }
       const headers = init?.headers as Record<string, string>;
@@ -162,7 +163,7 @@ describe("tastytrade candle protocol", () => {
     expect(result.errorSample).toBeNull();
   });
 
-  it("posts the documented refresh form and trims whitespace and newlines from the env values", () => {
+  it("posts the documented refresh JSON and trims whitespace and newlines from the env values", () => {
     const creds = readTastytradeCredentials({
       TASTYTRADE_CLIENT_ID: " client-id \n",
       TASTYTRADE_CLIENT_SECRET: "\r\nclient-secret\n",
@@ -176,14 +177,14 @@ describe("tastytrade candle protocol", () => {
     const request = tastytradeTokenRequest(creds!);
     expect(request.url).toBe("https://api.tastyworks.com/oauth/token");
     expect(request.method).toBe("POST");
-    expect(request.headers["Content-Type"]).toBe("application/x-www-form-urlencoded");
+    expect(request.headers["Content-Type"]).toBe("application/json");
     expect(request.headers["User-Agent"]).toBe("options-scan/1.0");
     expect(typeof request.body).toBe("string");
-    const params = new URLSearchParams(request.body);
-    expect(params.get("grant_type")).toBe("refresh_token");
-    expect(params.get("refresh_token")).toBe("refresh-token");
-    expect(params.get("client_secret")).toBe("client-secret");
-    expect(params.get("client_id")).toBe("client-id");
+    const params = JSON.parse(request.body) as Record<string, string>;
+    expect(params.grant_type).toBe("refresh_token");
+    expect(params.refresh_token).toBe("refresh-token");
+    expect(params.client_secret).toBe("client-secret");
+    expect(params.client_id).toBe("client-id");
     expect(request.body).not.toMatch(/[\r\n]/);
     expect(request.headers["Content-Type"]).not.toContain("charset");
   });
@@ -214,7 +215,7 @@ describe("tastytrade candle protocol", () => {
     const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
       expect(String(url)).toBe("https://api.tastyworks.com/oauth/token");
       expect(init?.method).toBe("POST");
-      expect((init?.headers as Record<string, string>)["Content-Type"]).toBe("application/x-www-form-urlencoded");
+      expect((init?.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
       expect(typeof init?.body).toBe("string");
       return new Response(JSON.stringify({
         error: "invalid_client",

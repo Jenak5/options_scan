@@ -17,6 +17,7 @@ import { chicagoClock, chicagoDate } from "@/app/lib/marketHours";
 import { parseShadowBook } from "@/app/lib/shadow";
 import { refineStoredTimeStops } from "@/app/lib/shadowStore";
 import { readAlertBookText, readShadowBookText } from "@/app/lib/schwabStore";
+import { noteMarketDataError, recordMarketData } from "@/app/lib/marketData";
 import {
   fetchOptionCandles,
   openCandleAccess,
@@ -145,8 +146,9 @@ export async function runCandleJob(options: {
   let access = options.access ?? null;
   if (!options.fetchCandles && !access) {
     const opened = await openCandleAccess();
-    if (!opened.access) {
+      if (!opened.access) {
       const note = opened.errorSample;
+      await noteMarketDataError(note);
       const saved = await commitCandleRun({
         now: now.getTime(),
         errors: 1,
@@ -239,6 +241,11 @@ export async function runCandleJob(options: {
   }
   if (hasTimeStop && refined.length > 0) {
     await refineStoredTimeStops(refined, now).catch(() => undefined);
+  }
+  if (processed > 0) {
+    await recordMarketData("candles", "tastytrade", null, "option candles");
+  } else if (errorSample) {
+    await noteMarketDataError(errorSample);
   }
   const remaining = pending.length - processed;
   return {

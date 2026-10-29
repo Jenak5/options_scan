@@ -110,6 +110,12 @@ export interface TtQuoteItem {
   volume: number | null;
   openInterest: number | null;
   delta: number | null;
+  gamma?: number | null;
+  theta?: number | null;
+  vega?: number | null;
+  rho?: number | null;
+  /** TimeAndSale aggressor for the latest print in the collection window. */
+  aggressorSide?: "buy" | "sell" | "unknown" | null;
   /** Decimal, 0.25 = 25%. */
   volatility: number | null;
   bidSize: number | null;
@@ -228,6 +234,11 @@ export function contractFromQuote(item: TtQuoteItem, meta?: { expiration: string
     volume: item.volume ?? 0,
     openInterest: item.openInterest ?? 0,
     delta: item.delta,
+    gamma: item.gamma ?? null,
+    theta: item.theta ?? null,
+    vega: item.vega ?? null,
+    rho: item.rho ?? null,
+    aggressorSide: item.aggressorSide ?? null,
     iv: item.volatility != null && item.volatility >= 0 ? item.volatility : null,
     strike: occ.strike,
     expiration: occ.expiration,

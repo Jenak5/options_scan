@@ -2,23 +2,33 @@ import type { OptionContract } from "@/app/lib/contract";
 import { normalizeOptionSymbol } from "@/app/lib/optionSymbol";
 import * as schwab from "@/app/lib/schwab";
 import type { ChainParseResult, ParsedQuote, PriceCandle } from "@/app/lib/schwabParse";
-import { preferredDataSource, type DataSource } from "@/app/lib/dataSourcePref";
+import { preferredDataSource, requestedPrimary, type DataSource } from "@/app/lib/dataSourcePref";
 import { tastytradeCandleConfigured } from "@/app/lib/tastytradeCandles";
-import { ttOptionChain, ttPriceHistory, ttQuoteEntries } from "@/app/lib/tastytradeMarket";
+import {
+  emptyMarketDataHealth,
+  getTradeSideDataAvailable,
+  mergeMarketDataHealth,
+  redactReason,
+  type MarketDataHealth,
+  type MarketDataKind,
+  type ServedRecord,
+} from "@/app/lib/marketDataHealth";
+import { createSchwabProvider, createTastytradeProvider, type MarketDataProvider } from "@/app/lib/marketProviders";
+import { readStoredMarketDataHealth, writeStoredMarketDataHealth } from "@/app/lib/tastytradeStore";
 
 /**
- * Market data router. DATA_SOURCE=tastytrade (the default when the Tastytrade
- * OAuth values are set) tries Tastytrade first and falls back to Schwab on an
- * error or an empty answer, but only when the Schwab login is still valid.
- * A dead Schwab login skips that item. DATA_SOURCE=schwab uses Schwab only
- * and still stops the run when Schwab is disconnected.
- * Signatures match app/lib/schwab so callers only change the import.
+ * Market data router. MARKET_DATA_PRIMARY=tastytrade (the default when the
+ * Tastytrade OAuth values are set) tries Tastytrade first and falls back to
+ * Schwab on a 401, a timeout, an empty answer, or any other error, but only
+ * when the Schwab login is still valid. A dead Schwab login skips that item.
+ * MARKET_DATA_PRIMARY=schwab uses Schwab only and still stops the run when
+ * Schwab is disconnected. DATA_SOURCE is the older name of the same flag.
  * Read-only. Logs name the source, never a token.
  */
 
-export type { DataSource };
-export { preferredDataSource };
-export type DataKind = "chain" | "quotes" | "history";
+export type { DataSource, MarketDataKind, ServedRecord };
+export { preferredDataSource, requestedPrimary };
+export type DataKind = MarketDataKind;
 
 /** Tastytrade missed this item and Schwab could not fill it. Not fatal while Tastytrade is preferred. */
 export class BothSourcesFailedError extends Error {
@@ -30,52 +40,102 @@ export class BothSourcesFailedError extends Error {
   }
 }
 
-export interface ServedRecord {
-  source: DataSource;
-  at: string;
-  fallback: boolean;
-  reason: string | null;
-}
+export type DataSourceStatus = MarketDataHealth;
 
-export interface DataSourceStatus {
-  preferred: DataSource;
-  tastytradeConfigured: boolean;
-  tastytradeOrigin: "live";
-  fallback: "schwab";
-  /** Last request of each kind on this server instance. Null before the first one. */
-  lastServed: Record<DataKind, ServedRecord | null>;
-  counts: Record<DataSource, number>;
-  fallbacks: number;
-}
-
-const lastServed: Record<DataKind, ServedRecord | null> = { chain: null, quotes: null, history: null };
+const lastServed: MarketDataHealth["lastServed"] = { chain: null, quotes: null, history: null, candles: null };
+const active: MarketDataHealth["active"] = {
+  chain: null,
+  quotes: null,
+  history: null,
+  candles: null,
+  openInterest: null,
+  volume: null,
+  greeks: null,
+};
 const counts: Record<DataSource, number> = { tastytrade: 0, schwab: 0 };
 let fallbacks = 0;
+let lastError: string | null = null;
+let lastTastytradeSuccessAt: string | null = null;
+let persistTail: Promise<void> = Promise.resolve();
+
+const tastytradeProvider = createTastytradeProvider();
+const schwabProvider = createSchwabProvider();
 
 export function dataSourceStatus(env: Record<string, string | undefined> = process.env): DataSourceStatus {
   return {
+    primary: requestedPrimary(env),
     preferred: preferredDataSource(env),
     tastytradeConfigured: tastytradeCandleConfigured(env),
     tastytradeOrigin: "live",
     fallback: "schwab",
-    lastServed: { ...lastServed },
+    active: { ...active },
+    lastServed: {
+      chain: lastServed.chain,
+      quotes: lastServed.quotes,
+      history: lastServed.history,
+      candles: lastServed.candles,
+    },
     counts: { ...counts },
+    fallbackCount: fallbacks,
     fallbacks,
+    lastError,
+    lastTastytradeSuccessAt,
+    tradeSideDataAvailable: getTradeSideDataAvailable(),
   };
 }
 
-function note(kind: DataKind, label: string, source: DataSource, reason: string | null): void {
+/** Memory plus the last blob snapshot. primary and preferred follow the current env. */
+export async function loadMarketDataHealth(env: Record<string, string | undefined> = process.env): Promise<DataSourceStatus> {
+  const live = dataSourceStatus(env);
+  try {
+    const stored = await readStoredMarketDataHealth();
+    return mergeMarketDataHealth(live, stored);
+  } catch {
+    return live;
+  }
+}
+
+function persistStatus(): Promise<void> {
+  if (process.env.VITEST === "true" || !process.env.BLOB_READ_WRITE_TOKEN) return Promise.resolve();
+  const snap = dataSourceStatus();
+  persistTail = persistTail.then(() => writeStoredMarketDataHealth(snap)).catch(() => undefined);
+  return persistTail;
+}
+
+async function note(kind: DataKind, label: string, source: DataSource, reason: string | null): Promise<void> {
   const fallback = reason != null;
-  lastServed[kind] = { source, at: new Date().toISOString(), fallback, reason };
+  const at = new Date().toISOString();
+  lastServed[kind] = { source, at, fallback, reason };
+  active[kind] = source;
+  if (kind === "history") active.candles = source;
+  if (kind === "chain" || kind === "quotes") {
+    active.openInterest = source;
+    active.volume = source;
+    active.greeks = source;
+  }
   counts[source] += 1;
-  if (fallback) fallbacks += 1;
+  if (fallback) {
+    fallbacks += 1;
+    lastError = reason;
+  }
+  if (source === "tastytrade" && !fallback) lastTastytradeSuccessAt = at;
   const tail = fallback ? ` (fallback: ${reason})` : "";
   console.info(`[market-data] ${kind} ${label} served by ${source}${tail}`);
+  await persistStatus();
+}
+
+/** Record a candle-job result without counting it as a Schwab fallback. */
+export async function noteMarketDataError(reason: string): Promise<void> {
+  lastError = redactReason(reason);
+  await persistStatus();
+}
+
+export async function recordMarketData(kind: DataKind, source: DataSource, reason: string | null, label: string = kind): Promise<void> {
+  await note(kind, label, source, reason);
 }
 
 function safeReason(err: unknown): string {
-  const text = err instanceof Error ? err.message : "error";
-  return text.replace(/bearer\s+\S+/gi, "bearer [redacted]").replace(/\s+/g, " ").slice(0, 120);
+  return redactReason(err);
 }
 
 function isAbort(err: unknown): boolean {
@@ -103,6 +163,7 @@ export function isSchwabBackupMiss(err: unknown): boolean {
 function shortenPrimary(reason: string): string {
   const status = /\((\d{3})\)/.exec(reason);
   if (status && /tastytrade/i.test(reason)) return `tastytrade ${status[1]}`;
+  if (/timed out/i.test(reason)) return "tastytrade timeout";
   if (reason === "empty Tastytrade answer") return "tastytrade empty";
   if (reason === "partial Tastytrade quote") return "tastytrade partial";
   return reason.replace(/\s+/g, " ").slice(0, 80);
@@ -120,10 +181,12 @@ function backupFailureReason(err: unknown): string {
   return "Schwab backup failed";
 }
 
-function failBoth(label: string, primaryReason: string, backupReason: string): never {
+async function failBoth(label: string, primaryReason: string, backupReason: string): Promise<BothSourcesFailedError> {
   const primary = shortenPrimary(primaryReason);
+  lastError = primary;
   console.warn(`${label} skipped: ${primary}; ${backupReason}`);
-  throw new BothSourcesFailedError(label, primary, backupReason);
+  await persistStatus();
+  return new BothSourcesFailedError(label, primary, backupReason);
 }
 
 function logSkip(label: string, primaryReason: string, backupReason: string): void {
@@ -140,14 +203,14 @@ export async function withFallback<T>(
 ): Promise<T> {
   if (preferredDataSource(env) === "schwab") {
     const value = await backup();
-    note(kind, label, "schwab", null);
+    await note(kind, label, "schwab", null);
     return value;
   }
   let reason: string;
   try {
     const value = await primary();
     if (usable(value)) {
-      note(kind, label, "tastytrade", null);
+      await note(kind, label, "tastytrade", null);
       return value;
     }
     reason = "empty Tastytrade answer";
@@ -156,37 +219,43 @@ export async function withFallback<T>(
     reason = safeReason(err);
   }
   if (!(await schwab.schwabBackupAvailable())) {
-    failBoth(label, reason, "Schwab backup not connected");
+    throw await failBoth(label, reason, "Schwab backup not connected");
   }
   try {
     const value = await backup();
-    note(kind, label, "schwab", reason);
+    await note(kind, label, "schwab", reason);
     return value;
   } catch (err) {
     if (isAbort(err)) throw err;
-    failBoth(label, reason, backupFailureReason(err));
+    throw await failBoth(label, reason, backupFailureReason(err));
   }
 }
 
 type ChainInput = Parameters<typeof schwab.getOptionChain>[0];
 type HistoryInput = Parameters<typeof schwab.getPriceHistory>[0];
 
+function providers(): { primary: MarketDataProvider; backup: MarketDataProvider } {
+  return { primary: tastytradeProvider, backup: schwabProvider };
+}
+
 export async function getOptionChain(input: ChainInput): Promise<ChainParseResult> {
+  const { primary, backup } = providers();
   return withFallback(
     "chain",
     input.symbol,
-    () => ttOptionChain(input),
-    () => schwab.getOptionChain(input),
+    () => primary.getOptionChain(input),
+    () => backup.getOptionChain(input),
     (r) => r.contracts.length > 0 && r.underlyingPrice != null,
   );
 }
 
 export async function getPriceHistory(input: HistoryInput): Promise<PriceCandle[]> {
+  const { primary, backup } = providers();
   return withFallback(
     "history",
     `${input.symbol} ${input.frequencyType}${input.frequencyType === "minute" ? input.frequency : ""}`,
-    () => ttPriceHistory(input),
-    () => schwab.getPriceHistory(input),
+    () => primary.getPriceHistory(input),
+    () => backup.getPriceHistory(input),
     (r) => r.length > 0,
   );
 }
@@ -247,20 +316,21 @@ export async function getQuoteEntries(symbols: string[], signal?: AbortSignal): 
   const wanted = uniqueSymbols(symbols);
   if (wanted.length === 0) return { entries: [], problem: null };
   if (signal?.aborted) throw new DOMException("The quote was aborted", "AbortError");
+  const { primary, backup } = providers();
   if (preferredDataSource() === "schwab") {
-    const value = await schwab.getQuoteEntries(wanted, signal);
-    note("quotes", `${wanted.length} symbols`, "schwab", null);
+    const value = await backup.getQuoteEntries(wanted, signal);
+    await note("quotes", `${wanted.length} symbols`, "schwab", null);
     return value;
   }
 
   let primaryEntries: ParsedQuote[] = [];
   let reason = "empty Tastytrade answer";
   try {
-    const primary = await ttQuoteEntries(wanted, signal);
-    primaryEntries = primary.entries;
+    const read = await primary.getQuoteEntries(wanted, signal);
+    primaryEntries = read.entries;
     if (missingSymbols(wanted, primaryEntries).length === 0) {
-      note("quotes", `${wanted.length} symbols`, "tastytrade", null);
-      return { entries: primaryEntries, problem: primary.problem };
+      await note("quotes", `${wanted.length} symbols`, "tastytrade", null);
+      return { entries: primaryEntries, problem: read.problem };
     }
     reason = primaryEntries.length > 0 ? "partial Tastytrade quote" : "empty Tastytrade answer";
   } catch (err) {
@@ -274,30 +344,30 @@ export async function getQuoteEntries(symbols: string[], signal?: AbortSignal): 
   if (!(await schwab.schwabBackupAvailable())) {
     if (primaryEntries.length > 0) {
       logSkip(label, reason, "Schwab backup not connected");
-      note("quotes", `${wanted.length} symbols`, "tastytrade", "partial");
+      await note("quotes", `${wanted.length} symbols`, "tastytrade", "partial");
       return { entries: primaryEntries, problem: null };
     }
-    failBoth(label, reason, "Schwab backup not connected");
+    throw await failBoth(label, reason, "Schwab backup not connected");
   }
 
   try {
-    const backup = await schwab.getQuoteEntries(missing, signal);
-    const merged = mergeEntries(primaryEntries, backup.entries);
+    const filled = await backup.getQuoteEntries(missing, signal);
+    const merged = mergeEntries(primaryEntries, filled.entries);
     const still = missingSymbols(wanted, merged);
-    const usedBackup = backup.entries.length > 0;
-    note("quotes", `${wanted.length} symbols`, usedBackup ? "schwab" : "tastytrade", reason);
+    const usedBackup = filled.entries.length > 0;
+    await note("quotes", `${wanted.length} symbols`, usedBackup ? "schwab" : "tastytrade", reason);
     if (still.length > 0) {
       logSkip(missingLabel(still), reason, usedBackup ? "Schwab had no quote" : "Schwab backup failed");
     }
-    return { entries: merged, problem: merged.length > 0 ? null : backup.problem };
+    return { entries: merged, problem: merged.length > 0 ? null : filled.problem };
   } catch (err) {
     if (isAbort(err)) throw err;
     if (primaryEntries.length > 0) {
       logSkip(label, reason, backupFailureReason(err));
-      note("quotes", `${wanted.length} symbols`, "tastytrade", "partial");
+      await note("quotes", `${wanted.length} symbols`, "tastytrade", "partial");
       return { entries: primaryEntries, problem: null };
     }
-    failBoth(label, reason, backupFailureReason(err));
+    throw await failBoth(label, reason, backupFailureReason(err));
   }
 }
 
@@ -310,9 +380,20 @@ export function resetDataSourceStatsForTests(): void {
   lastServed.chain = null;
   lastServed.quotes = null;
   lastServed.history = null;
+  lastServed.candles = null;
+  active.chain = null;
+  active.quotes = null;
+  active.history = null;
+  active.candles = null;
+  active.openInterest = null;
+  active.volume = null;
+  active.greeks = null;
   counts.tastytrade = 0;
   counts.schwab = 0;
   fallbacks = 0;
+  lastError = null;
+  lastTastytradeSuccessAt = null;
+  persistTail = Promise.resolve();
 }
 
 /** At least one source can answer: Tastytrade preferred, or Schwab app keys set. */
@@ -330,3 +411,5 @@ export async function requireMarketData(now: number): Promise<void> {
   if (!status.configured) throw new schwab.SchwabConfigError();
   if (!status.connected) throw new schwab.SchwabNotConnectedError();
 }
+
+export { emptyMarketDataHealth };

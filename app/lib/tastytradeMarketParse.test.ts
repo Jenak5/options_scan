@@ -66,6 +66,7 @@ describe("tastytrade market parsers", () => {
       underlyingPrice: 775.31,
       contracts: [{
         bid: 35.57, ask: 36.33, last: 38.81, volume: 112, openInterest: 4296, delta: 0.975730336,
+        gamma: null, theta: null, vega: null, rho: null, aggressorSide: null,
         iv: 0.302441752, strike: 775, expiration: "2026-10-14", putCall: "call",
         lastSize: null, bidSize: 34, askSize: 30, tradeTime: null, quoteTime: Date.parse("2026-10-14T13:41:27.923Z"),
       }],
