@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { PaperTradeButton } from "@/app/components/PaperTradeButton";
 import { formatContractCost, formatFlowPremium } from "@/app/lib/alertConfig";
 import { flowRowLabels, suggestedExitText } from "@/app/lib/scanLabels";
-import { arrangeFlowCards, type FlowSort, type RightFilter, type VerdictFilter } from "@/app/components/flowArrange";
+import { arrangeFlowCards, dedupeShownAlerts, type FlowSort, type RightFilter, type VerdictFilter } from "@/app/components/flowArrange";
 import { defaultTimeStop, planExitsForAsk } from "@/app/lib/exits";
 import { FLOW_DISCLAIMER, gateCheckHref, type FlowRow } from "@/app/lib/flow";
 import {
@@ -105,11 +105,11 @@ export function FlowTab() {
         offset = typeof json.nextOffset === "number" ? json.nextOffset : offset + 1;
       }
       if (requestId.current !== id) return;
-      setFlows(collected);
+      setFlows(dedupeShownAlerts(collected));
       setPartial(missed);
     } catch (err: unknown) {
       if (requestId.current !== id) return;
-      setFlows(collected);
+      setFlows(dedupeShownAlerts(collected));
       setPartial(missed);
       setError(err instanceof Error ? err.message : "Flow scan failed");
     } finally {

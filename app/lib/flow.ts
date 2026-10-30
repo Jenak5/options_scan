@@ -208,6 +208,13 @@ export interface FlowRow {
    * Absent or unknown means the unusual-flow screener estimates the side.
    */
   aggressorSide?: "buy" | "sell" | "unknown" | null;
+  /**
+   * Exchange time of the last trade, in milliseconds.
+   * Absent when the quote did not include one. Schwab and Tastytrade can disagree by a few seconds.
+   */
+  tradeTime?: number | null;
+  /** Feed trade id when the quote has one. A timestamp is not an id. */
+  tradeId?: string | null;
   /** Support and resistance for this ticker. Null until a history read fills them. */
   levels: KeyLevels | null;
   /** Quote-derived prints. Null summary when no new trade was seen. */
@@ -915,6 +922,7 @@ function scoreContract(input: {
     ? input.livePoints
     : [quotePointFromContract(contract, input.now.getTime())];
   const prints = detectPrints({ points: priorPoints.concat(live), delayed: input.delayed });
+  const tradeTime = finiteTradeTime(contract.tradeTime);
   const score = flowScore({
     notionalPremium: notional,
     volOiRatio: ratio,
@@ -961,6 +969,7 @@ function scoreContract(input: {
     delayed: input.delayed,
     underlyingPrice: input.underlyingPrice,
     aggressorSide: input.tradeSideDataAvailable ? contract.aggressorSide ?? null : null,
+    ...(tradeTime != null ? { tradeTime } : {}),
     levels: null,
     prints,
     score,
@@ -982,6 +991,11 @@ function parseYmd(value: string): number | null {
 
 function finiteOrZero(value: number): number {
   return Number.isFinite(value) ? value : 0;
+}
+
+function finiteTradeTime(value: number | null | undefined): number | null {
+  if (value == null || !Number.isFinite(value) || value <= 0) return null;
+  return value < 10_000_000_000 ? value * 1000 : value;
 }
 
 function clamp(value: number, min: number, max: number): number {

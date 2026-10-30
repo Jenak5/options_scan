@@ -2,6 +2,7 @@ import { OUTCOME_RULES, type LetterGrade } from "@/app/lib/alertConfig";
 import { parseFeatureSnapshot, snapshotFromFlow, type AlertFeatureSnapshot } from "@/app/lib/alertFeatures";
 import { parseRulesVersion, RULES_VERSION } from "@/app/lib/rulesVersion";
 import { chicagoClock, chicagoDate } from "@/app/lib/marketHours";
+import { flowAlertKeyFromRow } from "@/app/lib/alertPolicy";
 import { notionalPremium, type EstimatedSideLabel, type FlowRow } from "@/app/lib/flow";
 import { parseOpeningCheck, pendingOpeningCheck, type OpeningCheck } from "@/app/lib/quoteSide";
 import type { StoredPriceLevels } from "@/app/lib/levels";
@@ -28,6 +29,11 @@ export interface CheckpointQuote {
 export interface StoredAlert {
   id: string;
   contractKey: string;
+  /**
+   * Contract plus trade id, or contract plus the Chicago day when the quote had no trade id.
+   * Missing on alerts saved before this key. Those still count as the contract for that day.
+   */
+  flowKey?: string;
   sentAt: number;
   tradingDay: string;
   ticker: string;
@@ -157,6 +163,7 @@ export function buildStoredAlert(row: FlowRow, verdict: AlertVerdict, now: Date)
   return {
     id: `${sentAt}-${row.id}`,
     contractKey: row.id,
+    flowKey: flowAlertKeyFromRow(row, chicagoDate(now)),
     sentAt,
     tradingDay: chicagoDate(now),
     ticker: row.ticker,
@@ -543,6 +550,9 @@ function parseAlert(value: unknown): StoredAlert | null {
     checkpoints,
     outcome: "pending",
   };
+  if (typeof row.flowKey === "string" && row.flowKey.length > 0 && row.flowKey.length <= 180) {
+    alert.flowKey = row.flowKey;
+  }
   if (row.trackQuotes === true) alert.trackQuotes = true;
   if (typeof row.windowEarningsDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(row.windowEarningsDate)) {
     alert.windowEarningsDate = row.windowEarningsDate;

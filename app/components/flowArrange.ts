@@ -21,6 +21,31 @@ export interface FlowCardOrder {
 
 const GRADE_RANK: Record<string, number> = { A: 0, B: 1, C: 2, D: 3 };
 
+/**
+ * One card per contract. The Flow page loads the watchlist in chunks, and each
+ * chunk used to append every alert saved today.
+ */
+export function dedupeShownAlerts<T extends FlowCardOrder & { alertId?: string | null }>(rows: readonly T[]): T[] {
+  const index = new Map<string, number>();
+  const out: T[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const key = shownKey(row);
+    const at = index.get(key);
+    if (at == null) {
+      index.set(key, out.length);
+      out.push(row);
+      continue;
+    }
+    if (!out[at].alertId && row.alertId) out[at] = row;
+  }
+  return out;
+}
+
+function shownKey(row: FlowCardOrder): string {
+  return row.id;
+}
+
 export function arrangeFlowCards<T extends FlowCardOrder>(
   rows: readonly T[],
   options: { verdict: VerdictFilter; right: RightFilter; sort: FlowSort },

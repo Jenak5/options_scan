@@ -1,5 +1,5 @@
 import { OUTCOME_RULES, SMALL_SAMPLE_NOTE } from "@/app/lib/alertConfig";
-import { alertContractKey, realertReasons, storedAlertPremium } from "@/app/lib/alertPolicy";
+import { flowAlertKeyFromRow, isSameFlowAlert, storedFlowKey } from "@/app/lib/alertPolicy";
 import {
   addRecord,
   alreadySentToday,
@@ -70,16 +70,14 @@ export interface SentAlertClaim {
   reasons: string[];
 }
 
-function latestContractAlert(book: AlertBook, record: StoredAlert): StoredAlert | null {
-  const key = alertContractKey(record);
-  let found: StoredAlert | null = null;
+function sameFlowAlreadyStored(book: AlertBook, record: StoredAlert): boolean {
+  const nextKey = record.flowKey || flowAlertKeyFromRow(record, record.tradingDay);
   for (let i = 0; i < book.records.length; i++) {
     const row = book.records[i];
     if (row.tradingDay !== record.tradingDay) continue;
-    if (alertContractKey(row) !== key) continue;
-    if (!found || row.sentAt >= found.sentAt) found = row;
+    if (isSameFlowAlert(storedFlowKey(row), nextKey)) return true;
   }
-  return found;
+  return false;
 }
 
 export async function rememberSentAlert(
@@ -95,24 +93,9 @@ export async function rememberSentAlert(
   let claim: SentAlertClaim = { send: false, saved: false, reasons: [] };
   const saved = await updateAlertBook((current) => {
     const book = parseAlertBook(current);
-    const prior = latestContractAlert(book, record);
-    if (prior) {
-      const reasons = realertReasons(
-        { grade: prior.grade, premium: storedAlertPremium(prior) },
-        { grade: record.grade, premium: storedAlertPremium(record) },
-      );
-      if (reasons.length === 0) {
-        claim = { send: false, saved: true, reasons: [] };
-        return current ?? JSON.stringify(book);
-      }
-      record.realertReasons = reasons;
-      const next = addRecord(book, record);
-      if (!next.records.some((item) => item.id === record.id)) {
-        claim = { send: false, saved: false, reasons: [] };
-        return null;
-      }
-      claim = { send: true, saved: true, reasons };
-      return JSON.stringify(next);
+    if (sameFlowAlreadyStored(book, record)) {
+      claim = { send: false, saved: true, reasons: [] };
+      return current ?? JSON.stringify(book);
     }
     const next = addRecord(book, record);
     if (!next.records.some((item) => item.id === record.id)) {

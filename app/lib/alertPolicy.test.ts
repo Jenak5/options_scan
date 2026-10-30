@@ -4,7 +4,9 @@ import {
   alertContractKey,
   alertSetupKey,
   chooseAlerts,
+  flowAlertKeyFromRow,
   indexSentAlerts,
+  isSameFlowAlert,
   realertReasons,
   type AlertCandidate,
 } from "@/app/lib/alertPolicy";
@@ -196,6 +198,105 @@ describe("alert delivery", () => {
       limit: 5,
     });
     expect(picks.map((item) => item.row.ticker)).toEqual(["NFLX"]);
+  });
+
+  it("does not queue the same trade again, including when the other feed stamps it a few seconds later", () => {
+    const day = "2026-05-14";
+    const tradeTime = Date.parse("2026-05-14T14:31:02.000Z");
+    const first = flowAlertKeyFromRow({
+      ticker: "NFLX",
+      strike: 64,
+      expiration: "2026-11-20",
+      putCall: "call",
+      tradeTime,
+    }, day);
+    const shifted = flowAlertKeyFromRow({
+      ticker: "NFLX",
+      strike: 64,
+      expiration: "2026-11-20",
+      putCall: "call",
+      tradeTime: tradeTime + 2_500,
+    }, day);
+    const laterTrade = flowAlertKeyFromRow({
+      ticker: "NFLX",
+      strike: 64,
+      expiration: "2026-11-20",
+      putCall: "call",
+      tradeTime: tradeTime + 5 * 60_000,
+    }, day);
+    const noTrade = flowAlertKeyFromRow({
+      ticker: "NFLX",
+      strike: 64,
+      expiration: "2026-11-20",
+      putCall: "call",
+    }, day);
+    expect(isSameFlowAlert(first, shifted)).toBe(true);
+    expect(isSameFlowAlert(first, laterTrade)).toBe(false);
+    expect(isSameFlowAlert(noTrade, first)).toBe(true);
+    expect(first).toBe(flowAlertKeyFromRow({
+      ticker: "NFLX",
+      strike: 64,
+      expiration: "2026-11-20",
+      putCall: "call",
+      tradeTime,
+    }, day));
+    const indexed = indexSentAlerts([{
+      tradingDay: day,
+      contractKey: "NFLX|2026-11-20|64|call",
+      ticker: "NFLX",
+      putCall: "call",
+      expiration: "2026-11-20",
+      strike: 64,
+      grade: "B",
+      alertedPremium: 265_000,
+      sentAt: 1,
+      flowKey: first,
+    }], day);
+    const again = candidate({
+      id: "NFLX|2026-11-20|64.0|call",
+      ticker: "NFLX",
+      strike: 64,
+      expiration: "2026-11-20",
+      grade: "A",
+      premium: 610_000,
+    });
+    again.row.tradeTime = tradeTime + 2_500;
+    const picks = chooseAlerts({
+      candidates: [again],
+      alreadySentContractKeys: indexed.contracts,
+      alreadySentSetupKeys: indexed.setups,
+      sentByContract: indexed.byContract,
+      sentFlowKeys: indexed.flowKeys,
+      tradingDay: day,
+      limit: 5,
+    });
+    expect(picks).toEqual([]);
+    const nextTrade = candidate({
+      id: "NFLX|2026-11-20|64|call",
+      ticker: "NFLX",
+      strike: 64,
+      expiration: "2026-11-20",
+      grade: "B",
+      premium: 265_000,
+    });
+    nextTrade.row.tradeTime = tradeTime + 5 * 60_000;
+    const queued = chooseAlerts({
+      candidates: [nextTrade],
+      alreadySentContractKeys: indexed.contracts,
+      alreadySentSetupKeys: indexed.setups,
+      sentFlowKeys: indexed.flowKeys,
+      tradingDay: day,
+      limit: 5,
+    });
+    expect(queued).toHaveLength(1);
+    expect(chooseAlerts({
+      candidates: [nextTrade],
+      alreadySentContractKeys: indexed.contracts,
+      alreadySentSetupKeys: indexed.setups,
+      sentFlowKeys: indexed.flowKeys,
+      tradingDay: day,
+      limit: 0,
+    })).toEqual([]);
   });
 
   it("reads the daily cap from the environment and falls back when it is unset or nonsense", () => {
