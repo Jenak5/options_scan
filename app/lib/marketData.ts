@@ -61,6 +61,27 @@ let persistTail: Promise<void> = Promise.resolve();
 const tastytradeProvider = createTastytradeProvider();
 const schwabProvider = createSchwabProvider();
 
+/**
+ * Health flag for the monitor. True when Tastytrade is the configured primary,
+ * the OAuth credentials are present, and this record shows it has served data.
+ * The account-tab flag (`TASTYTRADE_ENABLED`) is a different switch and is not read here.
+ */
+export function healthTastytradeEnabled(
+  status: DataSourceStatus | null,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  if (!status || preferredDataSource(env) !== "tastytrade") return false;
+  if (status.lastTastytradeSuccessAt) return true;
+  const active = status.active;
+  return active.chain === "tastytrade"
+    || active.quotes === "tastytrade"
+    || active.history === "tastytrade"
+    || active.candles === "tastytrade"
+    || active.openInterest === "tastytrade"
+    || active.volume === "tastytrade"
+    || active.greeks === "tastytrade";
+}
+
 export function dataSourceStatus(env: Record<string, string | undefined> = process.env): DataSourceStatus {
   return {
     primary: requestedPrimary(env),

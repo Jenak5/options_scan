@@ -16,13 +16,14 @@ import {
 } from "@/app/lib/tastytradeDxlink";
 import {
   clearStoredTastytradeAccess,
+  dropMemoryAccessIf,
   readStoredTastytradeAccess,
   resetTastytradeStoreForTests,
   writeStoredTastytradeAccess,
 } from "@/app/lib/tastytradeStore";
 import {
   buildChainResult,
-  candlePeriod,
+  historyCandleSymbol,
   historyFromTime,
   parseEquityCandles,
   parseMarketDataItems,
@@ -58,8 +59,15 @@ export const QUOTE_BATCH = 100;
 /** Tastytrade access tokens last 15 minutes. Refresh a minute early. */
 const TOKEN_FALLBACK_TTL_MS = 15 * 60 * 1000;
 const TOKEN_EXPIRY_BUFFER_MS = 60 * 1000;
-/** Wait before the single retry after a 401 (fresh token). */
+/** Pause before rotating after a 401, and before retrying a token that is already in use. */
 const AUTH_RETRY_DELAY_MS = 250;
+/**
+ * Tastytrade rejects a market-data call that goes out in the same instant as
+ * the refresh that minted the token. Hold a replacement until it is this old.
+ * A token older than this that 401s is tried once more before that refresh,
+ * because the token just served other calls and the 401 is not expiry.
+ */
+const FRESH_TOKEN_GRACE_MS = 2_000;
 /**
  * Tastytrade requests in flight at once per instance (one scan).
  * Two, so a burst right after login does not come back as 401.
@@ -145,18 +153,32 @@ async function currentToken(fetchImpl: typeof fetch): Promise<CachedToken> {
   return refreshing;
 }
 
-/** Drop the cached token only if it is still the one that got the 401. */
+/**
+ * Drop the cached token only if it is still the one that got the 401.
+ * A peer instance may already have written a newer access token. Keep that
+ * one instead of deleting it and minting again.
+ */
 async function invalidateToken(access: string): Promise<void> {
   if (cachedToken?.access === access) cachedToken = null;
+  dropMemoryAccessIf(access);
+  const stored = await readStoredTastytradeAccess();
+  if (stored && stored.access !== access) {
+    cachedToken = stored;
+    return;
+  }
   await clearStoredTastytradeAccess(access);
 }
 
 /**
- * Run an authorized call. On a 401, drop that token, refresh once, and retry
- * the request once. A second 401 is returned to the caller so it can fall
- * back to Schwab. Do not loop the token endpoint: repeated failures can get
- * the address blocked. The token value is never logged. Age is, so a 401 on
- * a new token can be told apart from expiry.
+ * Run an authorized call. A 401 on a token that is already a couple of seconds
+ * old is retried once on that same token: quotes were failing this way while
+ * the token was still serving chains and candles. Only then do we refresh
+ * once. The replacement is held until it is {@link FRESH_TOKEN_GRACE_MS} old,
+ * because a call in the same instant as the refresh comes back 401 and the
+ * next call a few seconds later succeeds. A further 401 is returned so the
+ * caller can fall back to Schwab. Do not loop the token endpoint: repeated
+ * failures can get the address blocked. The token value is never logged.
+ * Age is, so a 401 on a new token can be told apart from expiry.
  */
 export async function withTastytradeAuth<T>(
   label: string,
@@ -164,18 +186,29 @@ export async function withTastytradeAuth<T>(
   call: (access: string) => Promise<{ status: number; value?: T }>,
 ): Promise<T> {
   let refreshed = false;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  let matureRetried = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
     const token = await currentToken(fetchImpl);
+    if (refreshed) {
+      const wait = token.mintedAt + FRESH_TOKEN_GRACE_MS - Date.now();
+      if (wait > 0) await sleepImpl(wait);
+    }
     const result = await globalLimiter.run(() => call(token.access));
     if (result.status !== 401) {
-      if (attempt > 0) console.info(`[tastytrade-auth] ${label} ok after refresh`);
+      if (refreshed) console.info(`[tastytrade-auth] ${label} ok after refresh`);
       return result.value as T;
     }
-    const age = Math.round((Date.now() - token.mintedAt) / 1000);
+    const ageMs = Date.now() - token.mintedAt;
+    const age = Math.round(ageMs / 1000);
     console.warn(`[tastytrade-auth] ${label} 401 on attempt ${attempt + 1} (token age ${age}s)`);
-    await invalidateToken(token.access);
+    if (!matureRetried && ageMs >= FRESH_TOKEN_GRACE_MS) {
+      matureRetried = true;
+      await sleepImpl(AUTH_RETRY_DELAY_MS);
+      continue;
+    }
     if (refreshed) break;
     refreshed = true;
+    await invalidateToken(token.access);
     await sleepImpl(AUTH_RETRY_DELAY_MS);
   }
   console.warn(`[tastytrade-auth] ${label} still 401 after one refresh, giving up`);
@@ -387,14 +420,10 @@ export async function ttPriceHistory(input: {
   endDate?: number;
 }, deps?: { fetchImpl?: typeof fetch; timeoutMs?: number; quietMs?: number }): Promise<PriceCandle[]> {
   const fetchImpl = deps?.fetchImpl ?? fetch;
-  const symbol = input.symbol.trim().toUpperCase();
-  if (!/^[A-Z][A-Z0-9.\-]{0,9}$/.test(symbol)) throw new TastytradeDataError("Tastytrade candle request failed");
+  const subSymbol = historyCandleSymbol(input);
+  if (!subSymbol) throw new TastytradeDataError("Tastytrade candle request failed");
   const now = Date.now();
   const fromTime = historyFromTime(input, now);
-  const period = candlePeriod(input.frequencyType, input.frequency);
-  // dxFeed "tho=true" keeps regular trading hours only, matching Schwab's needExtendedHoursData=false.
-  const attrs = input.frequencyType === "daily" || input.needExtendedHoursData ? `=${period}` : `=${period},tho=true`;
-  const subSymbol = `${symbol}{${attrs}}`;
   const session = await quoteSession(fetchImpl);
   const rows = await streamCandles(session, subSymbol, fromTime, deps?.timeoutMs ?? 15_000, deps?.quietMs ?? 1200);
   const candles = toPriceCandles(rows.filter((r) => r.t >= fromTime - 864e5), input.endDate, input.frequencyType === "daily");

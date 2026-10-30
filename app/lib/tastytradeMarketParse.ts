@@ -297,6 +297,32 @@ export function candlePeriod(frequencyType: "minute" | "daily", frequency: numbe
   return frequencyType === "daily" ? "1d" : `${frequency}m`;
 }
 
+/**
+ * dxFeed base symbol for an equity or index candle.
+ * VIX and SPX are filled as typed. VXN is not: the feed's index symbol is `$VXN`,
+ * and a bare `VXN` subscription stays empty through the session.
+ */
+export function tastytradeCandleBase(symbol: string): string {
+  const upper = symbol.trim().toUpperCase();
+  if (upper === "VXN") return "$VXN";
+  return upper;
+}
+
+/** DXLink candle subscription, or null when the symbol is not one this client may send. */
+export function historyCandleSymbol(input: {
+  symbol: string;
+  frequencyType: "minute" | "daily";
+  frequency: number;
+  needExtendedHoursData?: boolean;
+}): string | null {
+  const base = tastytradeCandleBase(input.symbol);
+  if (!/^\$?[A-Z][A-Z0-9.\-]{0,9}$/.test(base)) return null;
+  const period = candlePeriod(input.frequencyType, input.frequency);
+  // dxFeed "tho=true" keeps regular trading hours only, matching Schwab's needExtendedHoursData=false.
+  const attrs = input.frequencyType === "daily" || input.needExtendedHoursData ? `=${period}` : `=${period},tho=true`;
+  return `${base}{${attrs}}`;
+}
+
 /** Schwab price-history window: an explicit startDate, otherwise period days or months back. */
 export function historyFromTime(input: {
   periodType: "day" | "month";

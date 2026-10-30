@@ -19,7 +19,7 @@ vi.mock("@/app/lib/schwab", () => ({
 }));
 
 import {
-  dataSourceStatus, getOptionChain, getPriceHistory, getQuoteEntries, preferredDataSource, resetDataSourceStatsForTests,
+  dataSourceStatus, getOptionChain, getPriceHistory, getQuoteEntries, healthTastytradeEnabled, preferredDataSource, resetDataSourceStatsForTests,
 } from "@/app/lib/marketData";
 import { requestedPrimary } from "@/app/lib/dataSourcePref";
 
@@ -116,6 +116,17 @@ describe("market data router", () => {
     await expect(getOptionChain({ symbol: "XLF" })).rejects.toThrow("XLF skipped: tastytrade 401; Schwab backup not connected");
     expect(sw.chain).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith("XLF skipped: tastytrade 401; Schwab backup not connected");
+  });
+
+  it("reports tastytradeEnabled only when the primary has credentials and has served data", () => {
+    const served = dataSourceStatus();
+    served.lastTastytradeSuccessAt = "2026-10-30T14:15:00.000Z";
+    served.active.chain = "tastytrade";
+    expect(healthTastytradeEnabled(served, { ...creds })).toBe(true);
+    expect(healthTastytradeEnabled({ ...served, lastTastytradeSuccessAt: null, active: { ...served.active, chain: null } }, { ...creds })).toBe(false);
+    expect(healthTastytradeEnabled(served, { ...creds, MARKET_DATA_PRIMARY: "schwab" })).toBe(false);
+    expect(healthTastytradeEnabled(served, {})).toBe(false);
+    expect(healthTastytradeEnabled(null, { ...creds })).toBe(false);
   });
 
   it("uses only Schwab when DATA_SOURCE=schwab", async () => {
