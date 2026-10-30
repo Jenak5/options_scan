@@ -36,8 +36,13 @@ export function pinTodayAlerts(
   tradingDay: string,
   now: Date,
   tickerFilter: string,
+  /**
+   * Tickers this request scanned. Alerts for other tickers stay off this
+   * response so a watchlist loaded in chunks does not repeat them.
+   */
+  onlyTickers?: readonly string[],
 ): ScoredFlowRow[] {
-  const wanted = indexTodayAlerts(alerts, tradingDay, tickerFilter);
+  const wanted = indexTodayAlerts(alerts, tradingDay, tickerFilter, onlyTickers);
   const seen = new Set<string>();
   const out: ScoredFlowRow[] = [];
   for (let i = 0; i < rows.length; i++) {
@@ -68,8 +73,10 @@ function indexTodayAlerts(
   alerts: readonly StoredAlert[],
   tradingDay: string,
   tickerFilter: string,
+  onlyTickers?: readonly string[],
 ): Map<string, StoredAlert> {
   const ticker = tickerFilter.trim().toUpperCase();
+  const allowed = onlyTickers ? new Set(onlyTickers.map((item) => item.trim().toUpperCase())) : null;
   const byContract = new Map<string, StoredAlert>();
   if (!tradingDay) return byContract;
   for (let i = 0; i < alerts.length; i++) {
@@ -77,6 +84,7 @@ function indexTodayAlerts(
     if (alert.tradingDay !== tradingDay) continue;
     if (!isAlertGrade(alert.grade)) continue;
     if (ticker && alert.ticker !== ticker) continue;
+    if (allowed && !allowed.has(alert.ticker)) continue;
     const id = alert.contractKey;
     if (!id) continue;
     const prior = byContract.get(id);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { arrangeFlowCards, type FlowCardOrder } from "@/app/components/flowArrange";
+import { arrangeFlowCards, dedupeShownAlerts, type FlowCardOrder } from "@/app/components/flowArrange";
 
 function row(over: Partial<FlowCardOrder> & Pick<FlowCardOrder, "id">): FlowCardOrder {
   return {
@@ -48,5 +48,13 @@ describe("flow card order", () => {
     ];
     expect(arrangeFlowCards(rows, { verdict: "all", right: "all", sort: "grade" }).map((r) => r.id))
       .toEqual(["take-big", "take-small", "watch-big", "watch-small", "skip-big"]);
+  });
+
+  it("shows one card when the same alert was appended by every watchlist chunk", () => {
+    const alert = row({ id: "QQQ|2026-10-16|500|put", ticker: "QQQ", strike: 500, putCall: "put" });
+    const chunks = [0, 1, 2].map(() => ({ ...alert, alertId: "saved-1" as string | null }));
+    const shown = dedupeShownAlerts(chunks.concat([{ ...alert, alertId: null }]));
+    expect(shown).toHaveLength(1);
+    expect(shown[0].alertId).toBe("saved-1");
   });
 });

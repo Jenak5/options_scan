@@ -206,6 +206,17 @@ describe("today's alerts on Flow", () => {
     expect(all.map((row) => row.alertId)).toEqual([ALERT_ID]);
   });
 
+  it("pins an alert only on the chunk that scans its ticker", () => {
+    const alert = saved();
+    const spy = pinTodayAlerts([scored()], [alert], TODAY, NOW, "", ["SPY"]);
+    const iwm = pinTodayAlerts([scored({ id: "IWM|2026-10-16|200|call", ticker: "IWM", strike: 200 })], [alert], TODAY, NOW, "", ["IWM"]);
+    const qqq = pinTodayAlerts([], [alert], TODAY, NOW, "", ["QQQ"]);
+    expect(spy.some((row) => row.ticker === "QQQ")).toBe(false);
+    expect(iwm.some((row) => row.ticker === "QQQ")).toBe(false);
+    expect(qqq).toHaveLength(1);
+    expect(qqq[0].alertId).toBe(ALERT_ID);
+  });
+
   it("keeps the later alert when the same contract was saved twice", () => {
     const first = saved({ id: "early", sentAt: NOW.getTime() - 60_000, grade: "B" });
     const later = saved({ id: "later", sentAt: NOW.getTime(), grade: "A" });

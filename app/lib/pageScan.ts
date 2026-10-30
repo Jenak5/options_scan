@@ -77,6 +77,8 @@ export async function recordDisplayedAlerts(
     alreadySentContractKeys: sent.contracts,
     alreadySentSetupKeys: sent.setups,
     sentByContract: sent.byContract,
+    sentFlowKeys: sent.flowKeys,
+    tradingDay,
     limit: room,
   });
   const earningsDates = queued.length === 0

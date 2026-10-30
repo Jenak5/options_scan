@@ -2,12 +2,11 @@ import { flowRowLabels, tickerSentToday } from "@/app/lib/scanLabels";
 import { NextRequest, NextResponse } from "next/server";
 import { alertScanMinPremium, alertsPerDayLimit } from "@/app/lib/alertConfig";
 import {
-  alertContractKey,
   chooseAlerts,
+  flowAlertKeyFromRow,
   gradeAlertCandidates,
   indexSentAlerts,
-  realertReasons,
-  storedAlertPremium,
+  isSameFlowAlert,
 } from "@/app/lib/alertPolicy";
 import { currentDailyLoss, loadAlertBook, recordOpeningChecks, rememberSentAlert } from "@/app/lib/alertStore";
 import { lastAlertBookWriteError } from "@/app/lib/schwabStore";
@@ -23,6 +22,14 @@ import { markShadowsFromRows, openMissingShadows, openScanTickers } from "@/app/
 import { chicagoDate, isMarketDay } from "@/app/lib/marketHours";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { sendTelegramAlert, formatFlowAlert } from "@/app/lib/telegram";
+
+function sameStoredFlow(keys: ReadonlySet<string>, nextKey: string): boolean {
+  let same = false;
+  keys.forEach((key) => {
+    if (isSameFlowAlert(key, nextKey)) same = true;
+  });
+  return same;
+}
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -70,6 +77,8 @@ export async function GET(request: NextRequest) {
           alreadySentContractKeys: sent.contracts,
           alreadySentSetupKeys: sent.setups,
           sentByContract: sent.byContract,
+          sentFlowKeys: sent.flowKeys,
+          tradingDay,
           limit: room,
         });
         let alertsSent = 0;
@@ -87,15 +96,8 @@ export async function GET(request: NextRequest) {
           const latestBook = (await loadAlertBook()).records;
           const latest = indexSentAlerts(latestBook, tradingDay);
           if (latest.count >= maxPerDay) break;
-          const prior = latest.byContract.get(alertContractKey(item.row)) ?? null;
-          const repeatReasons = prior
-            ? realertReasons(prior, {
-              grade: item.verdict.grade,
-              premium: storedAlertPremium({ alertedPremium: item.row.notionalPremium }),
-            })
-            : [];
-          if (prior && repeatReasons.length === 0) continue;
-          if (!prior && (latest.contracts.has(item.row.id) || latest.contracts.has(alertContractKey(item.row)))) continue;
+          const nextKey = flowAlertKeyFromRow(item.row, tradingDay);
+          if (sameStoredFlow(latest.flowKeys, nextKey)) continue;
           const alertId = `${now.getTime()}-${item.row.id}`;
           const windowDate = windowEarningsDateForContract({
             ticker: item.row.ticker,

@@ -119,7 +119,7 @@ async function handleFlow(request: NextRequest) {
     let data = graded;
     try {
       const book = await loadAlertBook();
-      data = pinTodayAlerts(graded, book.records, chicagoDate(now), now, ticker);
+      data = pinTodayAlerts(graded, book.records, chicagoDate(now), now, ticker, tickers);
     } catch {
       data = graded;
     }

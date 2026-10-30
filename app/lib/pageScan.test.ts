@@ -8,7 +8,15 @@ import { chainInterestFromContracts } from "@/app/lib/openingCheck";
 import { recordDisplayedAlerts, recordFlowPageSession } from "@/app/lib/pageScan";
 import * as telegram from "@/app/lib/telegram";
 import { EMPTY_PRINTS } from "@/app/lib/prints";
-import { clearMemoryStoreForTests } from "@/app/lib/schwabStore";
+import { BlobPreconditionFailedError } from "@vercel/blob";
+import {
+  clearMemoryStoreForTests,
+  setSchwabBlobClientForTests,
+  type SchwabBlobClient,
+  type SchwabBlobGetOptions,
+  type SchwabBlobGetResult,
+  type SchwabBlobPutOptions,
+} from "@/app/lib/schwabStore";
 import { loadShadowPage } from "@/app/lib/shadowStore";
 import { gradeFlowRow } from "@/app/lib/verdict";
 
@@ -29,6 +37,37 @@ const ENV_KEYS = [
 ] as const;
 
 const saved: Record<string, string | undefined> = {};
+
+function blobMock(): SchwabBlobClient {
+  const files = new Map<string, { body: string; etag: string }>();
+  let seq = 0;
+  const put = async (pathname: string, body: string, options: SchwabBlobPutOptions) => {
+    const existing = files.get(pathname);
+    if (options.ifMatch && (!existing || existing.etag !== options.ifMatch)) {
+      throw new BlobPreconditionFailedError();
+    }
+    seq += 1;
+    const etag = `etag-${seq}`;
+    files.set(pathname, { body, etag });
+    return { pathname, etag };
+  };
+  const get = async (pathname: string, _options: SchwabBlobGetOptions): Promise<SchwabBlobGetResult | null> => {
+    const existing = files.get(pathname);
+    if (!existing) return null;
+    const bytes = new TextEncoder().encode(existing.body);
+    return {
+      statusCode: 200,
+      stream: new ReadableStream({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        },
+      }),
+      blob: { etag: existing.etag, pathname },
+    };
+  };
+  return { put, get, del: async () => undefined };
+}
 
 function row(over: Partial<FlowRow> = {}): FlowRow {
   return {
@@ -88,6 +127,7 @@ afterEach(() => {
     else process.env[key] = saved[key];
   }
   clearMemoryStoreForTests();
+  setSchwabBlobClientForTests(null);
   vi.restoreAllMocks();
 });
 
@@ -115,24 +155,42 @@ describe("Flow page alerts", () => {
     expect((await loadAlertBook()).records).toHaveLength(1);
   });
 
-  it("sends again only when the stored contract's premium grows enough, and says why", async () => {
+  it("does not send the same flow again after a cold start, even when the premium doubles", async () => {
+    process.env.BLOB_READ_WRITE_TOKEN = "fixture-blob-token";
+    setSchwabBlobClientForTests(blobMock());
     const send = vi.spyOn(telegram, "sendTelegramAlert").mockResolvedValue(true);
-    const first = await recordDisplayedAlerts([row({ notionalPremium: 265_000 })], null, NOW);
+    const tradeTime = Date.parse("2026-05-14T14:31:02.000Z");
+    const first = await recordDisplayedAlerts([row({ notionalPremium: 265_000, tradeTime })], null, NOW);
     expect(first.saved).toBe(1);
     expect(send).toHaveBeenCalledTimes(1);
-    expect(String(send.mock.calls[0][0])).not.toContain("Flow grew");
 
-    const grown = await recordDisplayedAlerts([row({ notionalPremium: 610_000 })], null, NOW);
-    expect(grown.saved).toBe(1);
-    expect(send).toHaveBeenCalledTimes(2);
-    expect(String(send.mock.calls[1][0])).toContain("Flow grew $265K→$610K");
+    clearMemoryStoreForTests();
+    const grown = await recordDisplayedAlerts([row({
+      notionalPremium: 610_000,
+      tradeTime: tradeTime + 2_500,
+      id: "SPY|2026-06-04|104.0|call",
+    })], null, new Date(NOW.getTime() + 5 * 60_000));
+    expect(grown.saved).toBe(0);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect((await loadAlertBook()).records).toHaveLength(1);
+  });
 
-    const same = await recordDisplayedAlerts([row({ notionalPremium: 610_000 })], null, NOW);
-    expect(same.saved).toBe(0);
-    expect(send).toHaveBeenCalledTimes(2);
-    const book = await loadAlertBook();
-    expect(book.records).toHaveLength(2);
-    expect(book.records[1].realertReasons).toContain("Flow grew $265K→$610K");
+  it("stops at the daily cap", async () => {
+    for (let i = 0; i < 5; i++) {
+      const saved = await recordDisplayedAlerts([row({
+        id: `SPY|2026-06-04|${100 + i}|call`,
+        strike: 100 + i,
+        tradeTime: NOW.getTime() + i * 60_000,
+      })], null, NOW);
+      expect(saved.saved).toBe(1);
+    }
+    const sixth = await recordDisplayedAlerts([row({
+      id: "SPY|2026-06-04|110|call",
+      strike: 110,
+      tradeTime: NOW.getTime() + 6 * 60_000,
+    })], null, NOW);
+    expect(sixth.saved).toBe(0);
+    expect((await loadAlertBook()).records).toHaveLength(5);
   });
 
   it("does not save, mark, or check open interest after the Central close", async () => {

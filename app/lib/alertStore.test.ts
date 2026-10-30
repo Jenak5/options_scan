@@ -318,25 +318,43 @@ describe("durable contract dedupe", () => {
     expect((await loadAlertBook()).records).toHaveLength(2);
   });
 
-  it("re-alerts when the grade rises and says why", async () => {
+  it("does not send the same flow again when the grade rises or the premium doubles", async () => {
     const sample = nflx(265_000);
     expect((await rememberSentAlert(sample, asGrade(sample, "B"), NOW)).send).toBe(true);
     const later = new Date(NOW.getTime() + 5 * 60 * 1000);
-    const claim = await rememberSentAlert(sample, asGrade(sample, "A"), later);
-    expect(claim.send).toBe(true);
-    expect(claim.reasons).toEqual(["Upgraded B→A"]);
-    const book = await loadAlertBook();
-    expect(book.records).toHaveLength(2);
-    expect(book.records[1].realertReasons).toEqual(["Upgraded B→A"]);
+    const upgraded = await rememberSentAlert(sample, asGrade(sample, "A"), later);
+    expect(upgraded.send).toBe(false);
+    const grown = await rememberSentAlert(nflx(610_000), asGrade(nflx(610_000), "B"), later);
+    expect(grown.send).toBe(false);
+    expect((await loadAlertBook()).records).toHaveLength(1);
   });
 
-  it("re-alerts when premium at least doubles and grows by $100K", async () => {
+  it("sends a later trade on the same contract", async () => {
     const first = nflx(265_000);
+    first.tradeTime = 1_700_000_000_000;
     expect((await rememberSentAlert(first, asGrade(first, "B"), NOW)).send).toBe(true);
-    const grown = nflx(610_000);
-    const claim = await rememberSentAlert(grown, asGrade(grown, "B"), new Date(NOW.getTime() + 60_000));
+    const nextTrade = nflx(265_000);
+    nextTrade.tradeTime = 1_700_000_000_000 + 5 * 60_000;
+    const claim = await rememberSentAlert(nextTrade, asGrade(nextTrade, "B"), new Date(NOW.getTime() + 5 * 60_000));
     expect(claim.send).toBe(true);
-    expect(claim.reasons).toEqual(["Flow grew $265K→$610K"]);
+    expect((await loadAlertBook()).records).toHaveLength(2);
+  });
+
+  it("does not send the same trade again after a cold start", async () => {
+    process.env.BLOB_READ_WRITE_TOKEN = "fixture-blob-token";
+    const mock = createBlobMock();
+    setSchwabBlobClientForTests(mock.client);
+    const sample = nflx(265_000);
+    sample.tradeTime = 1_700_000_000_000;
+    expect((await rememberSentAlert(sample, asGrade(sample, "B"), NOW)).send).toBe(true);
+    clearMemoryStoreForTests();
+    const shifted = nflx(610_000, "NFLX|2026-11-20|64.0|call");
+    shifted.tradeTime = 1_700_000_000_000 + 2_500;
+    const again = await rememberSentAlert(shifted, asGrade(shifted, "A"), new Date(NOW.getTime() + 5 * 60_000));
+    expect(again.send).toBe(false);
+    const book = await loadAlertBook();
+    expect(book.records).toHaveLength(1);
+    expect(book.records[0].flowKey).toContain("|t:");
   });
 
   it("does not re-alert on a double that is under $100K, or a $100K gain under 2x", async () => {
@@ -353,12 +371,14 @@ describe("durable contract dedupe", () => {
     expect((await loadAlertBook()).records).toHaveLength(1);
   });
 
-  it("includes both reasons when the grade and the premium both qualify", async () => {
+  it("keeps a quote with no trade id on the Chicago day, including after the trade time shows up", async () => {
     const first = nflx(265_000);
     expect((await rememberSentAlert(first, asGrade(first, "B"), NOW)).send).toBe(true);
-    const next = nflx(610_000);
-    const claim = await rememberSentAlert(next, asGrade(next, "A"), new Date(NOW.getTime() + 60_000));
-    expect(claim.reasons).toEqual(["Upgraded B→A", "Flow grew $265K→$610K"]);
+    const withTime = nflx(610_000);
+    withTime.tradeTime = NOW.getTime();
+    const again = await rememberSentAlert(withTime, asGrade(withTime, "A"), new Date(NOW.getTime() + 60_000));
+    expect(again.send).toBe(false);
+    expect((await loadAlertBook()).records).toHaveLength(1);
   });
 });
 

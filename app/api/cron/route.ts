@@ -2,13 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { OUTCOME_RULES, alertScanMinPremium, alertsPerDayLimit, formatContractPriceLine, formatFlowPremium, isAlertGrade } from "@/app/lib/alertConfig";
 import { runAlertFollowUps } from "@/app/lib/alertFollowUp";
 import {
-  alertContractKey,
   chooseAlerts,
+  flowAlertKeyFromRow,
   gradeAlertCandidates,
   indexSentAlerts,
-  realertReasons,
+  isSameFlowAlert,
   screenQueueLimit,
-  storedAlertPremium,
 } from "@/app/lib/alertPolicy";
 import { currentDailyLoss, loadAlertBook, recordOpeningChecks, rememberSentAlert } from "@/app/lib/alertStore";
 import { lastAlertBookWriteError, readScanHealth, withBlobReadCache, writeScanHealth } from "@/app/lib/schwabStore";
@@ -179,6 +178,14 @@ function dayKey(tradingDay: string, key: string): string {
   return `${tradingDay}|${key}`;
 }
 
+function sameStoredFlow(keys: ReadonlySet<string>, nextKey: string): boolean {
+  let same = false;
+  keys.forEach((key) => {
+    if (isSameFlowAlert(key, nextKey)) same = true;
+  });
+  return same;
+}
+
 function mergeDayKeys(tradingDay: string, fromBook: ReadonlySet<string>, memory: ReadonlySet<string>): Set<string> {
   const merged = new Set(fromBook);
   const prefix = `${tradingDay}|`;
@@ -338,6 +345,8 @@ async function handleCron(request: NextRequest) {
       alreadySentContractKeys: mergeDayKeys(tradingDay, sent.contracts, flaggedContractIds),
       alreadySentSetupKeys: sent.setups,
       sentByContract: sent.byContract,
+      sentFlowKeys: sent.flowKeys,
+      tradingDay,
       limit: screenQueueLimit(room),
     });
 
@@ -375,7 +384,6 @@ async function handleCron(request: NextRequest) {
       const row = item.row;
       const verdict = item.verdict;
       const latest = indexSentAlerts((await loadAlertBook()).records, tradingDay);
-      const sentContracts = mergeDayKeys(tradingDay, latest.contracts, flaggedContractIds);
       if (latest.count >= maxPerDay) {
         log.push("Daily alert cap reached");
         break;
@@ -384,15 +392,8 @@ async function handleCron(request: NextRequest) {
         log.push(`${row.ticker}: skipped — Grok already flagged this contract`);
         continue;
       }
-      const prior = latest.byContract.get(alertContractKey(row)) ?? null;
-      const repeatReasons = prior
-        ? realertReasons(prior, { grade: verdict.grade, premium: storedAlertPremium({ alertedPremium: row.notionalPremium }) })
-        : [];
-      if (prior && repeatReasons.length === 0) {
-        log.push(`${row.ticker}: skipped — ${row.strike} ${row.putCall} expiring ${row.expiration} was already alerted today`);
-        continue;
-      }
-      if (!prior && (sentContracts.has(row.id) || sentContracts.has(alertContractKey(row)))) {
+      const nextKey = flowAlertKeyFromRow(row, tradingDay);
+      if (sameStoredFlow(latest.flowKeys, nextKey)) {
         log.push(`${row.ticker}: skipped — ${row.strike} ${row.putCall} expiring ${row.expiration} was already alerted today`);
         continue;
       }
