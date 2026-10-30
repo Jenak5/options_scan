@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildChainResult,
   candlePeriod,
+  historyCandleSymbol,
   chicagoMidnight,
   historyFromTime,
   nearestStrikes,
@@ -74,6 +75,15 @@ describe("tastytrade market parsers", () => {
     const entries = quoteEntriesFromItems(items);
     expect(entries).toHaveLength(1);
     expect(entries[0].symbol).toBe("SPY   261014C00775000");
+  });
+
+  it("subscribes VXN candles at the dxFeed index symbol", () => {
+    expect(historyCandleSymbol({ symbol: "vxn", frequencyType: "daily", frequency: 1 })).toBe("$VXN{=1d}");
+    expect(historyCandleSymbol({ symbol: "VIX", frequencyType: "daily", frequency: 1 })).toBe("VIX{=1d}");
+    expect(historyCandleSymbol({
+      symbol: "SPY", frequencyType: "minute", frequency: 5, needExtendedHoursData: false,
+    })).toBe("SPY{=5m,tho=true}");
+    expect(historyCandleSymbol({ symbol: "not a symbol!", frequencyType: "daily", frequency: 1 })).toBeNull();
   });
 
   it("parses OCC symbols", () => {

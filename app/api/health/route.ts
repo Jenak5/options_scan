@@ -6,13 +6,12 @@ import { hasHealthBearer } from "@/app/lib/auth";
 import { emptyCandleHealth, readCandleHealth } from "@/app/lib/candleStore";
 import { buildHealthReport, countShadowTotals, trackedAlertCounts } from "@/app/lib/healthReport";
 import { emptyScanHealth } from "@/app/lib/scanHealth";
-import { loadMarketDataHealth } from "@/app/lib/marketData";
+import { healthTastytradeEnabled, loadMarketDataHealth } from "@/app/lib/marketData";
 import { getSchwabStatus } from "@/app/lib/schwab";
 import { readAvwapPaperBookText, readCallsPaperBookText, readScanHealth, readShadowBookText } from "@/app/lib/schwabStore";
 import { readUnusualBook } from "@/app/lib/unusualFlowStore";
 import { unusualFlowHealth } from "@/app/lib/unusualFlow";
 import { parseShadowBook } from "@/app/lib/shadow";
-import { tastytradeEnabled } from "@/app/lib/tastytrade";
 
 export const dynamic = "force-dynamic";
 
@@ -47,7 +46,7 @@ export async function GET(request: NextRequest) {
   const report = buildHealthReport({
     health,
     schwabConnected: schwab,
-    tastytradeEnabled: tastytradeEnabled(),
+    tastytradeEnabled: healthTastytradeEnabled(marketData),
     alerts: book.records,
     openShadows: totals.openShadows,
     resolvedShadows: totals.resolvedShadows,

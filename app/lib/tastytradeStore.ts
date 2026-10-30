@@ -113,6 +113,11 @@ export async function writeStoredTastytradeAccess(token: PersistedAccess): Promi
   }
 }
 
+/** Forget this instance's copy of `access` without touching the blob. */
+export function dropMemoryAccessIf(access: string): void {
+  if (!memoryAccess || memoryAccess.access === access) memoryAccess = null;
+}
+
 /** Drop this access token from memory and from the blob, when it is still the cached one. */
 export async function clearStoredTastytradeAccess(access: string): Promise<void> {
   if (memoryAccess && memoryAccess.access !== access) return;

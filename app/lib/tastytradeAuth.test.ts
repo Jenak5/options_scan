@@ -37,6 +37,23 @@ describe("Tastytrade auth", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("loads equity quotes from /market-data/by-type with the OAuth access token", async () => {
+    const urls: string[] = [];
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url);
+      urls.push(u);
+      if (u.endsWith("/oauth/token")) {
+        return new Response(JSON.stringify({ access_token: "access-token", expires_in: 900 }), { status: 200 });
+      }
+      expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer access-token");
+      expect(u).not.toContain("api-quote-tokens");
+      return new Response(JSON.stringify({ data: { items: [] } }), { status: 200 });
+    });
+    await ttQuotes({ equity: ["SPY"] }, fetchImpl as unknown as typeof fetch);
+    expect(urls.some((u) => u === "https://api.tastyworks.com/market-data/by-type?equity=SPY")).toBe(true);
   });
 
   it("shares one refresh across parallel callers", async () => {
@@ -72,12 +89,88 @@ describe("Tastytrade auth", () => {
     await expect(ttQuotes({ equity: ["XLF"] }, t.fetchImpl)).rejects.toThrow("Tastytrade market data request failed (401)");
     expect(t.calls).toEqual(["t1", "t2"]);
     expect(t.minted()).toBe(2);
-    expect(waits).toEqual([250]);
+    expect(waits[0]).toBe(250);
+    expect(waits[1]).toBeGreaterThanOrEqual(1_500);
+    expect(waits[1]).toBeLessThanOrEqual(2_000);
     const logs = warn.mock.calls.map((c) => String(c[0]));
     expect(logs.some((l) => /401 on attempt 2 \(token age \d+s\)/.test(l))).toBe(true);
     expect(logs.some((l) => /still 401 after one refresh/.test(l))).toBe(true);
     expect(logs.some((l) => /rate limit/.test(l))).toBe(false);
     warn.mockRestore();
+  });
+
+  it("retries a quote 401 on the same mature token before minting another", async () => {
+    let now = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    resetTastytradeMarketForTests({ sleep: async (ms) => { now += ms; } });
+    let minted = 0;
+    let hits = 0;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.endsWith("/oauth/token")) {
+        minted += 1;
+        return new Response(JSON.stringify({ access_token: "mature-token", expires_in: 900 }), { status: 200 });
+      }
+      hits += 1;
+      if (hits === 2) return new Response("{}", { status: 401 });
+      return new Response(JSON.stringify({ data: { items: [{ symbol: "SPY" }] } }), { status: 200 });
+    });
+    await ttQuotes({ equity: ["SPY"] }, fetchImpl as unknown as typeof fetch);
+    now += 8_000;
+    await ttQuotes({ equity: ["SPY"] }, fetchImpl as unknown as typeof fetch);
+    expect(minted).toBe(1);
+    expect(hits).toBe(3);
+  });
+
+  it("holds a replacement token until it is old enough to be accepted", async () => {
+    let now = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    resetTastytradeMarketForTests({ sleep: async (ms) => { now += ms; } });
+    const usedAt: number[] = [];
+    let mintedAt = 0;
+    let minted = 0;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.endsWith("/oauth/token")) {
+        minted += 1;
+        if (minted === 2) mintedAt = now;
+        return new Response(JSON.stringify({ access_token: `t${minted}`, expires_in: 900 }), { status: 200 });
+      }
+      usedAt.push(now);
+      return new Response("{}", { status: 401 });
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(ttQuotes({ equity: ["SPY"] }, fetchImpl as unknown as typeof fetch)).rejects.toThrow("Tastytrade market data request failed (401)");
+    expect(minted).toBe(2);
+    expect(usedAt[1] - mintedAt).toBeGreaterThanOrEqual(2_000);
+    warn.mockRestore();
+  });
+
+  it("uses a newer stored token after a 401 instead of minting over it", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    resetTastytradeMarketForTests({ sleep: async (ms) => { now += ms; } });
+    let minted = 0;
+    let hits = 0;
+    const seen: string[] = [];
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith("/oauth/token")) {
+        minted += 1;
+        return new Response(JSON.stringify({ access_token: `t${minted}`, expires_in: 900 }), { status: 200 });
+      }
+      hits += 1;
+      const token = (new Headers(init?.headers).get("Authorization") ?? "").replace("Bearer ", "");
+      seen.push(token);
+      if (hits === 1) {
+        await writeStoredTastytradeAccess({ access: "peer-token", mintedAt: now, expiresAt: now + 10 * 60_000 });
+        return new Response("{}", { status: 401 });
+      }
+      return new Response(JSON.stringify({ data: { items: [] } }), { status: 200 });
+    });
+    await ttQuotes({ equity: ["QQQ"] }, fetchImpl as unknown as typeof fetch);
+    expect(minted).toBe(1);
+    expect(seen).toEqual(["t1", "peer-token"]);
   });
 
   it("reuses a cached access token and does not print it", async () => {
