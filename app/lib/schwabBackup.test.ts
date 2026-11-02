@@ -147,12 +147,12 @@ describe("Schwab backup while tastytrade is preferred", () => {
     expect(schwabChain).not.toHaveBeenCalled();
     expect(schwabHistory).not.toHaveBeenCalled();
     expect(warn.mock.calls.map((call) => call[0])).toContain("XLF skipped: tastytrade 401; Schwab backup not connected");
-    expect(warn.mock.calls.map((call) => String(call[0])).join(" ")).not.toMatch(/Schwab scan skipped/);
+    expect(warn.mock.calls.map((call) => String(call[0])).join(" ")).not.toMatch(/Scan skipped/);
 
     process.env.TELEGRAM_BOT_TOKEN = "fixture-bot";
     process.env.TELEGRAM_CHAT_ID = "fixture-chat";
     await expect(getAccessToken()).rejects.toBeInstanceOf(SchwabNotConnectedError);
-    expect(telegramBodies.join(" ")).not.toMatch(/Schwab reconnect|Schwab refresh failed|Schwab scan skipped/);
+    expect(telegramBodies.join(" ")).not.toMatch(/Schwab reconnect|Schwab refresh failed|Scan skipped/);
 
     const response = await flowGet(new NextRequest("https://options-scan.vercel.app/api/flow?liquidOnly=false", {
       headers: { authorization: "Bearer cron-token" },
@@ -163,7 +163,7 @@ describe("Schwab backup while tastytrade is preferred", () => {
     expect(body.skipped).toEqual(["XLF"]);
     expect(body.data.map((row: { ticker: string }) => row.ticker)).toEqual(expect.arrayContaining(["TLT", "GLD"]));
     expect(body.data.map((row: { ticker: string }) => row.ticker)).not.toContain("XLF");
-    expect(telegramBodies.join(" ")).not.toMatch(/Schwab scan skipped/);
+    expect(telegramBodies.join(" ")).not.toMatch(/Scan skipped/);
   });
 
   it("keeps Tastytrade quotes and asks Schwab only for the missing symbols in a partial quote batch", async () => {
@@ -218,7 +218,7 @@ describe("Schwab backup while tastytrade is preferred", () => {
     expect(body.reason).toMatch(/Schwab is not connected/);
     const health = await readScanHealth();
     expect(health.lastOutcome).toBe("skipped");
-    expect(telegramBodies.some((text) => text.includes("Schwab scan skipped"))).toBe(true);
+    expect(telegramBodies.some((text) => text.includes("Scan skipped"))).toBe(true);
     expect(await readFlowSnapshots()).toEqual({});
   });
 });

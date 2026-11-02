@@ -175,8 +175,9 @@ async function handleFlow(request: NextRequest) {
     }
     const message = err instanceof Error && err.message.startsWith("Schwab ")
       ? err.message.slice(0, 180)
-      : "Schwab market data request failed";
-    return NextResponse.json({ error: message, connected: false }, { status: 502 });
+      : preferredDataSource() === "tastytrade" ? "Market data request failed. Tap Refresh to retry." : "Schwab market data request failed";
+    // Only a Schwab-only setup reports "not connected", so a Tastytrade hiccup never asks for a Schwab reconnect.
+    return NextResponse.json({ error: message, connected: preferredDataSource() === "tastytrade" }, { status: 502 });
   }
 }
 

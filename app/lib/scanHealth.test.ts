@@ -45,7 +45,7 @@ describe("skip notification", () => {
     expect(skipNotifyDue(null, SESSION)).toBe(true);
     expect(skipNotifyDue(SESSION - SKIP_NOTIFY_COOLDOWN_MS + 1, SESSION)).toBe(false);
     expect(skipNotifyDue(SESSION - SKIP_NOTIFY_COOLDOWN_MS, SESSION)).toBe(true);
-    expect(skipWarning("Schwab is not connected.")).toBe("Schwab scan skipped: Schwab is not connected.");
+    expect(skipWarning("Schwab is not connected.")).toBe("Scan skipped: Schwab is not connected.");
     expect(skipTelegramText("Refresh token expired")).toContain("Refresh token expired");
     expect(skipTelegramText("Refresh token expired")).toMatch(/did not place an order/i);
   });

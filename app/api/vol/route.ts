@@ -93,10 +93,10 @@ export async function GET(request: NextRequest) {
     }
     const message = err instanceof Error && err.message.startsWith("Schwab ")
       ? err.message.slice(0, 180)
-      : "Schwab market data request failed";
+      : preferredDataSource() === "tastytrade" ? "Market data request failed. Try again." : "Schwab market data request failed";
     return NextResponse.json({
       error: message,
-      connected: false,
+      connected: preferredDataSource() === "tastytrade",
       rows: [],
       errors: [],
       disclaimer: VOL_DISCLAIMER,
