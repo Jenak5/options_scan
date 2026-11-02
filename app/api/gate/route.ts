@@ -245,5 +245,5 @@ function exitPlan(input: GateBody, ask: number | null) {
 
 function safeMessage(message: string): string {
   if (message.startsWith("Schwab ")) return message.slice(0, 180);
-  return "Schwab market data request failed";
+  return preferredDataSource() === "tastytrade" ? "Market data request failed. Try again." : "Schwab market data request failed";
 }

@@ -305,16 +305,16 @@ export function connectionNotice(input: {
 }
 
 export function skipWarning(reason: string): string {
-  return `Schwab scan skipped: ${reason}`;
+  return `Scan skipped: ${reason}`;
 }
 
 export function skipTelegramText(reason: string): string {
   return [
-    "⚠️ <b>Schwab scan skipped</b>",
+    "⚠️ <b>Scan skipped</b>",
     "",
     escapeHtml(reason),
     "",
-    "No new alerts were sent and no new scorecard quotes were saved on this run. Open the scanner and use Reconnect Schwab.",
+    "No new alerts were sent and no new scorecard quotes were saved on this run. Open the scanner and check the Tastytrade connection. Schwab is only a backup and is not required.",
     "",
     "The app is read-only and did not place an order.",
   ].join("\n");
