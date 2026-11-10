@@ -1,6 +1,9 @@
 import {
   DXLINK_OPEN_TIMEOUT_MS,
+  dxlinkErrorIsAuth,
   dxlinkOpening,
+  formatDxlinkError,
+  TastytradeDxlinkError,
   type CandleTransport,
 } from "@/app/lib/tastytradeCandles";
 import { streamerFromOcc, type TtLastTrade, type TtQuoteItem } from "@/app/lib/tastytradeMarketParse";
@@ -228,6 +231,7 @@ export async function collectDxlinkFeed(
     if (msg.type === "KEEPALIVE") {
       transport.send(JSON.stringify({ type: "KEEPALIVE", channel: 0 }));
     } else if (msg.type === "ERROR") {
+      if (dxlinkErrorIsAuth(msg)) throw new TastytradeDxlinkError(formatDxlinkError(msg, [token]), true);
       if (/timeandsale/i.test(errorText(msg))) rejected = true;
     } else if (msg.type === "AUTH_STATE" && msg.state === "AUTHORIZED" && !streaming) {
       streaming = true;
@@ -239,7 +243,8 @@ export async function collectDxlinkFeed(
       parseDxlinkFeedData(msg.data, snap);
     }
   }
-  snap.tradeSideDataAvailable = streaming && !rejected ? "yes" : "no";
+  if (!streaming) throw new Error("DXLink did not authorize the quote session before the timeout.");
+  snap.tradeSideDataAvailable = rejected ? "no" : "yes";
   return snap;
 }
 

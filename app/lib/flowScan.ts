@@ -380,6 +380,8 @@ function quotesForRows(
 
 function safeScanMessage(err: unknown): string {
   if (err instanceof BothSourcesFailedError) return err.message.slice(0, 180);
-  if (err instanceof Error && err.message.startsWith("Schwab ")) return err.message.slice(0, 180);
-  return "Schwab market data request failed";
+  if (err instanceof Error && err.message.trim()) {
+    return err.message.replace(/bearer\s+\S+/gi, "bearer [redacted]").replace(/\s+/g, " ").slice(0, 180);
+  }
+  return "Market data request failed";
 }

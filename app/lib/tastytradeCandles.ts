@@ -91,6 +91,19 @@ export interface TastytradeTokenRequest {
 export interface QuoteSession {
   url: string;
   token: string;
+  /** Epoch milliseconds from the quote token expires-at, or from its exp claim. Null when neither is present. */
+  expiresAt: number | null;
+}
+
+/** DXLink ERROR or AUTH_STATE the quote session should refresh once for. */
+export class TastytradeDxlinkError extends Error {
+  readonly authRelated: boolean;
+
+  constructor(message: string, authRelated: boolean) {
+    super(message);
+    this.name = "TastytradeDxlinkError";
+    this.authRelated = authRelated;
+  }
 }
 
 export interface CandleTransport {
@@ -205,8 +218,9 @@ export function dxlinkOpening(token: string): object[] {
 
 /**
  * CHANNEL_REQUEST, FEED_SETUP, and the Candle subscription are returned only
- * after AUTH_STATE AUTHORIZED. A KEEPALIVE before that is answered and does
- * not open the feed.
+ * after AUTH_STATE AUTHORIZED. DXLink sends AUTH_STATE UNAUTHORIZED immediately
+ * after SETUP, before AUTH has been applied. That frame is not a failure.
+ * A KEEPALIVE before authorization is answered and does not open the feed.
  */
 export function handleDxlinkMessage(state: DxlinkState, message: unknown): DxlinkStep {
   const row = asRecord(message);
@@ -215,7 +229,7 @@ export function handleDxlinkMessage(state: DxlinkState, message: unknown): Dxlin
     return { state, send: [{ type: "KEEPALIVE", channel: 0 }], candles: [], error: null };
   }
   if (type === "ERROR") {
-    return { state, send: [], candles: [], error: clip(dxErrorText(row)) };
+    return { state, send: [], candles: [], error: formatDxlinkError(row) };
   }
   if (type === "AUTH_STATE") {
     if (row?.state !== "AUTHORIZED" || state.phase === "streaming") {
@@ -329,6 +343,7 @@ export async function tastytradeGetJson(
   try {
     const res = await fetchImpl(`https://api.tastyworks.com${path}`, {
       headers: { "User-Agent": USER_AGENT, Authorization: `Bearer ${access.access}`, Accept: "application/json" },
+      cache: "no-store",
       signal: AbortSignal.timeout(TASTYTRADE_REST_TIMEOUT_MS),
     });
     if (!res.ok) return null;
@@ -357,6 +372,7 @@ async function requestAccessToken(
     method: request.method,
     headers: request.headers,
     body: request.body,
+    cache: "no-store",
     signal: AbortSignal.timeout(TASTYTRADE_REST_TIMEOUT_MS),
   });
   if (!oauth.ok) {
@@ -401,6 +417,7 @@ export function feedMessages(subs: readonly CandleSubscription[]): object[] {
 
 export async function openQuoteSession(fetchImpl: typeof fetch, access: string): Promise<QuoteSession> {
   const quote = await fetchImpl(QUOTE_URL, {
+    cache: "no-store",
     signal: AbortSignal.timeout(TASTYTRADE_REST_TIMEOUT_MS),
     headers: {
       "User-Agent": USER_AGENT,
@@ -414,7 +431,17 @@ export async function openQuoteSession(fetchImpl: typeof fetch, access: string):
   const url = typeof data["dxlink-url"] === "string" ? data["dxlink-url"] : "";
   const token = typeof data.token === "string" ? data.token : "";
   if (!url || !token) throw new Error("Tastytrade quote token did not include a DXLink URL and token");
-  return { url, token };
+  const expiresAt = readQuoteExpiresAt(data, token);
+  logQuoteExpiry(expiresAt);
+  return { url, token, expiresAt };
+}
+
+/** Quote-token lifetime. Prefers expires-at on the response, then the token exp claim. The token itself is not returned or logged. */
+export function readQuoteExpiresAt(data: Record<string, unknown>, token: string): number | null {
+  const raw = data["expires-at"] ?? data["expires_at"] ?? data.expiresAt ?? data["token-expiration"];
+  const fromField = expiryToMs(raw);
+  if (fromField != null) return fromField;
+  return jwtExpMs(token);
 }
 
 async function runDxlinkBatch(
@@ -572,9 +599,41 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
-function dxErrorText(row: Record<string, unknown> | null): string {
-  const message = row && typeof row.message === "string" ? row.message : "DXLink error";
-  return message;
+const AUTH_ERROR_PATTERN = /unauthori[sz]ed|authentication|not[_ -]?authorized|forbidden|invalid[_ -]?token|token[_ -]?(expired|invalid|rejected|revoked)|access denied|session (rejected|expired)|\b401\b|\b403\b/i;
+
+export function dxlinkTextField(row: Record<string, unknown> | null, key: string): string {
+  const value = row?.[key];
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return "";
+}
+
+/** True when a DXLink ERROR or AUTH_STATE is an authorization failure. */
+export function dxlinkErrorIsAuth(row: Record<string, unknown> | null): boolean {
+  const blob = [
+    dxlinkTextField(row, "error"),
+    dxlinkTextField(row, "reason"),
+    dxlinkTextField(row, "message"),
+    dxlinkTextField(row, "state"),
+  ].join(" ");
+  return AUTH_ERROR_PATTERN.test(blob);
+}
+
+/**
+ * error, reason, and message from a DXLink ERROR frame.
+ * Secrets and bearer tokens are removed. This is safe to store on health lastError.
+ */
+export function formatDxlinkError(row: Record<string, unknown> | null, secrets: readonly string[] = []): string {
+  const error = dxlinkTextField(row, "error");
+  const reason = dxlinkTextField(row, "reason");
+  const message = dxlinkTextField(row, "message");
+  const bits = [
+    error ? `error=${error}` : "",
+    reason ? `reason=${reason}` : "",
+    message ? `message=${message}` : "",
+  ].filter((part) => part.length > 0);
+  const detail = bits.length > 0 ? bits.join("; ") : "no error, reason, or message";
+  return clip(redactSecrets(`DXLink ${detail}`, secrets));
 }
 
 function redactSecrets(text: string, secrets: readonly string[]): string {
@@ -586,10 +645,47 @@ function redactSecrets(text: string, secrets: readonly string[]): string {
   }
   return out
     .replace(/bearer\s+\S+/gi, "bearer [redacted]")
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+){1,2}\b/g, "[redacted]")
     .replace(
-      /(refresh_token|client_secret|access_token)(["']?\s*[:=]\s*)("[^"]*"|'[^']*'|\S+)/gi,
+      /(refresh_token|client_secret|access_token|token)(["']?\s*[:=]\s*)("[^"]*"|'[^']*'|\S+)/gi,
       "$1$2[redacted]",
     );
+}
+
+function expiryToMs(raw: unknown): number | null {
+  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
+    return raw < 1_000_000_000_000 ? raw * 1000 : raw;
+  }
+  if (typeof raw === "string" && raw.trim()) {
+    const trimmed = raw.trim();
+    if (/^\d+(\.\d+)?$/.test(trimmed)) {
+      const asNum = Number(trimmed);
+      if (Number.isFinite(asNum) && asNum > 0) return asNum < 1_000_000_000_000 ? asNum * 1000 : asNum;
+    }
+    const parsed = Date.parse(trimmed);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function jwtExpMs(token: string): number | null {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as { exp?: unknown };
+    return expiryToMs(payload.exp);
+  } catch {
+    return null;
+  }
+}
+
+function logQuoteExpiry(expiresAt: number | null, now = Date.now()): void {
+  if (expiresAt == null) {
+    console.info("[tastytrade-dxlink] quote token has no expires-at");
+    return;
+  }
+  const seconds = Math.round((expiresAt - now) / 1000);
+  console.info(`[tastytrade-dxlink] quote token expires at ${new Date(expiresAt).toISOString()} (${seconds}s)`);
 }
 
 function clip(value: string): string {

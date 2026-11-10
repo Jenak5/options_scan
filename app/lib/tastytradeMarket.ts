@@ -2,10 +2,15 @@ import type { ChainParseResult, PriceCandle, ParsedQuote } from "@/app/lib/schwa
 import { QUOTE_EMPTY, QUOTE_REJECTED } from "@/app/lib/schwabParse";
 import {
   connectNodeWebSocket,
+  dxlinkErrorIsAuth,
   dxlinkOpening,
+  formatDxlinkError,
   openCandleAccess,
   openQuoteSession,
+  TastytradeDxlinkError,
   TASTYTRADE_REST_TIMEOUT_MS,
+  type CandleTransport,
+  type QuoteSession,
 } from "@/app/lib/tastytradeCandles";
 import {
   applyDxlinkOverlay,
@@ -75,6 +80,13 @@ const FRESH_TOKEN_GRACE_MS = 2_000;
 export const TT_MAX_CONCURRENT = 2;
 /** Tastytrade requests in flight at once for one ticker's chain. */
 export const TT_MAX_PER_TICKER = 2;
+/**
+ * DXLink sockets open at once in this process. One, so the next socket is
+ * opened only after the previous one has closed.
+ */
+export const DXLINK_MAX_SOCKETS = 1;
+/** A quote token inside this window of expires-at is not used. */
+const QUOTE_EXPIRY_SKEW_MS = 5_000;
 
 interface CachedToken {
   access: string;
@@ -113,6 +125,8 @@ export class Limiter {
 }
 
 let globalLimiter = new Limiter(TT_MAX_CONCURRENT);
+let dxlinkLimiter = new Limiter(DXLINK_MAX_SOCKETS);
+let dxlinkConnect: ((url: string) => Promise<CandleTransport>) | null = null;
 
 /** Run tasks with at most `limit` at once, keeping result order. */
 export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -155,8 +169,8 @@ async function currentToken(fetchImpl: typeof fetch): Promise<CachedToken> {
 
 /**
  * Drop the cached token only if it is still the one that got the 401.
- * A peer instance may already have written a newer access token. Keep that
- * one instead of deleting it and minting again.
+ * Another caller in this process may already have stored a newer access
+ * token in memory. Keep that one instead of minting again.
  */
 async function invalidateToken(access: string): Promise<void> {
   if (cachedToken?.access === access) cachedToken = null;
@@ -228,6 +242,7 @@ async function ttGet(path: string, fetchImpl: typeof fetch = fetch, signal?: Abo
     try {
       res = await fetchImpl(`${TASTYTRADE_LIVE_ORIGIN}${path}`, {
         headers: { "User-Agent": USER_AGENT, Authorization: `Bearer ${token}`, Accept: "application/json" },
+        cache: "no-store",
         signal: combined,
       });
     } catch (err) {
@@ -241,17 +256,115 @@ async function ttGet(path: string, fetchImpl: typeof fetch = fetch, signal?: Abo
   });
 }
 
-/** DXLink quote token with the same 401 retry as REST. */
-async function quoteSession(fetchImpl: typeof fetch): Promise<{ url: string; token: string }> {
-  return withTastytradeAuth("quote token", fetchImpl, async (access) => {
+interface QuotePair {
+  access: string;
+  session: QuoteSession;
+}
+
+export function setDxlinkConnectForTests(connect: ((url: string) => Promise<CandleTransport>) | null): void {
+  dxlinkConnect = connect;
+}
+
+/** Highest number of DXLink sockets seen in flight at once (tests/diagnostics). */
+export function dxlinkPeakSockets(): number {
+  return dxlinkLimiter.peak;
+}
+
+function connector(): (url: string) => Promise<CandleTransport> {
+  return dxlinkConnect ?? connectNodeWebSocket;
+}
+
+/**
+ * A new OAuth access token for the quote-token call that follows immediately.
+ * Does not reuse the in-memory REST token. One request, not a retry loop.
+ */
+async function mintFreshAccess(fetchImpl: typeof fetch): Promise<CachedToken> {
+  const opened = await openCandleAccess({ fetchImpl });
+  if (!opened.access) throw new TastytradeDataError(opened.errorSample);
+  const now = Date.now();
+  const ttl = opened.access.expiresInMs ?? TOKEN_FALLBACK_TTL_MS;
+  const token: CachedToken = { access: opened.access.access, mintedAt: now, expiresAt: now + ttl };
+  cachedToken = token;
+  await writeStoredTastytradeAccess(token);
+  return token;
+}
+
+function quoteStillValid(session: QuoteSession, now: number): boolean {
+  return session.expiresAt == null || session.expiresAt - now > QUOTE_EXPIRY_SKEW_MS;
+}
+
+function isQuoteUnauthorized(err: unknown): boolean {
+  if (err instanceof TastytradeDxlinkError && err.authRelated) return true;
+  return err instanceof Error && /\((401|403)\)/.test(err.message);
+}
+
+/**
+ * Fresh access token, then one /api-quote-tokens call. A 401 or an already
+ * expired quote token mints one replacement and holds it for the same grace
+ * the REST client uses after a refresh. The quote token is not cached.
+ */
+async function mintQuotePair(fetchImpl: typeof fetch, hold: boolean): Promise<QuotePair> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const token = await mintFreshAccess(fetchImpl);
+    if (hold || attempt > 0) {
+      const wait = token.mintedAt + FRESH_TOKEN_GRACE_MS - Date.now();
+      if (wait > 0) await sleepImpl(wait);
+    }
     try {
-      return { status: 200, value: await openQuoteSession(fetchImpl, access) };
+      const session = await openQuoteSession(fetchImpl, token.access);
+      if (!quoteStillValid(session, Date.now())) {
+        const when = session.expiresAt == null ? "unknown" : new Date(session.expiresAt).toISOString();
+        throw new TastytradeDxlinkError(
+          `DXLink error=UNAUTHORIZED; message=quote token expired (expires-at ${when})`,
+          true,
+        );
+      }
+      return { access: token.access, session };
     } catch (err) {
-      if (err instanceof Error && /\(401\)/.test(err.message)) return { status: 401 };
+      lastError = err;
+      await invalidateToken(token.access);
+      if (attempt === 0 && isQuoteUnauthorized(err)) {
+        await sleepImpl(AUTH_RETRY_DELAY_MS);
+        continue;
+      }
       throw err;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new TastytradeDataError("Tastytrade quote token failed (401)");
+}
+
+/** One socket at a time. An auth-related DXLink error refreshes the access and quote tokens once. */
+async function withFreshDxlink<T>(
+  fetchImpl: typeof fetch,
+  run: (session: QuoteSession) => Promise<T>,
+): Promise<T> {
+  return dxlinkLimiter.run(async () => {
+    let retried = false;
+    for (;;) {
+      const pair = await mintQuotePair(fetchImpl, retried);
+      try {
+        return await run(pair.session);
+      } catch (err) {
+        if (!retried && err instanceof TastytradeDxlinkError && err.authRelated) {
+          retried = true;
+          await invalidateToken(pair.access);
+          console.warn(`[tastytrade-dxlink] auth error, refreshing once: ${err.message}`);
+          await sleepImpl(AUTH_RETRY_DELAY_MS);
+          continue;
+        }
+        throw err;
+      }
     }
   });
 }
+
+/** A DXLink ERROR frame. AUTH_STATE UNAUTHORIZED is not an error; the feed sends it before AUTH is applied. */
+function dxlinkFailure(msg: Record<string, unknown>, secrets: readonly string[]): TastytradeDxlinkError {
+  return new TastytradeDxlinkError(formatDxlinkError(msg, secrets), dxlinkErrorIsAuth(msg));
+}
+
+const DXLINK_AUTH_TIMEOUT = "DXLink did not authorize the quote session before the timeout.";
 
 export async function ttQuotes(
   input: { equity?: string[]; options?: string[] },
@@ -310,15 +423,16 @@ async function dxlinkEnrichSafe(occSymbols: string[], fetchImpl: typeof fetch): 
       noteDxlinkTradeSide("no");
       return null;
     }
-    const session = await quoteSession(fetchImpl);
-    const transport = await connectNodeWebSocket(session.url);
-    try {
-      const snap = await collectDxlinkFeed(transport, session.token, streamers, windowMs);
-      noteDxlinkTradeSide(snap.tradeSideDataAvailable);
-      return snap;
-    } finally {
-      transport.close();
-    }
+    const snap = await withFreshDxlink(fetchImpl, async (session) => {
+      const transport = await connector()(session.url);
+      try {
+        return await collectDxlinkFeed(transport, session.token, streamers, windowMs);
+      } finally {
+        transport.close();
+      }
+    });
+    noteDxlinkTradeSide(snap.tradeSideDataAvailable);
+    return snap;
   } catch (err) {
     noteDxlinkTradeSide("no");
     const text = err instanceof Error ? err.message : "unknown";
@@ -344,55 +458,58 @@ export async function ttLastTrades(
   const fetchImpl = deps?.fetchImpl ?? fetch;
   const timeoutMs = deps?.timeoutMs ?? 6000;
   const quietMs = deps?.quietMs ?? 800;
-  const session = await quoteSession(fetchImpl);
-  const transport = await connectNodeWebSocket(session.url);
-  const deadline = Date.now() + timeoutMs;
-  let streaming = false;
-  let lastDataAt = 0;
-  try {
-    const opening = dxlinkOpening(session.token);
-    for (let i = 0; i < opening.length; i++) transport.send(JSON.stringify(opening[i]));
-    while (Date.now() < deadline && out.size < streamers.length) {
-      if (lastDataAt > 0 && Date.now() - lastDataAt >= quietMs) break;
-      const incoming = await transport.next(Math.max(1, Math.min(lastDataAt > 0 ? quietMs : 3000, deadline - Date.now())));
-      if (incoming === "timeout") continue;
-      if (incoming == null) break;
-      let msg: Record<string, unknown>;
-      try {
-        msg = JSON.parse(incoming) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
-      if (msg.type === "KEEPALIVE") {
-        transport.send(JSON.stringify({ type: "KEEPALIVE", channel: 0 }));
-      } else if (msg.type === "ERROR") {
-        throw new TastytradeDataError("DXLink error");
-      } else if (msg.type === "AUTH_STATE" && msg.state === "AUTHORIZED" && !streaming) {
-        streaming = true;
-        transport.send(JSON.stringify({ type: "CHANNEL_REQUEST", channel: 1, service: "FEED", parameters: { contract: "AUTO" } }));
-        transport.send(JSON.stringify({
-          type: "FEED_SETUP",
-          channel: 1,
-          acceptAggregationPeriod: 0.1,
-          acceptDataFormat: "COMPACT",
-          acceptEventFields: { Trade: [...TRADE_FIELDS] },
-        }));
-        for (let i = 0; i < streamers.length; i += QUOTE_BATCH) {
-          transport.send(JSON.stringify({
-            type: "FEED_SUBSCRIPTION",
-            channel: 1,
-            add: streamers.slice(i, i + QUOTE_BATCH).map((symbol) => ({ type: "Trade", symbol })),
-          }));
+  await withFreshDxlink(fetchImpl, async (session) => {
+    const transport = await connector()(session.url);
+    const deadline = Date.now() + timeoutMs;
+    let streaming = false;
+    let lastDataAt = 0;
+    try {
+      const opening = dxlinkOpening(session.token);
+      for (let i = 0; i < opening.length; i++) transport.send(JSON.stringify(opening[i]));
+      while (Date.now() < deadline && out.size < streamers.length) {
+        if (lastDataAt > 0 && Date.now() - lastDataAt >= quietMs) break;
+        const incoming = await transport.next(Math.max(1, Math.min(lastDataAt > 0 ? quietMs : 3000, deadline - Date.now())));
+        if (incoming === "timeout") continue;
+        if (incoming == null) break;
+        let msg: Record<string, unknown>;
+        try {
+          msg = JSON.parse(incoming) as Record<string, unknown>;
+        } catch {
+          continue;
         }
-      } else if (msg.type === "FEED_DATA") {
-        const before = out.size;
-        parseCompactTrades(msg.data, out);
-        if (out.size > before || lastDataAt === 0) lastDataAt = Date.now();
+        if (msg.type === "KEEPALIVE") {
+          transport.send(JSON.stringify({ type: "KEEPALIVE", channel: 0 }));
+        } else if (msg.type === "ERROR") {
+          throw dxlinkFailure(msg, [session.token]);
+        } else if (msg.type === "AUTH_STATE" && msg.state === "AUTHORIZED" && !streaming) {
+          streaming = true;
+          transport.send(JSON.stringify({ type: "CHANNEL_REQUEST", channel: 1, service: "FEED", parameters: { contract: "AUTO" } }));
+          transport.send(JSON.stringify({
+            type: "FEED_SETUP",
+            channel: 1,
+            acceptAggregationPeriod: 0.1,
+            acceptDataFormat: "COMPACT",
+            acceptEventFields: { Trade: [...TRADE_FIELDS] },
+          }));
+          for (let i = 0; i < streamers.length; i += QUOTE_BATCH) {
+            transport.send(JSON.stringify({
+              type: "FEED_SUBSCRIPTION",
+              channel: 1,
+              add: streamers.slice(i, i + QUOTE_BATCH).map((symbol) => ({ type: "Trade", symbol })),
+            }));
+          }
+        } else if (msg.type === "FEED_DATA") {
+          const before = out.size;
+          parseCompactTrades(msg.data, out);
+          if (out.size > before || lastDataAt === 0) lastDataAt = Date.now();
+        }
       }
+      if (!streaming) throw new TastytradeDataError(DXLINK_AUTH_TIMEOUT);
+    } finally {
+      transport.close();
     }
-  } finally {
-    transport.close();
-  }
+    return out;
+  });
   return out;
 }
 
@@ -424,21 +541,26 @@ export async function ttPriceHistory(input: {
   if (!subSymbol) throw new TastytradeDataError("Tastytrade candle request failed");
   const now = Date.now();
   const fromTime = historyFromTime(input, now);
-  const session = await quoteSession(fetchImpl);
-  const rows = await streamCandles(session, subSymbol, fromTime, deps?.timeoutMs ?? 15_000, deps?.quietMs ?? 1200);
+  const rows = await withFreshDxlink(fetchImpl, (session) => streamCandles(
+    session,
+    subSymbol,
+    fromTime,
+    deps?.timeoutMs ?? 15_000,
+    deps?.quietMs ?? 1200,
+  ));
   const candles = toPriceCandles(rows.filter((r) => r.t >= fromTime - 864e5), input.endDate, input.frequencyType === "daily");
   if (candles.length === 0) throw new TastytradeDataError("Tastytrade returned no candles");
   return candles;
 }
 
 async function streamCandles(
-  session: { url: string; token: string },
+  session: QuoteSession,
   subSymbol: string,
   fromTime: number,
   timeoutMs: number,
   quietMs: number,
 ): Promise<RawEquityCandle[]> {
-  const transport = await connectNodeWebSocket(session.url);
+  const transport = await connector()(session.url);
   const rows: RawEquityCandle[] = [];
   let streaming = false;
   let lastDataAt = 0;
@@ -461,7 +583,7 @@ async function streamCandles(
       if (msg.type === "KEEPALIVE") {
         transport.send(JSON.stringify({ type: "KEEPALIVE", channel: 0 }));
       } else if (msg.type === "ERROR") {
-        throw new TastytradeDataError("DXLink error");
+        throw dxlinkFailure(msg, [session.token]);
       } else if (msg.type === "AUTH_STATE" && msg.state === "AUTHORIZED" && !streaming) {
         streaming = true;
         const feed = [
@@ -492,6 +614,7 @@ async function streamCandles(
         }
       }
     }
+    if (!streaming) throw new TastytradeDataError(DXLINK_AUTH_TIMEOUT);
   } finally {
     transport.close();
   }
@@ -504,6 +627,8 @@ export function resetTastytradeMarketForTests(options?: {
 }): void {
   cachedToken = null;
   globalLimiter = new Limiter(options?.maxConcurrent ?? TT_MAX_CONCURRENT);
+  dxlinkLimiter = new Limiter(DXLINK_MAX_SOCKETS);
+  dxlinkConnect = null;
   refreshing = null;
   sleepImpl = options?.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   resetTastytradeStoreForTests();
