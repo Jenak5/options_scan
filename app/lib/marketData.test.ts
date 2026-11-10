@@ -106,16 +106,25 @@ describe("market data router", () => {
     const read = await getQuoteEntries(["A", "B"]);
     expect(sw.quotes).not.toHaveBeenCalled();
     expect(read.entries.map((entry) => entry.symbol)).toEqual(["A"]);
-    expect(warn).toHaveBeenCalledWith("B skipped: tastytrade partial; Schwab backup not connected");
+    expect(warn).toHaveBeenCalledWith("B skipped: partial Tastytrade quote");
+    const partial = dataSourceStatus();
+    expect(partial.lastError).toBe("partial Tastytrade quote");
+    expect(partial.backupNote).toBe("Schwab backup not connected");
+    expect(partial.lastError).not.toContain("Schwab");
   });
 
   it("does not call Schwab when Tastytrade fails and the Schwab login is expired", async () => {
     sw.backup.mockResolvedValue(false);
     tt.chain.mockRejectedValueOnce(new Error("Tastytrade option chain failed (401)"));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    await expect(getOptionChain({ symbol: "XLF" })).rejects.toThrow("XLF skipped: tastytrade 401; Schwab backup not connected");
+    await expect(getOptionChain({ symbol: "XLF" })).rejects.toThrow("XLF skipped: Tastytrade option chain failed (401)");
     expect(sw.chain).not.toHaveBeenCalled();
-    expect(warn).toHaveBeenCalledWith("XLF skipped: tastytrade 401; Schwab backup not connected");
+    expect(warn).toHaveBeenCalledWith("XLF skipped: Tastytrade option chain failed (401)");
+    const missed = dataSourceStatus();
+    expect(missed.lastError).toBe("Tastytrade option chain failed (401)");
+    expect(missed.backupNote).toBe("Schwab backup not connected");
+    expect(missed.lastError).not.toContain("Schwab");
+    expect(warn.mock.calls.map((call) => String(call[0])).join(" ")).not.toContain("Schwab");
   });
 
   it("reports tastytradeEnabled only when the primary has credentials and has served data", () => {

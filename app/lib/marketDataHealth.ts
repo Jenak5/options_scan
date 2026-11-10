@@ -9,6 +9,9 @@ export type MarketDataKind = "chain" | "quotes" | "history" | "candles";
 export type DerivedMarketKind = "openInterest" | "volume" | "greeks";
 export type TradeSideAvailability = "yes" | "no";
 
+/** Recorded beside lastError when the Schwab backup is not called. */
+export const SCHWAB_BACKUP_NOT_CONNECTED = "Schwab backup not connected";
+
 export interface ServedRecord {
   source: DataSource;
   at: string;
@@ -32,8 +35,16 @@ export interface MarketDataHealth {
   fallbackCount: number;
   /** Same number as fallbackCount. Kept for readers of the older field. */
   fallbacks: number;
-  /** Most recent fallback or feed error. Secrets stripped. */
+  /**
+   * Most recent Tastytrade (or other primary) failure. Secrets stripped.
+   * This is the cause. A skipped Schwab backup is backupNote, not this field.
+   */
   lastError: string | null;
+  /**
+   * Set when Schwab was not called because it is not connected.
+   * Null when Schwab was not skipped. This is not the failure cause.
+   */
+  backupNote: string | null;
   lastTastytradeSuccessAt: string | null;
   /**
    * yes when the last DXLink session subscribed to TimeAndSale without the feed rejecting it.
@@ -66,6 +77,7 @@ export function emptyMarketDataHealth(): MarketDataHealth {
     fallbackCount: 0,
     fallbacks: 0,
     lastError: null,
+    backupNote: null,
     lastTastytradeSuccessAt: null,
     tradeSideDataAvailable: "no",
   };
@@ -165,6 +177,7 @@ export function parseStoredMarketDataHealth(value: unknown): MarketDataHealth | 
     fallbackCount: fallbacks,
     fallbacks,
     lastError: typeof row.lastError === "string" ? redactMarketText(row.lastError) : null,
+    backupNote: row.backupNote === SCHWAB_BACKUP_NOT_CONNECTED ? row.backupNote : null,
     lastTastytradeSuccessAt: success,
     tradeSideDataAvailable: row.tradeSideDataAvailable === "yes" ? "yes" : "no",
   };

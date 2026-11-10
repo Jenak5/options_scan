@@ -111,6 +111,7 @@ export async function authenticate(): Promise<string> {
       client_secret: clientSecret,
       refresh_token: refreshToken,
     }),
+    cache: "no-store",
   });
   if (!res.ok) {
     throw new Error(`Tastytrade OAuth failed (${res.status})`);
@@ -132,6 +133,7 @@ async function ttFetch(path: string) {
   const token = await authenticate();
   const res = await fetch(`${getBaseUrl()}${path}`, {
     headers: { ...HEADERS, Authorization: `Bearer ${token}` },
+    cache: "no-store",
   });
   if (!res.ok) {
     if (res.status === 401) {
@@ -141,6 +143,7 @@ async function ttFetch(path: string) {
       const retryToken = await authenticate();
       const retry = await fetch(`${getBaseUrl()}${path}`, {
         headers: { ...HEADERS, Authorization: `Bearer ${retryToken}` },
+        cache: "no-store",
       });
       if (!retry.ok) {
         const err = await retry.text();

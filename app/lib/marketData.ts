@@ -8,7 +8,9 @@ import {
   emptyMarketDataHealth,
   getTradeSideDataAvailable,
   mergeMarketDataHealth,
+  redactMarketText,
   redactReason,
+  SCHWAB_BACKUP_NOT_CONNECTED,
   type MarketDataHealth,
   type MarketDataKind,
   type ServedRecord,
@@ -33,10 +35,15 @@ export type DataKind = MarketDataKind;
 /** Tastytrade missed this item and Schwab could not fill it. Not fatal while Tastytrade is preferred. */
 export class BothSourcesFailedError extends Error {
   readonly label: string;
+  readonly primaryReason: string;
+  readonly backupNote: string | null;
   constructor(label: string, primaryReason: string, backupReason: string) {
-    super(`${label} skipped: ${primaryReason}; ${backupReason}`);
+    const disconnected = backupReason === SCHWAB_BACKUP_NOT_CONNECTED;
+    super(disconnected ? `${label} skipped: ${primaryReason}` : `${label} skipped: ${primaryReason}; ${backupReason}`);
     this.name = "BothSourcesFailedError";
     this.label = label;
+    this.primaryReason = primaryReason;
+    this.backupNote = disconnected ? SCHWAB_BACKUP_NOT_CONNECTED : null;
   }
 }
 
@@ -55,6 +62,7 @@ const active: MarketDataHealth["active"] = {
 const counts: Record<DataSource, number> = { tastytrade: 0, schwab: 0 };
 let fallbacks = 0;
 let lastError: string | null = null;
+let backupNote: string | null = null;
 let lastTastytradeSuccessAt: string | null = null;
 let persistTail: Promise<void> = Promise.resolve();
 
@@ -100,6 +108,7 @@ export function dataSourceStatus(env: Record<string, string | undefined> = proce
     fallbackCount: fallbacks,
     fallbacks,
     lastError,
+    backupNote,
     lastTastytradeSuccessAt,
     tradeSideDataAvailable: getTradeSideDataAvailable(),
   };
@@ -137,7 +146,8 @@ async function note(kind: DataKind, label: string, source: DataSource, reason: s
   counts[source] += 1;
   if (fallback) {
     fallbacks += 1;
-    lastError = reason;
+    // "partial" marks the served record. It must not replace the Tastytrade reason.
+    if (reason && reason !== "partial") lastError = redactMarketText(reason);
   }
   if (source === "tastytrade" && !fallback) lastTastytradeSuccessAt = at;
   const tail = fallback ? ` (fallback: ${reason})` : "";
@@ -181,15 +191,6 @@ export function isSchwabBackupMiss(err: unknown): boolean {
   return err instanceof Error && err.message.startsWith("Schwab token refresh failed");
 }
 
-function shortenPrimary(reason: string): string {
-  const status = /\((\d{3})\)/.exec(reason);
-  if (status && /tastytrade/i.test(reason)) return `tastytrade ${status[1]}`;
-  if (/timed out/i.test(reason)) return "tastytrade timeout";
-  if (reason === "empty Tastytrade answer") return "tastytrade empty";
-  if (reason === "partial Tastytrade quote") return "tastytrade partial";
-  return reason.replace(/\s+/g, " ").slice(0, 80);
-}
-
 function backupFailureReason(err: unknown): string {
   if (err instanceof schwab.SchwabNotConnectedError || err instanceof schwab.SchwabConfigError) {
     return "Schwab backup not connected";
@@ -203,15 +204,24 @@ function backupFailureReason(err: unknown): string {
 }
 
 async function failBoth(label: string, primaryReason: string, backupReason: string): Promise<BothSourcesFailedError> {
-  const primary = shortenPrimary(primaryReason);
+  const primary = redactMarketText(primaryReason);
+  const disconnected = backupReason === SCHWAB_BACKUP_NOT_CONNECTED;
   lastError = primary;
-  console.warn(`${label} skipped: ${primary}; ${backupReason}`);
+  if (disconnected) backupNote = SCHWAB_BACKUP_NOT_CONNECTED;
+  console.warn(disconnected ? `${label} skipped: ${primary}` : `${label} skipped: ${primary}; ${backupReason}`);
   await persistStatus();
   return new BothSourcesFailedError(label, primary, backupReason);
 }
 
 function logSkip(label: string, primaryReason: string, backupReason: string): void {
-  console.warn(`${label} skipped: ${shortenPrimary(primaryReason)}; ${backupReason}`);
+  const primary = redactMarketText(primaryReason);
+  lastError = primary;
+  if (backupReason === SCHWAB_BACKUP_NOT_CONNECTED) {
+    backupNote = SCHWAB_BACKUP_NOT_CONNECTED;
+    console.warn(`${label} skipped: ${primary}`);
+    return;
+  }
+  console.warn(`${label} skipped: ${primary}; ${backupReason}`);
 }
 
 export async function withFallback<T>(
@@ -240,7 +250,7 @@ export async function withFallback<T>(
     reason = safeReason(err);
   }
   if (!(await schwab.schwabBackupAvailable())) {
-    throw await failBoth(label, reason, "Schwab backup not connected");
+    throw await failBoth(label, reason, SCHWAB_BACKUP_NOT_CONNECTED);
   }
   try {
     const value = await backup();
@@ -368,7 +378,7 @@ export async function getQuoteEntries(symbols: string[], signal?: AbortSignal): 
       await note("quotes", `${wanted.length} symbols`, "tastytrade", "partial");
       return { entries: primaryEntries, problem: null };
     }
-    throw await failBoth(label, reason, "Schwab backup not connected");
+    throw await failBoth(label, reason, SCHWAB_BACKUP_NOT_CONNECTED);
   }
 
   try {
@@ -413,6 +423,7 @@ export function resetDataSourceStatsForTests(): void {
   counts.schwab = 0;
   fallbacks = 0;
   lastError = null;
+  backupNote = null;
   lastTastytradeSuccessAt = null;
   persistTail = Promise.resolve();
 }

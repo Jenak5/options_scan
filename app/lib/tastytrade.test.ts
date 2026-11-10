@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { probeTastytrade, tastytradeEnabled } from "@/app/lib/tastytrade";
+import { authenticate, getBalances, probeTastytrade, tastytradeEnabled } from "@/app/lib/tastytrade";
 
 const KEYS = [
   "TASTYTRADE_ENABLED",
@@ -27,6 +27,31 @@ describe("tastytrade flag", () => {
     process.env.TASTYTRADE_ENABLED = "true";
     process.env.TASTYTRADE_ACCOUNT_NUMBER = "  ";
     expect(tastytradeEnabled()).toBe(false);
+  });
+
+  it("sends cache no-store on the OAuth token and the account read", async () => {
+    process.env.TASTYTRADE_ENABLED = "true";
+    process.env.TASTYTRADE_CLIENT_SECRET = "secret";
+    process.env.TASTYTRADE_REFRESH_TOKEN = "refresh-token-value";
+    process.env.TASTYTRADE_ACCOUNT_NUMBER = "account";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      if (String(url).endsWith("/oauth/token")) {
+        return new Response(JSON.stringify({ access_token: "access-token" }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ data: {} }), { status: 200 });
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    await authenticate();
+    await getBalances();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const call of fetchMock.mock.calls) {
+      expect(call[1]).toMatchObject({ cache: "no-store" });
+    }
+    const logs = [...warn.mock.calls, ...info.mock.calls, ...error.mock.calls].map((call) => String(call[0])).join(" ");
+    expect(logs).not.toContain("refresh-token-value");
+    expect(logs).not.toContain("access-token");
   });
 
   it("does not call Tastytrade when the flag is off", async () => {

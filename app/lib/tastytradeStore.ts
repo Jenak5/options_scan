@@ -1,17 +1,18 @@
-import { del, get, put } from "@vercel/blob";
-import { decryptTokenPayload, encryptTokenPayload } from "@/app/lib/schwabStore";
+import { get, put } from "@vercel/blob";
 import {
   parseStoredMarketDataHealth,
   type MarketDataHealth,
 } from "@/app/lib/marketDataHealth";
 
 /**
- * Private Blob cache for the Tastytrade access token and the market-data
- * status record. Same store the scanner already uses for documents.
- * The access token is encrypted with SESSION_SECRET. The status record has
- * no secrets. Nothing here places an order.
+ * In-memory Tastytrade access token for this process, plus the Blob status
+ * record the scanner already uses for documents. The access token is not
+ * written to Blob and is not reused across invocations. The refresh token
+ * is never written. The status record has no secrets. Nothing here places
+ * an order.
  */
 
+/** Retired pathname. Access tokens are not stored here. */
 export const TASTYTRADE_ACCESS_BLOB = "tastytrade/access.json";
 export const MARKET_DATA_STATUS_BLOB = "tastytrade/market-data-status.json";
 
@@ -34,10 +35,6 @@ export function resetTastytradeStoreForTests(): void {
 function blobToken(): string | null {
   const token = process.env.BLOB_READ_WRITE_TOKEN?.trim() ?? "";
   return token.length > 0 ? token : null;
-}
-
-function persistEnabled(): boolean {
-  return process.env.VITEST !== "true" && blobToken() != null && (process.env.SESSION_SECRET?.trim() ?? "").length > 0;
 }
 
 function statusPersistEnabled(): boolean {
@@ -73,62 +70,30 @@ async function writePrivateText(pathname: string, body: string): Promise<void> {
   });
 }
 
-/** In-memory hit, then the encrypted blob. Null when missing or expired. */
+/** In-memory hit for this process. Never reads Blob. Null when missing or expired. */
 export async function readStoredTastytradeAccess(now = Date.now()): Promise<PersistedAccess | null> {
   if (usable(memoryAccess, now)) return memoryAccess;
-  if (!persistEnabled()) return null;
-  const text = await readPrivateText(TASTYTRADE_ACCESS_BLOB);
-  if (!text) return null;
-  try {
-    const parsed = JSON.parse(text) as { cipher?: unknown };
-    if (typeof parsed.cipher !== "string") return null;
-    const plain = JSON.parse(await decryptTokenPayload(parsed.cipher)) as Partial<PersistedAccess>;
-    const token: PersistedAccess = {
-      access: typeof plain.access === "string" ? plain.access : "",
-      mintedAt: typeof plain.mintedAt === "number" ? plain.mintedAt : 0,
-      expiresAt: typeof plain.expiresAt === "number" ? plain.expiresAt : 0,
-    };
-    if (!usable(token, now)) return null;
-    memoryAccess = token;
-    return token;
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 /**
- * Remember the access token for this instance and, when Blob and
- * SESSION_SECRET are set, encrypt it into the existing store.
- * The refresh token is not written. Failures are not logged with the token.
+ * Remember the access token for this process only.
+ * The refresh token is not part of this record and is never written.
  */
 export async function writeStoredTastytradeAccess(token: PersistedAccess): Promise<void> {
   if (!token.access) return;
   memoryAccess = { access: token.access, mintedAt: token.mintedAt, expiresAt: token.expiresAt };
-  if (!persistEnabled()) return;
-  try {
-    const cipher = await encryptTokenPayload(JSON.stringify(memoryAccess));
-    await writePrivateText(TASTYTRADE_ACCESS_BLOB, JSON.stringify({ cipher }));
-  } catch {
-    console.warn("Tastytrade access token cache was not written.");
-  }
 }
 
-/** Forget this instance's copy of `access` without touching the blob. */
+/** Forget this process's copy of `access`. */
 export function dropMemoryAccessIf(access: string): void {
   if (!memoryAccess || memoryAccess.access === access) memoryAccess = null;
 }
 
-/** Drop this access token from memory and from the blob, when it is still the cached one. */
+/** Drop this access token from memory when it is still the cached one. Blob is not touched. */
 export async function clearStoredTastytradeAccess(access: string): Promise<void> {
   if (memoryAccess && memoryAccess.access !== access) return;
   memoryAccess = null;
-  const token = blobToken();
-  if (!token || process.env.VITEST === "true") return;
-  try {
-    await del(TASTYTRADE_ACCESS_BLOB, { token });
-  } catch {
-    // A missing blob is fine. Do not log the client error; it can echo the store token.
-  }
 }
 
 export async function readStoredMarketDataHealth(): Promise<MarketDataHealth | null> {

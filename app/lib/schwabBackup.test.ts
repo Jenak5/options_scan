@@ -139,14 +139,15 @@ describe("Schwab backup while tastytrade is preferred", () => {
     const scan = await scanEstimatedFlow({ tickers: ["TLT", "GLD", "XLF"], now, bypassCache: true });
 
     expect(scan.errors.map((item) => item.ticker)).toEqual(["XLF"]);
-    expect(scan.errors[0].message).toBe("XLF skipped: tastytrade 401; Schwab backup not connected");
+    expect(scan.errors[0].message).toBe("XLF skipped: Tastytrade option chain failed (401)");
     expect(new Set(scan.rows.map((row) => row.ticker))).toEqual(new Set(["TLT", "GLD"]));
     const saved = await readFlowSnapshots();
     expect(Object.keys(saved).sort()).toEqual(["GLD", "TLT"]);
     expect(saved.XLF).toBeUndefined();
     expect(schwabChain).not.toHaveBeenCalled();
     expect(schwabHistory).not.toHaveBeenCalled();
-    expect(warn.mock.calls.map((call) => call[0])).toContain("XLF skipped: tastytrade 401; Schwab backup not connected");
+    expect(warn.mock.calls.map((call) => call[0])).toContain("XLF skipped: Tastytrade option chain failed (401)");
+    expect(warn.mock.calls.map((call) => String(call[0])).join(" ")).not.toContain("Schwab backup not connected");
     expect(warn.mock.calls.map((call) => String(call[0])).join(" ")).not.toMatch(/Scan skipped/);
 
     process.env.TELEGRAM_BOT_TOKEN = "fixture-bot";
