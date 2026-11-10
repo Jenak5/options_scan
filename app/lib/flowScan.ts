@@ -19,7 +19,7 @@ import type { OptionContract } from "@/app/lib/contract";
 import { earningsForTicker } from "@/app/lib/earnings";
 import { UNKNOWN_EARNINGS, type EarningsFact } from "@/app/lib/eventRisk";
 import type { KeyLevels } from "@/app/lib/levels";
-import { keyLevelsForTicker } from "@/app/lib/levelScan";
+import { keyLevelsForTicker, prefetchLevelHistory } from "@/app/lib/levelScan";
 import { annotateFlowRows, carryPriorSession } from "@/app/lib/marketContext";
 import { chainInterestFromContracts, type ChainInterest } from "@/app/lib/openingCheck";
 import { quotePointFromContract, type FlowQuotePoint } from "@/app/lib/prints";
@@ -90,6 +90,8 @@ export async function scanEstimatedFlow(options?: {
   reuseRecentChains?: boolean;
   /** Milliseconds between ticker groups. Defaults to TICKER_GROUP_PAUSE_MS. Zero skips the wait. */
   groupPauseMs?: number;
+  /** Epoch ms. Tickers not started by then are skipped with "time budget". */
+  budgetDeadline?: number | null;
 }): Promise<FlowScanResult> {
   const now = options?.now ?? Date.now();
   const tickers = (options?.tickers && options.tickers.length > 0
@@ -105,6 +107,13 @@ export async function scanEstimatedFlow(options?: {
   }
 
   await requireMarketData(now);
+  if (!budgetBlocks(now, options?.budgetDeadline)) {
+    try {
+      await prefetchLevelHistory(tickers, now);
+    } catch (err) {
+      rethrowIfSchwabOnly(err);
+    }
+  }
 
   const previous = await readFlowSnapshots();
   const errors: FlowScanError[] = [];
@@ -115,7 +124,15 @@ export async function scanEstimatedFlow(options?: {
   let networkFetches = 0;
 
   for (let i = 0; i < tickers.length; i += FLOW_BATCH_SIZE) {
+    if (budgetBlocks(Date.now(), options?.budgetDeadline)) {
+      for (let j = i; j < tickers.length; j++) errors.push({ ticker: tickers[j], message: "time budget" });
+      break;
+    }
     if (i > 0 && groupPauseMs > 0) await sleep(groupPauseMs);
+    if (budgetBlocks(Date.now(), options?.budgetDeadline)) {
+      for (let j = i; j < tickers.length; j++) errors.push({ ticker: tickers[j], message: "time budget" });
+      break;
+    }
     const batch = tickers.slice(i, i + FLOW_BATCH_SIZE);
     await Promise.all(batch.map(async (ticker) => {
       const recent = reuseRecent ? recentChain(ticker, now) : null;
@@ -159,6 +176,7 @@ export async function scanEstimatedFlow(options?: {
   const followStarted = Date.now();
   for (let round = 0; round < PRINT_RULES.followUpReads; round++) {
     if (follow.length === 0) break;
+    if (budgetBlocks(Date.now(), options?.budgetDeadline)) break;
     if (Date.now() - followStarted >= PRINT_RULES.followUpBudgetMs) break;
     await sleep(PRINT_RULES.followUpGapMs);
     if (Date.now() - followStarted >= PRINT_RULES.followUpBudgetMs) break;
@@ -376,6 +394,10 @@ function quotesForRows(
     if (merged.length > 0) quotes[key] = merged;
   }
   return quotes;
+}
+
+export function budgetBlocks(now: number, deadline: number | null | undefined): boolean {
+  return deadline != null && now >= deadline;
 }
 
 function safeScanMessage(err: unknown): string {

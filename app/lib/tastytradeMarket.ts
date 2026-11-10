@@ -81,10 +81,14 @@ export const TT_MAX_CONCURRENT = 2;
 /** Tastytrade requests in flight at once for one ticker's chain. */
 export const TT_MAX_PER_TICKER = 2;
 /**
- * DXLink sockets open at once in this process. One, so the next socket is
- * opened only after the previous one has closed.
+ * DXLink sockets open at once in this process. Two, so a candle batch and a
+ * quote batch can run together without a pile of sockets.
  */
-export const DXLINK_MAX_SOCKETS = 1;
+export const DXLINK_MAX_SOCKETS = 2;
+/** Candle symbols on one DXLink session. Further symbols use another session. */
+export const DXLINK_CANDLE_BATCH = 80;
+/** How long to wait for more quote requests before opening one shared feed. */
+const QUOTE_COALESCE_MS = 200;
 /** A quote token inside this window of expires-at is not used. */
 const QUOTE_EXPIRY_SKEW_MS = 5_000;
 
@@ -127,6 +131,9 @@ export class Limiter {
 let globalLimiter = new Limiter(TT_MAX_CONCURRENT);
 let dxlinkLimiter = new Limiter(DXLINK_MAX_SOCKETS);
 let dxlinkConnect: ((url: string) => Promise<CandleTransport>) | null = null;
+let sharedQuote: QuotePair | null = null;
+let quoting: Promise<QuotePair> | null = null;
+const historyCache = new Map<string, PriceCandle[]>();
 
 /** Run tasks with at most `limit` at once, keeping result order. */
 export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -274,21 +281,6 @@ function connector(): (url: string) => Promise<CandleTransport> {
   return dxlinkConnect ?? connectNodeWebSocket;
 }
 
-/**
- * A new OAuth access token for the quote-token call that follows immediately.
- * Does not reuse the in-memory REST token. One request, not a retry loop.
- */
-async function mintFreshAccess(fetchImpl: typeof fetch): Promise<CachedToken> {
-  const opened = await openCandleAccess({ fetchImpl });
-  if (!opened.access) throw new TastytradeDataError(opened.errorSample);
-  const now = Date.now();
-  const ttl = opened.access.expiresInMs ?? TOKEN_FALLBACK_TTL_MS;
-  const token: CachedToken = { access: opened.access.access, mintedAt: now, expiresAt: now + ttl };
-  cachedToken = token;
-  await writeStoredTastytradeAccess(token);
-  return token;
-}
-
 function quoteStillValid(session: QuoteSession, now: number): boolean {
   return session.expiresAt == null || session.expiresAt - now > QUOTE_EXPIRY_SKEW_MS;
 }
@@ -299,18 +291,33 @@ function isQuoteUnauthorized(err: unknown): boolean {
 }
 
 /**
- * Fresh access token, then one /api-quote-tokens call. A 401 or an already
- * expired quote token mints one replacement and holds it for the same grace
- * the REST client uses after a refresh. The quote token is not cached.
+ * One access token and one quote token for every DXLink socket in this run.
+ * A real auth failure or a quote token near expiry mints one replacement.
+ * There is no per-socket OAuth call and no per-socket grace wait.
  */
-async function mintQuotePair(fetchImpl: typeof fetch, hold: boolean): Promise<QuotePair> {
+async function quotePairForRun(fetchImpl: typeof fetch, force: boolean): Promise<QuotePair> {
+  if (!force && sharedQuote && quoteStillValid(sharedQuote.session, Date.now())) return sharedQuote;
+  if (!force && quoting) {
+    const pending = await quoting;
+    if (quoteStillValid(pending.session, Date.now())) return pending;
+  }
+  const run = openSharedQuote(fetchImpl, force);
+  if (!force) quoting = run;
+  try {
+    return await run;
+  } finally {
+    if (quoting === run) quoting = null;
+  }
+}
+
+async function openSharedQuote(fetchImpl: typeof fetch, force: boolean): Promise<QuotePair> {
+  if (force && sharedQuote) {
+    await invalidateToken(sharedQuote.access);
+    sharedQuote = null;
+  }
   let lastError: unknown = null;
   for (let attempt = 0; attempt < 2; attempt++) {
-    const token = await mintFreshAccess(fetchImpl);
-    if (hold || attempt > 0) {
-      const wait = token.mintedAt + FRESH_TOKEN_GRACE_MS - Date.now();
-      if (wait > 0) await sleepImpl(wait);
-    }
+    const token = await currentToken(fetchImpl);
     try {
       const session = await openQuoteSession(fetchImpl, token.access);
       if (!quoteStillValid(session, Date.now())) {
@@ -320,21 +327,20 @@ async function mintQuotePair(fetchImpl: typeof fetch, hold: boolean): Promise<Qu
           true,
         );
       }
-      return { access: token.access, session };
+      sharedQuote = { access: token.access, session };
+      return sharedQuote;
     } catch (err) {
       lastError = err;
       await invalidateToken(token.access);
-      if (attempt === 0 && isQuoteUnauthorized(err)) {
-        await sleepImpl(AUTH_RETRY_DELAY_MS);
-        continue;
-      }
+      sharedQuote = null;
+      if (attempt === 0 && isQuoteUnauthorized(err)) continue;
       throw err;
     }
   }
   throw lastError instanceof Error ? lastError : new TastytradeDataError("Tastytrade quote token failed (401)");
 }
 
-/** One socket at a time. An auth-related DXLink error refreshes the access and quote tokens once. */
+/** Shared quote token. An auth-related DXLink ERROR refreshes that pair once. */
 async function withFreshDxlink<T>(
   fetchImpl: typeof fetch,
   run: (session: QuoteSession) => Promise<T>,
@@ -342,15 +348,15 @@ async function withFreshDxlink<T>(
   return dxlinkLimiter.run(async () => {
     let retried = false;
     for (;;) {
-      const pair = await mintQuotePair(fetchImpl, retried);
+      const pair = await quotePairForRun(fetchImpl, retried);
       try {
         return await run(pair.session);
       } catch (err) {
         if (!retried && err instanceof TastytradeDxlinkError && err.authRelated) {
           retried = true;
+          sharedQuote = null;
           await invalidateToken(pair.access);
           console.warn(`[tastytrade-dxlink] auth error, refreshing once: ${err.message}`);
-          await sleepImpl(AUTH_RETRY_DELAY_MS);
           continue;
         }
         throw err;
@@ -423,14 +429,9 @@ async function dxlinkEnrichSafe(occSymbols: string[], fetchImpl: typeof fetch): 
       noteDxlinkTradeSide("no");
       return null;
     }
-    const snap = await withFreshDxlink(fetchImpl, async (session) => {
-      const transport = await connector()(session.url);
-      try {
-        return await collectDxlinkFeed(transport, session.token, streamers, windowMs);
-      } finally {
-        transport.close();
-      }
-    });
+    const snap = fetchImpl === fetch
+      ? await enqueueQuoteFeed(streamers, fetchImpl, windowMs)
+      : await runQuoteFeed(streamers, fetchImpl, windowMs);
     noteDxlinkTradeSide(snap.tradeSideDataAvailable);
     return snap;
   } catch (err) {
@@ -440,6 +441,70 @@ async function dxlinkEnrichSafe(occSymbols: string[], fetchImpl: typeof fetch): 
     console.warn(`[market-data] DXLink feed unavailable: ${safe}`);
     return null;
   }
+}
+
+interface QuoteWaiter {
+  symbols: string[];
+  fetchImpl: typeof fetch;
+  windowMs: number;
+  resolve: (snap: DxlinkSnapshot) => void;
+  reject: (err: unknown) => void;
+}
+
+const quoteQueue: QuoteWaiter[] = [];
+let quoteTimer: ReturnType<typeof setTimeout> | null = null;
+
+function enqueueQuoteFeed(symbols: string[], fetchImpl: typeof fetch, windowMs: number): Promise<DxlinkSnapshot> {
+  return new Promise((resolve, reject) => {
+    quoteQueue.push({ symbols, fetchImpl, windowMs, resolve, reject });
+    if (quoteTimer) clearTimeout(quoteTimer);
+    quoteTimer = setTimeout(() => {
+      quoteTimer = null;
+      const waiting = quoteQueue.splice(0, quoteQueue.length);
+      void flushQuoteFeed(waiting);
+    }, QUOTE_COALESCE_MS);
+  });
+}
+
+async function flushQuoteFeed(waiting: QuoteWaiter[]): Promise<void> {
+  if (waiting.length === 0) return;
+  const symbols: string[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < waiting.length; i++) {
+    const group = waiting[i].symbols;
+    for (let j = 0; j < group.length; j++) {
+      if (seen.has(group[j])) continue;
+      seen.add(group[j]);
+      symbols.push(group[j]);
+    }
+  }
+  try {
+    const snap = await runQuoteFeed(symbols, waiting[0].fetchImpl, waiting[0].windowMs);
+    for (let i = 0; i < waiting.length; i++) waiting[i].resolve(snap);
+  } catch (err) {
+    for (let i = 0; i < waiting.length; i++) waiting[i].reject(err);
+  }
+}
+
+/** One quote socket for many streamer symbols. Used by chain batches and tests. */
+export async function quoteFeedBatch(
+  streamers: readonly string[],
+  deps?: { fetchImpl?: typeof fetch; windowMs?: number },
+): Promise<DxlinkSnapshot | null> {
+  const unique = streamers.filter((symbol, index) => symbol.length > 0 && streamers.indexOf(symbol) === index);
+  if (unique.length === 0) return null;
+  return runQuoteFeed(unique, deps?.fetchImpl ?? fetch, deps?.windowMs ?? tradePrintWindowMs());
+}
+
+async function runQuoteFeed(streamers: string[], fetchImpl: typeof fetch, windowMs: number): Promise<DxlinkSnapshot> {
+  return withFreshDxlink(fetchImpl, async (session) => {
+    const transport = await connector()(session.url);
+    try {
+      return await collectDxlinkFeed(transport, session.token, streamers, windowMs);
+    } finally {
+      transport.close();
+    }
+  });
 }
 
 /**
@@ -525,8 +590,7 @@ export async function ttQuoteEntries(
   return { entries, problem: entries.length > 0 ? null : items.length === 0 ? QUOTE_EMPTY : QUOTE_REJECTED };
 }
 
-/** Same request shape as Schwab getPriceHistory, served from DXLink candles. */
-export async function ttPriceHistory(input: {
+export type EquityHistoryInput = {
   symbol: string;
   periodType: "day" | "month";
   period: number;
@@ -535,36 +599,92 @@ export async function ttPriceHistory(input: {
   needExtendedHoursData?: boolean;
   startDate?: number;
   endDate?: number;
-}, deps?: { fetchImpl?: typeof fetch; timeoutMs?: number; quietMs?: number }): Promise<PriceCandle[]> {
-  const fetchImpl = deps?.fetchImpl ?? fetch;
-  const subSymbol = historyCandleSymbol(input);
-  if (!subSymbol) throw new TastytradeDataError("Tastytrade candle request failed");
-  const now = Date.now();
-  const fromTime = historyFromTime(input, now);
-  const rows = await withFreshDxlink(fetchImpl, (session) => streamCandles(
-    session,
-    subSymbol,
-    fromTime,
-    deps?.timeoutMs ?? 15_000,
-    deps?.quietMs ?? 1200,
-  ));
-  const candles = toPriceCandles(rows.filter((r) => r.t >= fromTime - 864e5), input.endDate, input.frequencyType === "daily");
-  if (candles.length === 0) throw new TastytradeDataError("Tastytrade returned no candles");
-  return candles;
+};
+
+export function equityHistoryKey(input: EquityHistoryInput): string {
+  return [
+    input.symbol.trim().toUpperCase(),
+    input.periodType,
+    input.period,
+    input.frequencyType,
+    input.frequency,
+    input.needExtendedHoursData ? "ext" : "rth",
+    input.startDate ?? "",
+    input.endDate ?? "",
+  ].join("|");
 }
 
-async function streamCandles(
+/** Same request shape as Schwab getPriceHistory, served from DXLink candles. */
+export async function ttPriceHistory(input: EquityHistoryInput, deps?: { fetchImpl?: typeof fetch; timeoutMs?: number; quietMs?: number }): Promise<PriceCandle[]> {
+  const key = equityHistoryKey(input);
+  const cached = historyCache.get(key);
+  if (cached && !deps?.fetchImpl) return cached;
+  const fetched = await prefetchEquityHistory([input], deps);
+  const hit = fetched.get(key);
+  if (!hit || hit.length === 0) throw new TastytradeDataError("Tastytrade returned no candles");
+  if (!deps?.fetchImpl) historyCache.set(key, hit);
+  return hit;
+}
+
+/**
+ * One DXLink session for many equity candle symbols. Inputs stay in order,
+ * so core tickers subscribed first are the first names on the feed.
+ * Results are cached for the rest of this run when no test fetch is passed.
+ */
+export async function prefetchEquityHistory(
+  inputs: readonly EquityHistoryInput[],
+  deps?: { fetchImpl?: typeof fetch; timeoutMs?: number; quietMs?: number },
+): Promise<Map<string, PriceCandle[]>> {
+  const out = new Map<string, PriceCandle[]>();
+  const fetchImpl = deps?.fetchImpl ?? fetch;
+  const pending: Array<{ key: string; input: EquityHistoryInput; subSymbol: string; fromTime: number }> = [];
+  const now = Date.now();
+  for (let i = 0; i < inputs.length; i++) {
+    const input = inputs[i];
+    const key = equityHistoryKey(input);
+    const cached = !deps?.fetchImpl ? historyCache.get(key) : undefined;
+    if (cached) {
+      out.set(key, cached);
+      continue;
+    }
+    const subSymbol = historyCandleSymbol(input);
+    if (!subSymbol) continue;
+    pending.push({ key, input, subSymbol, fromTime: historyFromTime(input, now) });
+  }
+  for (let i = 0; i < pending.length; i += DXLINK_CANDLE_BATCH) {
+    const chunk = pending.slice(i, i + DXLINK_CANDLE_BATCH);
+    const rows = await withFreshDxlink(fetchImpl, (session) => streamCandleBatch(
+      session,
+      chunk.map((item) => ({ subSymbol: item.subSymbol, fromTime: item.fromTime })),
+      deps?.timeoutMs ?? 15_000,
+      deps?.quietMs ?? 1200,
+    ));
+    for (let j = 0; j < chunk.length; j++) {
+      const item = chunk[j];
+      const raw = rows.get(item.subSymbol) ?? [];
+      const candles = toPriceCandles(
+        raw.filter((row) => row.t >= item.fromTime - 864e5),
+        item.input.endDate,
+        item.input.frequencyType === "daily",
+      );
+      out.set(item.key, candles);
+      if (!deps?.fetchImpl && candles.length > 0) historyCache.set(item.key, candles);
+    }
+  }
+  return out;
+}
+
+async function streamCandleBatch(
   session: QuoteSession,
-  subSymbol: string,
-  fromTime: number,
+  subs: readonly { subSymbol: string; fromTime: number }[],
   timeoutMs: number,
   quietMs: number,
-): Promise<RawEquityCandle[]> {
+): Promise<Map<string, RawEquityCandle[]>> {
   const transport = await connector()(session.url);
-  const rows: RawEquityCandle[] = [];
+  const grouped = new Map<string, RawEquityCandle[]>();
   let streaming = false;
   let lastDataAt = 0;
-  const seen = new Set<number>();
+  const seen = new Set<string>();
   const deadline = Date.now() + timeoutMs;
   try {
     const opening = dxlinkOpening(session.token);
@@ -595,18 +715,27 @@ async function streamCandles(
             acceptDataFormat: "COMPACT",
             acceptEventFields: { Candle: ["eventSymbol", "time", "open", "high", "low", "close", "volume"] },
           },
-          { type: "FEED_SUBSCRIPTION", channel: 1, add: [{ type: "Candle", symbol: subSymbol, fromTime: Math.floor(fromTime) }] },
+          {
+            type: "FEED_SUBSCRIPTION",
+            channel: 1,
+            add: subs.map((sub) => ({ type: "Candle", symbol: sub.subSymbol, fromTime: Math.floor(sub.fromTime) })),
+          },
         ];
         for (let i = 0; i < feed.length; i++) transport.send(JSON.stringify(feed[i]));
       } else if (msg.type === "FEED_DATA") {
         const parsed = parseEquityCandles(msg.data);
         if (parsed.length > 0) {
-          rows.push(...parsed);
-          // The live bar keeps updating. Only a new bar time counts as more history.
           let fresh = false;
           for (let i = 0; i < parsed.length; i++) {
-            if (!seen.has(parsed[i].t)) {
-              seen.add(parsed[i].t);
+            const row = parsed[i];
+            const bucket = candleBucket(subs, row.symbol);
+            if (!bucket) continue;
+            const list = grouped.get(bucket) ?? [];
+            list.push(row);
+            grouped.set(bucket, list);
+            const stamp = `${bucket}|${row.t}`;
+            if (!seen.has(stamp)) {
+              seen.add(stamp);
               fresh = true;
             }
           }
@@ -618,7 +747,20 @@ async function streamCandles(
   } finally {
     transport.close();
   }
-  return rows;
+  return grouped;
+}
+
+function candleBucket(subs: readonly { subSymbol: string }[], eventSymbol: string): string | null {
+  const raw = eventSymbol.trim();
+  for (let i = 0; i < subs.length; i++) {
+    if (subs[i].subSymbol === raw) return subs[i].subSymbol;
+  }
+  const base = raw.split("{")[0];
+  for (let i = 0; i < subs.length; i++) {
+    if (subs[i].subSymbol.split("{")[0] === base) return subs[i].subSymbol;
+  }
+  if (subs.length === 1) return subs[0].subSymbol;
+  return null;
 }
 
 export function resetTastytradeMarketForTests(options?: {
@@ -629,6 +771,12 @@ export function resetTastytradeMarketForTests(options?: {
   globalLimiter = new Limiter(options?.maxConcurrent ?? TT_MAX_CONCURRENT);
   dxlinkLimiter = new Limiter(DXLINK_MAX_SOCKETS);
   dxlinkConnect = null;
+  sharedQuote = null;
+  quoting = null;
+  historyCache.clear();
+  quoteQueue.length = 0;
+  if (quoteTimer) clearTimeout(quoteTimer);
+  quoteTimer = null;
   refreshing = null;
   sleepImpl = options?.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   resetTastytradeStoreForTests();

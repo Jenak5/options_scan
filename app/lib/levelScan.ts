@@ -7,6 +7,7 @@ import {
   type WallContract,
 } from "@/app/lib/levels";
 import { getPriceHistory, rethrowIfSchwabOnly } from "@/app/lib/marketData";
+import { prefetchEquityHistory, type EquityHistoryInput } from "@/app/lib/tastytradeMarket";
 import type { PriceCandle } from "@/app/lib/schwabParse";
 
 /**
@@ -56,6 +57,43 @@ export function setPriceHistoryFetcherForTests(next: HistoryFetcher | null): voi
   clearLevelCacheForTests();
 }
 
+export function levelHistoryRequests(ticker: string, now: number): PriceHistoryRequest[] {
+  return [
+    {
+      symbol: ticker,
+      periodType: "month",
+      period: 1,
+      frequencyType: "daily",
+      frequency: 1,
+      needExtendedHoursData: false,
+    },
+    {
+      symbol: ticker,
+      periodType: "day",
+      period: 1,
+      frequencyType: "minute",
+      frequency: 5,
+      needExtendedHoursData: true,
+      startDate: now - INTRADAY_LOOKBACK_MS,
+      endDate: now,
+    },
+  ];
+}
+
+/** One candle session for the scan list. Core names are first when the caller orders them that way. */
+export async function prefetchLevelHistory(tickers: readonly string[], now: number): Promise<void> {
+  const inputs: EquityHistoryInput[] = [];
+  for (let i = 0; i < tickers.length; i++) {
+    const ticker = tickers[i].trim().toUpperCase();
+    if (!isFlowTicker(ticker)) continue;
+    const hit = cache.get(ticker);
+    if (hit && now - hit.at < LEVEL_RULES.cacheMs && now >= hit.at) continue;
+    inputs.push(...levelHistoryRequests(ticker, now));
+  }
+  if (inputs.length === 0) return;
+  await prefetchEquityHistory(inputs);
+}
+
 export async function keyLevelsForTicker(input: {
   ticker: string;
   spot: number | null;
@@ -79,26 +117,7 @@ export async function keyLevelsForTicker(input: {
   }
 
   try {
-    const dailyReq: PriceHistoryRequest = {
-      symbol: ticker,
-      periodType: "month",
-      period: 1,
-      frequencyType: "daily",
-      frequency: 1,
-      needExtendedHoursData: false,
-    };
-    const intraReq: PriceHistoryRequest = {
-      symbol: ticker,
-      periodType: "day",
-      period: 1,
-      frequencyType: "minute",
-      frequency: 5,
-      needExtendedHoursData: true,
-      // Without an endDate Schwab stops at the prior business day's close,
-      // so today's bars were missing and VWAP stayed empty.
-      startDate: now - INTRADAY_LOOKBACK_MS,
-      endDate: now,
-    };
+    const [dailyReq, intraReq] = levelHistoryRequests(ticker, now);
     await paceHistory(Date.now());
     const daily = await fetcher(dailyReq);
     await paceHistory(Date.now());

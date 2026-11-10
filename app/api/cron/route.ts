@@ -23,7 +23,7 @@ import { openMissingShadows, openScanTickers, recordEarningsWindowShadows, recor
 import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow, isMarketDay } from "@/app/lib/marketHours";
 import { preferredDataSource } from "@/app/lib/dataSourcePref";
 import { BothSourcesFailedError, isFatalSchwabError, isSchwabBackupMiss, rethrowIfSchwabOnly } from "@/app/lib/marketData";
-import { emptyScanHealth, formatScanRunLine, normalizeSkippedTickers, scanSlotDecision, skipNotifyDue, skipTelegramText, skipWarning, type ScanHealth, type ScanRunSummary } from "@/app/lib/scanHealth";
+import { emptyScanHealth, formatScanRunLine, normalizeSkippedTickers, SCAN_TIME_BUDGET_MS, scanLockIsStale, scanSlotDecision, skipNotifyDue, skipTelegramText, skipWarning, type ScanHealth, type ScanRunSummary } from "@/app/lib/scanHealth";
 import { probeTastytrade, tastytradeEnabled } from "@/app/lib/tastytrade";
 import { planExitsForAsk } from "@/app/lib/exits";
 import { formatRealertHtml, formatVerdictHtml, paperTradeLinkHtml, sendTelegramAlert } from "@/app/lib/telegram";
@@ -294,11 +294,14 @@ async function handleCron(request: NextRequest) {
     const plan = planCronScan(watchlist, now, await openScanTickers());
     summary.tickers = plan.tickers.length;
     log.push(flowCronSliceNote(plan, watchlist.length, process.env.FLOW_WATCHLIST));
+    const budgetDeadline = now.getTime() + SCAN_TIME_BUDGET_MS;
     const scan = await scanEstimatedFlow({
       tickers: plan.tickers,
       groupPauseMs: TICKER_GROUP_PAUSE_MS,
+      budgetDeadline,
     });
     const skippedNames = normalizeSkippedTickers(scan.errors.map((item) => item.ticker));
+    const timeBudget = Date.now() >= budgetDeadline || scan.errors.some((item) => item.message === "time budget");
     if (skippedNames.length > 0) {
       log.push(`Chain errors: ${skippedNames.join(", ")}`);
     }
@@ -449,6 +452,9 @@ async function handleCron(request: NextRequest) {
         log.push(`${row.ticker}: saved in the alert book, but Telegram send failed — check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID`);
       }
     }
+    if (Date.now() >= budgetDeadline) {
+      log.push("Stopped before paper checks: time budget");
+    } else {
     try {
       const calls = await runCallsPaper(now);
       const callNoun = calls.opened === 1 ? "entry" : "entries";
@@ -500,9 +506,11 @@ async function handleCron(request: NextRequest) {
       rethrowIfSchwabOnly(err);
       log.push("Unusual flow update failed");
     }
-    const outcome = skippedNames.length > 0 ? "partial" : "success";
+    }
+    const outcome = timeBudget || skippedNames.length > 0 ? "partial" : "success";
     summary.outcome = outcome;
-    await rememberScan(outcome, now, null, shadowAt, skippedNames);
+    summary.reason = timeBudget ? "time budget" : null;
+    await rememberScan(outcome, now, timeBudget ? "time budget" : null, shadowAt, skippedNames);
   } catch (err) {
     if (isFatalSchwabError(err) && err instanceof Error) {
       console.warn(skipWarning(err.message));
@@ -596,7 +604,21 @@ async function markShadows(
  * A manual run still waits if another pass is in progress, and it does not wait on a recent success.
  */
 async function claimScanSlot(now: number, manual: boolean): Promise<"ok" | "busy" | "recent"> {
-  const current = await readScanHealth().catch(() => emptyScanHealth());
+  let current = await readScanHealth().catch(() => emptyScanHealth());
+  if (scanLockIsStale(current, now)) {
+    try {
+      await writeScanHealth({
+        ...current,
+        lastRunAt: now,
+        lastOutcome: "partial",
+        lastReason: "time budget",
+        lastSkippedTickers: normalizeSkippedTickers(current.lastSkippedTickers),
+      });
+      current = await readScanHealth().catch(() => current);
+    } catch {
+      // The new run still claims the slot below.
+    }
+  }
   const decision = scanSlotDecision(current, now);
   if (decision === "busy") return "busy";
   if (decision === "recent" && !manual) return "recent";
@@ -629,7 +651,8 @@ async function rememberScan(
       }
     }
     const named = normalizeSkippedTickers(skippedTickers);
-    const storedOutcome = outcome === "partial" && named.length === 0 ? "success" : outcome;
+    const timeBudget = reason === "time budget";
+    const storedOutcome = outcome === "partial" && named.length === 0 && !timeBudget ? "success" : outcome;
     const next: ScanHealth = {
       ...current,
       lastRunAt: now.getTime(),

@@ -8,7 +8,8 @@
     "start": "next start",
     "test": "vitest run",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json --noEmit",
-    "replay:core-history": "vite-node --config scripts/replay.vite.config.mjs scripts/replay-core-history.ts"
+    "replay:core-history": "vite-node --config scripts/replay.vite.config.mjs scripts/replay-core-history.ts",
+    "replay:scan-timing": "vite-node --config scripts/replay.vite.config.mjs scripts/replay-scan-timing.ts"
   },
   "dependencies": {
     "@vercel/blob": "^2.8.0",

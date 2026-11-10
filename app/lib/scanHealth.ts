@@ -12,6 +12,13 @@ export const SCAN_STALE_MS = SCAN_STALE_AFTER_MS;
 export const SKIP_NOTIFY_COOLDOWN_MS = 30 * 60 * 1000;
 /** A second caller waits this long before treating a started run as abandoned. Longer than one 5-minute slot. */
 export const SCAN_IN_PROGRESS_MS = 6 * 60 * 1000;
+/** Stop starting new scan work here, then write the outcome before the 300s platform kill. */
+export const SCAN_TIME_BUDGET_MS = 240_000;
+/**
+ * An unfinished run older than the platform limit cannot still be executing.
+ * The next cron may take the slot instead of waiting out the longer in-progress window.
+ */
+export const SCAN_LOCK_STALE_MS = 300_000;
 /**
  * A finished success blocks another Schwab pass inside this window,
  * and also for the rest of the same 5-minute UTC slot.
@@ -132,9 +139,16 @@ export function parseScanHealth(value: unknown): ScanHealth {
  * SCAN_RECENT_SUCCESS_MS, so a retry cannot double-read the chains.
  * The next scheduled slot is a different key and is outside that window, so it runs.
  */
+export function scanLockIsStale(health: ScanHealth, now: number): boolean {
+  const started = health.runStartedAt;
+  if (started == null || now < started) return false;
+  if (health.lastRunAt != null && health.lastRunAt >= started) return false;
+  return now - started >= SCAN_LOCK_STALE_MS;
+}
+
 export function scanSlotDecision(health: ScanHealth, now: number): ScanSlot {
   const started = health.runStartedAt;
-  if (started != null && now >= started && now - started < SCAN_IN_PROGRESS_MS) {
+  if (started != null && now >= started && now - started < SCAN_LOCK_STALE_MS) {
     if (health.lastRunAt == null || health.lastRunAt < started) return "busy";
   }
   const success = health.lastSuccessAt;
