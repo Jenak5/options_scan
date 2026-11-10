@@ -10,6 +10,8 @@ import type { CandleTransport } from "@/app/lib/tastytradeCandles";
 import {
   DXLINK_MAX_SOCKETS,
   dxlinkPeakSockets,
+  prefetchEquityHistory,
+  quoteFeedBatch,
   resetTastytradeMarketForTests,
   setDxlinkConnectForTests,
   ttLastTrades,
@@ -222,7 +224,7 @@ describe("DXLink quote sessions", () => {
     expect(warns).not.toContain("refreshing once");
   });
 
-  it("mints a fresh access token immediately before each quote token and does not reuse the quote token", async () => {
+  it("reuses one access token and one quote token for every DXLink socket in the run", async () => {
     const urls: string[] = [];
     const quoteAuth: string[] = [];
     const socketTokens: string[] = [];
@@ -251,10 +253,11 @@ describe("DXLink quote sessions", () => {
     ));
     await ttPriceHistory(historyInput("SPY"), { fetchImpl: fetchImpl as unknown as typeof fetch, timeoutMs: 1000, quietMs: 0 });
     await ttPriceHistory(historyInput("QQQ"), { fetchImpl: fetchImpl as unknown as typeof fetch, timeoutMs: 1000, quietMs: 0 });
-    expect(urls.map((u) => (u.endsWith("/oauth/token") ? "oauth" : "quote"))).toEqual(["oauth", "quote", "oauth", "quote"]);
-    expect(quoteAuth).toEqual(["Bearer access-1", "Bearer access-2"]);
-    expect(socketTokens).toEqual([QUOTE_A, QUOTE_B]);
-    expect(new Set(socketTokens).size).toBe(2);
+    expect(urls.map((u) => (u.endsWith("/oauth/token") ? "oauth" : "quote"))).toEqual(["oauth", "quote"]);
+    expect(quoteAuth).toEqual(["Bearer access-1"]);
+    expect(socketTokens).toEqual([QUOTE_A, QUOTE_A]);
+    expect(oauth).toBe(1);
+    expect(quotes).toBe(1);
     const logs = vi.mocked(console.info).mock.calls.map((call) => String(call[0])).join("\n");
     expect(logs).toMatch(/quote token expires at \d{4}-\d{2}-\d{2}T/);
     expect(logs).not.toContain(QUOTE_A);
@@ -422,10 +425,9 @@ describe("DXLink quote sessions", () => {
     expect(vi.mocked(put).mock.calls.map((call) => call[0])).not.toContain(TASTYTRADE_ACCESS_BLOB);
   });
 
-  it("caps DXLink sockets and closes one before opening the next", async () => {
+  it("caps DXLink sockets at a small concurrency", async () => {
     let active = 0;
     let peak = 0;
-    let overlapped = false;
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       const u = String(url);
       if (u.endsWith("/oauth/token")) {
@@ -441,7 +443,6 @@ describe("DXLink quote sessions", () => {
     });
     setDxlinkConnectForTests(async () => {
       active += 1;
-      if (active > 1) overlapped = true;
       peak = Math.max(peak, active);
       let closed = false;
       const queue = [{ type: "AUTH_STATE", state: "AUTHORIZED" }, candleMessage()];
@@ -464,11 +465,10 @@ describe("DXLink quote sessions", () => {
       ttPriceHistory(historyInput("SPY"), { fetchImpl: fetchImpl as unknown as typeof fetch, timeoutMs: 1000, quietMs: 0 }),
       ttPriceHistory(historyInput("QQQ"), { fetchImpl: fetchImpl as unknown as typeof fetch, timeoutMs: 1000, quietMs: 0 }),
     ]);
-    expect(DXLINK_MAX_SOCKETS).toBeGreaterThanOrEqual(1);
-    expect(DXLINK_MAX_SOCKETS).toBeLessThanOrEqual(2);
+    expect(DXLINK_MAX_SOCKETS).toBeGreaterThanOrEqual(2);
+    expect(DXLINK_MAX_SOCKETS).toBeLessThanOrEqual(3);
     expect(peak).toBeLessThanOrEqual(DXLINK_MAX_SOCKETS);
     expect(dxlinkPeakSockets()).toBeLessThanOrEqual(DXLINK_MAX_SOCKETS);
-    expect(overlapped).toBe(false);
     expect(active).toBe(0);
   });
 
@@ -497,8 +497,8 @@ describe("DXLink quote sessions", () => {
     ]));
     await ttLastTrades(["SPY   261030C00670000"], { fetchImpl: fetchImpl as unknown as typeof fetch, timeoutMs: 1000, quietMs: 0 });
     await ttLastTrades(["QQQ   261030C00450000"], { fetchImpl: fetchImpl as unknown as typeof fetch, timeoutMs: 1000, quietMs: 0 });
-    expect(seen).toEqual(["access-1", "access-2"]);
-    expect(oauth).toBe(2);
+    expect(seen).toEqual(["access-1"]);
+    expect(oauth).toBe(1);
     await ttQuotes({ equity: ["SPY"] }, fetchImpl as unknown as typeof fetch);
     const restCalls = fetchImpl.mock.calls.filter((call) => String(call[0]).includes("/market-data/"));
     expect(restCalls.length).toBeGreaterThan(0);
@@ -509,5 +509,115 @@ describe("DXLink quote sessions", () => {
     expect(bodies.join(" ")).not.toContain("refresh-token-value");
     await writeStoredTastytradeAccess({ access: "memory-only", mintedAt: Date.now(), expiresAt: Date.now() + 60_000 });
     expect(vi.mocked(put).mock.calls.map((call) => call[0])).not.toContain(TASTYTRADE_ACCESS_BLOB);
+  });
+
+  it("subscribes many candle symbols on one DXLink session, core name first", async () => {
+    let connects = 0;
+    let oauth = 0;
+    const sent: Array<Record<string, unknown>> = [];
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.endsWith("/oauth/token")) {
+        oauth += 1;
+        return new Response(JSON.stringify({ access_token: "access-1", expires_in: 900 }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        data: {
+          "dxlink-url": "wss://dxlink.example/ws",
+          token: QUOTE_A,
+          "expires-at": new Date(Date.now() + 10 * 60_000).toISOString(),
+        },
+      }), { status: 200 });
+    });
+    const at = Date.now();
+    setDxlinkConnectForTests(async () => {
+      connects += 1;
+      const queue = [
+        { type: "AUTH_STATE", channel: 0, state: "UNAUTHORIZED" },
+        { type: "AUTH_STATE", channel: 0, state: "AUTHORIZED" },
+        {
+          type: "FEED_DATA",
+          data: ["Candle", [
+            "SPY{=1d}", at, 10, 11, 9, 10.5, 100,
+            "QQQ{=1d}", at, 20, 21, 19, 20.5, 80,
+          ]],
+        },
+      ];
+      return {
+        send(data: string) {
+          sent.push(JSON.parse(data) as Record<string, unknown>);
+        },
+        close() {},
+        next() {
+          const next = queue.shift();
+          if (!next) return Promise.resolve("timeout");
+          return Promise.resolve(JSON.stringify(next));
+        },
+      };
+    });
+    const daily = {
+      periodType: "month" as const,
+      period: 1,
+      frequencyType: "daily" as const,
+      frequency: 1,
+    };
+    const fetched = await prefetchEquityHistory(
+      [{ symbol: "SPY", ...daily }, { symbol: "QQQ", ...daily }],
+      { fetchImpl: fetchImpl as unknown as typeof fetch, timeoutMs: 1000, quietMs: 0 },
+    );
+    expect(connects).toBe(1);
+    expect(oauth).toBe(1);
+    expect(fetched.get("SPY|month|1|daily|1|rth||")?.length).toBeGreaterThan(0);
+    expect(fetched.get("QQQ|month|1|daily|1|rth||")?.length).toBeGreaterThan(0);
+    const sub = sent.find((row) => row.type === "FEED_SUBSCRIPTION") as { add?: Array<{ symbol?: string }> };
+    expect(sub.add?.map((item) => item.symbol)).toEqual(["SPY{=1d}", "QQQ{=1d}"]);
+    const types = sent.map((row) => row.type);
+    expect(types.indexOf("CHANNEL_REQUEST")).toBeGreaterThan(types.indexOf("AUTH"));
+  });
+
+  it("puts many quote symbols on one feed", async () => {
+    let connects = 0;
+    const sent: Array<Record<string, unknown>> = [];
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.endsWith("/oauth/token")) {
+        return new Response(JSON.stringify({ access_token: "access-1", expires_in: 900 }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        data: {
+          "dxlink-url": "wss://dxlink.example/ws",
+          token: QUOTE_A,
+          "expires-at": new Date(Date.now() + 10 * 60_000).toISOString(),
+        },
+      }), { status: 200 });
+    });
+    setDxlinkConnectForTests(async () => {
+      connects += 1;
+      const queue = [
+        { type: "AUTH_STATE", channel: 0, state: "UNAUTHORIZED" },
+        { type: "AUTH_STATE", channel: 0, state: "AUTHORIZED" },
+      ];
+      return {
+        send(data: string) {
+          sent.push(JSON.parse(data) as Record<string, unknown>);
+        },
+        close() {},
+        next() {
+          const next = queue.shift();
+          if (!next) return Promise.resolve("timeout");
+          return Promise.resolve(JSON.stringify(next));
+        },
+      };
+    });
+    const snap = await quoteFeedBatch([".SPY261030C670", ".QQQ261030C450"], {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      windowMs: 0,
+    });
+    expect(snap).not.toBeNull();
+    expect(connects).toBe(1);
+    const sub = sent.find((row) => row.type === "FEED_SUBSCRIPTION") as { add?: Array<{ symbol?: string }> };
+    const symbols = (sub.add ?? []).map((item) => item.symbol);
+    expect(symbols).toContain(".SPY261030C670");
+    expect(symbols).toContain(".QQQ261030C450");
   });
 });

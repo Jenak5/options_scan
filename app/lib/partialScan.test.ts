@@ -6,7 +6,8 @@ import { GET as healthGet } from "@/app/api/health/route";
 import * as flowLib from "@/app/lib/flow";
 import { TICKER_GROUP_PAUSE_MS } from "@/app/lib/flow";
 import * as flowScan from "@/app/lib/flowScan";
-import { clearMemoryStoreForTests, readScanHealth } from "@/app/lib/schwabStore";
+import { emptyScanHealth } from "@/app/lib/scanHealth";
+import { clearMemoryStoreForTests, readScanHealth, writeScanHealth } from "@/app/lib/schwabStore";
 
 const ENV_KEYS = ["CRON_SECRET", "HEALTH_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "XAI_API_KEY", "FLOW_WATCHLIST"] as const;
 const saved: Record<string, string | undefined> = {};
@@ -84,6 +85,28 @@ describe("partial scan health", () => {
     const cleared = await readScanHealth();
     expect(cleared.lastOutcome).toBe("success");
     expect(cleared.lastSkippedTickers).toEqual([]);
+  });
+
+  it("records a time-budget partial and releases a stale running lock", async () => {
+    const now = Date.parse("2026-10-06T15:00:00Z");
+    await writeScanHealth({
+      ...emptyScanHealth(),
+      runStartedAt: now - 301_000,
+    });
+    vi.mocked(flowScan.scanEstimatedFlow).mockResolvedValue(emptyScan([
+      { ticker: "TLT", message: "time budget" },
+      { ticker: "XLF", message: "time budget" },
+    ]));
+    const cron = await cronGet(authed("/api/cron?manual=true"));
+    expect(cron.status).toBe(200);
+    const body = await cron.json();
+    expect(body.reason).not.toBe("Another scan is already running.");
+    const health = await readScanHealth();
+    expect(health.lastOutcome).toBe("partial");
+    expect(health.lastReason).toBe("time budget");
+    expect(health.lastSkippedTickers).toEqual(["TLT", "XLF"]);
+    expect(health.lastRunAt).toBe(now);
+    expect(health.runStartedAt).toBe(now);
   });
 
   it("asks the flow scan to reuse recent chains even on a fresh pull, and pauses before the next group", async () => {

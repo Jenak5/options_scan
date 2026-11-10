@@ -11,6 +11,7 @@ import {
   refreshCountdown,
   scanFreshness,
   scanIsStale,
+  scanLockIsStale,
   scanSlotDecision,
   scanSlotKey,
   skipNotifyDue,
@@ -204,6 +205,9 @@ describe("scan slot", () => {
     expect(scanSlotDecision(health({ lastSuccessAt: now - SCAN_RECENT_SUCCESS_MS }), now)).toBe("ok");
     expect(scanSlotDecision(health({ lastSuccessAt: now - 4 * 60_000 }), now)).toBe("ok");
     expect(scanSlotDecision(health({ runStartedAt: now - 4 * 60_000 }), now)).toBe("busy");
+    expect(scanSlotDecision(health({ runStartedAt: now - 301_000 }), now)).toBe("ok");
+    expect(scanLockIsStale(health({ runStartedAt: now - 301_000 }), now)).toBe(true);
+    expect(scanLockIsStale(health({ runStartedAt: now - 4 * 60_000 }), now)).toBe(false);
     const sameSlot = Date.parse("2026-10-06T15:00:00Z");
     expect(scanSlotKey(sameSlot)).toBe(scanSlotKey(sameSlot + 3 * 60_000));
     expect(scanSlotDecision(health({ lastSuccessAt: sameSlot }), sameSlot + 3 * 60_000)).toBe("recent");
