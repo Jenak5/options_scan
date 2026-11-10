@@ -96,6 +96,29 @@ describe("DXLink chain feed", () => {
     warn.mockRestore();
   });
 
+  it("ignores the opening UNAUTHORIZED state and subscribes after AUTHORIZED", async () => {
+    const { transport, sent } = scripted([
+      JSON.stringify({ type: "AUTH_STATE", channel: 0, state: "UNAUTHORIZED" }),
+      JSON.stringify({ type: "KEEPALIVE", channel: 0 }),
+      JSON.stringify({ type: "AUTH_STATE", channel: 0, state: "AUTHORIZED" }),
+    ]);
+    const snap = await collectDxlinkFeed(transport, "dxlink-quote-token", [".SPY261030C670"], 3_000);
+    const types = sent.map((row) => (JSON.parse(row) as { type: string }).type);
+    expect(types.slice(0, 2)).toEqual(["SETUP", "AUTH"]);
+    expect(types).toEqual([
+      "SETUP",
+      "AUTH",
+      "KEEPALIVE",
+      "CHANNEL_REQUEST",
+      "FEED_SETUP",
+      "FEED_SUBSCRIPTION",
+    ]);
+    expect(types.indexOf("CHANNEL_REQUEST")).toBeGreaterThan(types.indexOf("AUTH"));
+    expect(snap.tradeSideDataAvailable).toBe("yes");
+    const auth = JSON.parse(sent[1]) as { token?: string };
+    expect(auth.token).toBe("dxlink-quote-token");
+  });
+
   it("reports trade-side data as no when the feed rejects TimeAndSale", async () => {
     resetTradeSideForTests();
     const { transport } = scripted([

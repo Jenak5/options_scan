@@ -91,6 +91,137 @@ describe("DXLink quote sessions", () => {
     vi.restoreAllMocks();
   });
 
+  it("ignores the opening AUTH_STATE UNAUTHORIZED and subscribes only after AUTHORIZED", async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    let oauth = 0;
+    let quotes = 0;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.endsWith("/oauth/token")) {
+        oauth += 1;
+        return new Response(JSON.stringify({ access_token: "access-1", expires_in: 900 }), { status: 200 });
+      }
+      quotes += 1;
+      return new Response(JSON.stringify({
+        data: {
+          "dxlink-url": "wss://dxlink.example/ws",
+          token: QUOTE_A,
+          "expires-at": new Date(Date.now() + 10 * 60_000).toISOString(),
+        },
+      }), { status: 200 });
+    });
+    const incoming = [
+      { type: "AUTH_STATE", channel: 0, state: "UNAUTHORIZED" },
+      { type: "KEEPALIVE", channel: 0 },
+      { type: "AUTH_STATE", channel: 0, state: "AUTHORIZED" },
+      candleMessage(),
+    ];
+    setDxlinkConnectForTests(async () => ({
+      send(data: string) {
+        sent.push(JSON.parse(data) as Record<string, unknown>);
+      },
+      close() {},
+      next() {
+        const next = incoming.shift();
+        if (!next) return Promise.resolve("timeout");
+        return Promise.resolve(JSON.stringify(next));
+      },
+    }));
+    const bars = await ttPriceHistory(historyInput("SPY"), {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      timeoutMs: 1000,
+      quietMs: 0,
+    });
+    expect(bars.length).toBeGreaterThan(0);
+    expect(oauth).toBe(1);
+    expect(quotes).toBe(1);
+    const types = sent.map((row) => row.type);
+    expect(types).toEqual([
+      "SETUP",
+      "AUTH",
+      "KEEPALIVE",
+      "CHANNEL_REQUEST",
+      "FEED_SETUP",
+      "FEED_SUBSCRIPTION",
+    ]);
+    expect(sent[0]).toMatchObject({
+      type: "SETUP",
+      channel: 0,
+      version: "0.1",
+      keepaliveTimeout: 60,
+      acceptKeepaliveTimeout: 60,
+    });
+    expect(sent[1]).toMatchObject({ type: "AUTH", channel: 0, token: QUOTE_A });
+    expect(sent[2]).toEqual({ type: "KEEPALIVE", channel: 0 });
+    expect(sent[3]).toMatchObject({
+      type: "CHANNEL_REQUEST",
+      channel: 1,
+      service: "FEED",
+      parameters: { contract: "AUTO" },
+    });
+    expect(sent[4]).toMatchObject({
+      type: "FEED_SETUP",
+      channel: 1,
+      acceptAggregationPeriod: 0.1,
+      acceptDataFormat: "COMPACT",
+      acceptEventFields: { Candle: ["eventSymbol", "time", "open", "high", "low", "close", "volume"] },
+    });
+    expect(sent[5]).toMatchObject({
+      type: "FEED_SUBSCRIPTION",
+      channel: 1,
+      add: [{ type: "Candle", symbol: expect.stringContaining("SPY{=5m") }],
+    });
+    const warns = vi.mocked(console.warn).mock.calls.map((call) => String(call[0])).join(" ");
+    expect(warns).not.toContain("refreshing once");
+    expect(warns).not.toContain("AUTH_STATE UNAUTHORIZED");
+  });
+
+  it("waits through the opening UNAUTHORIZED state and fails on timeout without a second token", async () => {
+    let oauth = 0;
+    let quotes = 0;
+    let connects = 0;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.endsWith("/oauth/token")) {
+        oauth += 1;
+        return new Response(JSON.stringify({ access_token: `access-${oauth}`, expires_in: 900 }), { status: 200 });
+      }
+      quotes += 1;
+      return new Response(JSON.stringify({
+        data: {
+          "dxlink-url": "wss://dxlink.example/ws",
+          token: QUOTE_A,
+          "expires-at": new Date(Date.now() + 10 * 60_000).toISOString(),
+        },
+      }), { status: 200 });
+    });
+    setDxlinkConnectForTests(async () => {
+      connects += 1;
+      let opened = false;
+      return {
+        send() {},
+        close() {},
+        next() {
+          if (!opened) {
+            opened = true;
+            return Promise.resolve(JSON.stringify({ type: "AUTH_STATE", channel: 0, state: "UNAUTHORIZED" }));
+          }
+          return Promise.resolve("timeout");
+        },
+      };
+    });
+    await expect(ttPriceHistory(historyInput("QQQ"), {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      timeoutMs: 40,
+      quietMs: 0,
+    })).rejects.toThrow("DXLink did not authorize the quote session before the timeout.");
+    expect(oauth).toBe(1);
+    expect(quotes).toBe(1);
+    expect(connects).toBe(1);
+    const warns = vi.mocked(console.warn).mock.calls.map((call) => String(call[0])).join(" ");
+    expect(warns).not.toContain("refreshing once");
+  });
+
   it("mints a fresh access token immediately before each quote token and does not reuse the quote token", async () => {
     const urls: string[] = [];
     const quoteAuth: string[] = [];

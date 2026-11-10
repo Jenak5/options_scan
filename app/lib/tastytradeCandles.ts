@@ -218,8 +218,9 @@ export function dxlinkOpening(token: string): object[] {
 
 /**
  * CHANNEL_REQUEST, FEED_SETUP, and the Candle subscription are returned only
- * after AUTH_STATE AUTHORIZED. A KEEPALIVE before that is answered and does
- * not open the feed.
+ * after AUTH_STATE AUTHORIZED. DXLink sends AUTH_STATE UNAUTHORIZED immediately
+ * after SETUP, before AUTH has been applied. That frame is not a failure.
+ * A KEEPALIVE before authorization is answered and does not open the feed.
  */
 export function handleDxlinkMessage(state: DxlinkState, message: unknown): DxlinkStep {
   const row = asRecord(message);

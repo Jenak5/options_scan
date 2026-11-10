@@ -359,16 +359,12 @@ async function withFreshDxlink<T>(
   });
 }
 
+/** A DXLink ERROR frame. AUTH_STATE UNAUTHORIZED is not an error; the feed sends it before AUTH is applied. */
 function dxlinkFailure(msg: Record<string, unknown>, secrets: readonly string[]): TastytradeDxlinkError {
-  if (msg.type === "AUTH_STATE" && msg.state !== "AUTHORIZED") {
-    const state = typeof msg.state === "string" ? msg.state : "rejected";
-    return new TastytradeDxlinkError(
-      formatDxlinkError({ error: "UNAUTHORIZED", message: `AUTH_STATE ${state}` }, secrets),
-      true,
-    );
-  }
   return new TastytradeDxlinkError(formatDxlinkError(msg, secrets), dxlinkErrorIsAuth(msg));
 }
+
+const DXLINK_AUTH_TIMEOUT = "DXLink did not authorize the quote session before the timeout.";
 
 export async function ttQuotes(
   input: { equity?: string[]; options?: string[] },
@@ -483,7 +479,7 @@ export async function ttLastTrades(
         }
         if (msg.type === "KEEPALIVE") {
           transport.send(JSON.stringify({ type: "KEEPALIVE", channel: 0 }));
-        } else if (msg.type === "ERROR" || (msg.type === "AUTH_STATE" && msg.state !== "AUTHORIZED")) {
+        } else if (msg.type === "ERROR") {
           throw dxlinkFailure(msg, [session.token]);
         } else if (msg.type === "AUTH_STATE" && msg.state === "AUTHORIZED" && !streaming) {
           streaming = true;
@@ -503,11 +499,12 @@ export async function ttLastTrades(
             }));
           }
         } else if (msg.type === "FEED_DATA") {
-        const before = out.size;
-        parseCompactTrades(msg.data, out);
-        if (out.size > before || lastDataAt === 0) lastDataAt = Date.now();
+          const before = out.size;
+          parseCompactTrades(msg.data, out);
+          if (out.size > before || lastDataAt === 0) lastDataAt = Date.now();
+        }
       }
-    }
+      if (!streaming) throw new TastytradeDataError(DXLINK_AUTH_TIMEOUT);
     } finally {
       transport.close();
     }
@@ -585,7 +582,7 @@ async function streamCandles(
       }
       if (msg.type === "KEEPALIVE") {
         transport.send(JSON.stringify({ type: "KEEPALIVE", channel: 0 }));
-      } else if (msg.type === "ERROR" || (msg.type === "AUTH_STATE" && msg.state !== "AUTHORIZED")) {
+      } else if (msg.type === "ERROR") {
         throw dxlinkFailure(msg, [session.token]);
       } else if (msg.type === "AUTH_STATE" && msg.state === "AUTHORIZED" && !streaming) {
         streaming = true;
@@ -617,6 +614,7 @@ async function streamCandles(
         }
       }
     }
+    if (!streaming) throw new TastytradeDataError(DXLINK_AUTH_TIMEOUT);
   } finally {
     transport.close();
   }

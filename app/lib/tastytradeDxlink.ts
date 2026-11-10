@@ -233,12 +233,6 @@ export async function collectDxlinkFeed(
     } else if (msg.type === "ERROR") {
       if (dxlinkErrorIsAuth(msg)) throw new TastytradeDxlinkError(formatDxlinkError(msg, [token]), true);
       if (/timeandsale/i.test(errorText(msg))) rejected = true;
-    } else if (msg.type === "AUTH_STATE" && msg.state !== "AUTHORIZED") {
-      const state = typeof msg.state === "string" ? msg.state : "rejected";
-      throw new TastytradeDxlinkError(
-        formatDxlinkError({ error: "UNAUTHORIZED", message: `AUTH_STATE ${state}` }, [token]),
-        true,
-      );
     } else if (msg.type === "AUTH_STATE" && msg.state === "AUTHORIZED" && !streaming) {
       streaming = true;
       const feed = chainFeedMessages(symbols);
@@ -249,7 +243,8 @@ export async function collectDxlinkFeed(
       parseDxlinkFeedData(msg.data, snap);
     }
   }
-  snap.tradeSideDataAvailable = streaming && !rejected ? "yes" : "no";
+  if (!streaming) throw new Error("DXLink did not authorize the quote session before the timeout.");
+  snap.tradeSideDataAvailable = rejected ? "no" : "yes";
   return snap;
 }
 
