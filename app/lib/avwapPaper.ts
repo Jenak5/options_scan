@@ -950,6 +950,7 @@ export function avwapPaperSection(book: AvwapPaperBook, now: Date, stored: boole
 export function formatAvwapPaperAlert(trade: AvwapPaperTrade): string {
   const target = trade.entryAsk * (1 + AVWAP_TARGET_FRACTION);
   const debit = trade.entryAsk * 100 * trade.contracts;
+  const lastDay = lastTradingDayBeforeExpiry(trade.expiration) ?? trade.expiration;
   const alt = trade.whatIfs.find((leg) => leg.id === "dte14");
   const altLine = !alt || alt.status === "skipped"
     ? `14-day what-if skipped${alt?.skipReason ? `: ${escapeHtml(alt.skipReason)}` : "."}`
@@ -960,7 +961,7 @@ Paper only. No order is placed. This is not an A or a B alert.
 
 Gap-day anchored VWAP reject. Anchor ${escapeHtml(trade.anchorDate)} (${(trade.gap * 100).toFixed(2)}% vs the prior close). 5-minute close $${money(trade.signalClose)} below AVWAP $${money(trade.signalVwap)}.
 Buy <b>${trade.contracts}</b> at the ask $${money(trade.entryAsk)} (bid $${money(trade.entryBid)}). Debit $${money(debit)}, within the $${AVWAP_BUDGET_DOLLARS} cap.
-Sell at the bid when the bid is at least $${money(target)} (+50%). Otherwise sell at the bid on the final scan of the last trading day before expiration.
+Sell at the bid when the bid is at least $${money(target)} (+50%). Otherwise sell at the bid on the final scan of ${escapeHtml(lastDay)}.
 What-if, old rule: +50% or expiry, on this same put. What-if on this contract: +25% or sell after 3 trading days. ${altLine}`;
 }
 

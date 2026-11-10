@@ -322,8 +322,12 @@ describe("size, fees, and exits", () => {
       entryAsk: 2.3,
       status: "open",
     });
-    expect(formatAvwapPaperAlert(trade)).toContain("PAPER ONLY");
-    expect(formatAvwapPaperAlert(trade)).toContain("No order is placed");
+    const alert = formatAvwapPaperAlert(trade);
+    expect(alert).toContain("PAPER ONLY");
+    expect(alert).toContain("No order is placed");
+    expect(alert).toContain("Sell at the bid when the bid is at least $3.30 (+50%). Otherwise sell at the bid on the final scan of 2026-11-03.");
+    expect(formatAvwapPaperAlert({ ...trade, expiration: "2026-11-09" })).toContain("final scan of 2026-11-06.");
+    expect(formatAvwapPaperAlert({ ...trade, expiration: "2026-11-27" })).toContain("final scan of 2026-11-25.");
 
     const quoteAt = Date.parse("2026-10-28T13:44:30.000Z");
     const hit = advanceAvwapPaper(opened.book, [snapshot({
