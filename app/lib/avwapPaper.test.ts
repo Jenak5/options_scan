@@ -8,7 +8,7 @@ import {
   AVWAP_PAPER_NOTE,
   AVWAP_RULES_OLD,
   AVWAP_RULES_VERSION,
-  AVWAP_STOP_MULTIPLE,
+  lastTradingDayBeforeExpiry,
   advanceAvwapPaper,
   anchorCovered,
   atmStrike,
@@ -355,92 +355,95 @@ describe("size, fees, and exits", () => {
     expect(hit.opened).toHaveLength(0);
   });
 
-  it("closes the primary on trading day 3 and leaves the old rule open until expiry", () => {
+  it("closes the day before expiration and leaves the old rule open until expiry", () => {
     const opened = advanceAvwapPaper(emptyAvwapPaperBook(), [snapshot()], NOW);
-    const before = advanceAvwapPaper(opened.book, [snapshot()], new Date("2026-10-30T19:50:00.000Z"));
+    expect(opened.opened[0].expiration).toBe("2026-11-04");
+    expect(lastTradingDayBeforeExpiry("2026-11-04")).toBe("2026-11-03");
+    const before = advanceAvwapPaper(opened.book, [snapshot()], new Date("2026-11-03T20:50:00.000Z"));
     expect(before.closed).toHaveLength(0);
-    const day3 = advanceAvwapPaper(opened.book, [snapshot({
+    const quoteAt = Date.parse("2026-11-03T20:54:40.000Z");
+    const pre = advanceAvwapPaper(opened.book, [snapshot({
       quotes: [
-        { expiration: "2026-11-04", strike: 448, bid: 2, ask: 2.1, quoteTime: Date.parse("2026-10-30T19:54:40.000Z"), source: "schwab" },
+        { expiration: "2026-11-04", strike: 448, bid: 2, ask: 2.1, quoteTime: quoteAt, source: "schwab" },
         { expiration: "2026-11-11", strike: 448, bid: 2.1, ask: 2.2 },
       ],
-    })], new Date("2026-10-30T19:55:00.000Z"));
-    expect(day3.closed[0]).toMatchObject({
-      exitReason: "day3",
+    })], new Date("2026-11-03T20:55:00.000Z"));
+    expect(pre.closed[0]).toMatchObject({
+      exitReason: "preExpiry",
       exitBid: 2,
       exitAsk: 2.1,
-      lastQuoteAt: Date.parse("2026-10-30T19:54:40.000Z"),
+      lastQuoteAt: quoteAt,
       quoteSource: "schwab",
       pnlDollars: avwapPnl(2.2, 2, 3),
     });
-    expect(day3.closed[0].whatIfs.find((leg) => leg.id === "old50-or-expiry")?.status).toBe("open");
-    const oldBefore = advanceAvwapPaper(day3.book, [snapshot()], new Date("2026-11-04T20:50:00.000Z"));
+    expect(pre.closed[0].whatIfs.find((leg) => leg.id === "old50-or-expiry")?.status).toBe("open");
+    const oldBefore = advanceAvwapPaper(pre.book, [snapshot()], new Date("2026-11-04T20:50:00.000Z"));
     expect(oldBefore.book.trades[0].whatIfs.find((leg) => leg.id === "old50-or-expiry")?.status).toBe("open");
-    const expiry = advanceAvwapPaper(day3.book, [snapshot({
+    const expiry = advanceAvwapPaper(pre.book, [snapshot({
       quotes: [
         { expiration: "2026-11-04", strike: 448, bid: 2, ask: 2.1 },
         { expiration: "2026-11-11", strike: 448, bid: 2.1, ask: 2.2 },
       ],
     })], new Date("2026-11-04T20:55:00.000Z"));
     expect(expiry.closed).toHaveLength(0);
-    expect(expiry.book.trades[0].exitReason).toBe("day3");
+    expect(expiry.book.trades[0].exitReason).toBe("preExpiry");
     expect(expiry.book.trades[0].whatIfs.find((leg) => leg.id === "old50-or-expiry")).toMatchObject({
       status: "closed",
       exitReason: "expiry",
       exitBid: 2,
     });
+  });
 
-    const earlyOpen = advanceAvwapPaper(emptyAvwapPaperBook(), [snapshot({
-      daily: [
-        { date: "2026-11-19", open: 430, close: 440 },
-        { date: "2026-11-20", open: 450, close: 448 },
-      ],
-      bars: [
-        bar("2026-11-20T14:30:00.000Z", 449, 451, 449, 450, 1000),
-        bar("2026-11-20T14:35:00.000Z", 449, 450, 447, 448, 1000),
-      ],
-      quotes: [
-        { expiration: "2026-11-27", strike: 448, bid: 2, ask: 2.2 },
-        { expiration: "2026-12-04", strike: 448, bid: 2.1, ask: 2.3 },
-      ],
-    })], new Date("2026-11-20T14:40:00.000Z"));
-    expect(earlyOpen.opened[0]?.expiration).toBe("2026-11-27");
-    const dayBefore = advanceAvwapPaper(earlyOpen.book, [snapshot({
-      quotes: [{ expiration: "2026-11-27", strike: 448, bid: 1.5, ask: 1.6 }],
-    })], new Date("2026-11-24T20:50:00.000Z"));
-    expect(dayBefore.closed).toHaveLength(0);
-    const day3Early = advanceAvwapPaper(earlyOpen.book, [snapshot({
-      quotes: [{ expiration: "2026-11-27", strike: 448, bid: 1.5, ask: 1.6, source: "tastytrade" }],
-    })], new Date("2026-11-24T20:55:00.000Z"));
-    expect(day3Early.closed[0]).toMatchObject({ exitReason: "day3", exitBid: 1.5, quoteSource: "tastytrade" });
-    const tooSoon = advanceAvwapPaper(day3Early.book, [snapshot({
-      quotes: [{ expiration: "2026-11-27", strike: 448, bid: 1.5, ask: 1.6 }],
-    })], new Date("2026-11-27T17:54:00.000Z"));
-    expect(tooSoon.book.trades[0].whatIfs.find((leg) => leg.id === "old50-or-expiry")?.status).toBe("open");
-    const early = advanceAvwapPaper(day3Early.book, [snapshot({
-      quotes: [{ expiration: "2026-11-27", strike: 448, bid: 1.5, ask: 1.6 }],
-    })], new Date("2026-11-27T17:55:00.000Z"));
+  it("closes a Friday expiry on Thursday, a Monday expiry on Friday, and skips a holiday", () => {
+    expect(lastTradingDayBeforeExpiry("2026-11-06")).toBe("2026-11-05");
+    expect(lastTradingDayBeforeExpiry("2026-11-09")).toBe("2026-11-06");
+    expect(lastTradingDayBeforeExpiry("2026-11-27")).toBe("2026-11-25");
+    expect(lastTradingDayBeforeExpiry("2026-11-30")).toBe("2026-11-27");
+    const opened = advanceAvwapPaper(emptyAvwapPaperBook(), [snapshot()], NOW);
+
+    const friday = { ...opened.book, trades: [retimed(opened.opened[0], "2026-11-02T14:40:00.000Z", "2026-11-06")] };
+    expect(advanceAvwapPaper(friday, [liveQuote("2026-11-06", 2)], new Date("2026-11-04T20:55:00.000Z")).closed).toHaveLength(0);
+    expect(advanceAvwapPaper(friday, [liveQuote("2026-11-06", 2)], new Date("2026-11-05T20:50:00.000Z")).closed).toHaveLength(0);
+    expect(advanceAvwapPaper(friday, [liveQuote("2026-11-06", 2)], new Date("2026-11-05T20:55:00.000Z")).closed[0]).toMatchObject({
+      exitReason: "preExpiry",
+      exitBid: 2,
+    });
+
+    const monday = { ...opened.book, trades: [retimed(opened.opened[0], "2026-11-02T14:40:00.000Z", "2026-11-09")] };
+    expect(advanceAvwapPaper(monday, [liveQuote("2026-11-09", 1.8)], new Date("2026-11-05T20:55:00.000Z")).closed).toHaveLength(0);
+    expect(advanceAvwapPaper(monday, [liveQuote("2026-11-09", 1.8)], new Date("2026-11-06T20:50:00.000Z")).closed).toHaveLength(0);
+    expect(advanceAvwapPaper(monday, [liveQuote("2026-11-09", 1.8)], new Date("2026-11-06T20:55:00.000Z")).closed[0]).toMatchObject({
+      exitReason: "preExpiry",
+      exitBid: 1.8,
+    });
+
+    const afterHoliday = { ...opened.book, trades: [retimed(opened.opened[0], "2026-11-20T14:40:00.000Z", "2026-11-27")] };
+    expect(advanceAvwapPaper(afterHoliday, [liveQuote("2026-11-27", 1.5)], new Date("2026-11-24T20:55:00.000Z")).closed).toHaveLength(0);
+    expect(advanceAvwapPaper(afterHoliday, [liveQuote("2026-11-27", 1.5)], new Date("2026-11-25T20:50:00.000Z")).closed).toHaveLength(0);
+    const holidayClose = advanceAvwapPaper(afterHoliday, [liveQuote("2026-11-27", 1.5)], new Date("2026-11-25T20:55:00.000Z"));
+    expect(holidayClose.closed[0]).toMatchObject({ exitReason: "preExpiry", exitBid: 1.5, quoteSource: "tastytrade" });
+    expect(holidayClose.closed[0].whatIfs.find((leg) => leg.id === "old50-or-expiry")?.status).toBe("open");
+    const early = advanceAvwapPaper(holidayClose.book, [liveQuote("2026-11-27", 1.4)], new Date("2026-11-27T17:55:00.000Z"));
     expect(early.book.trades[0].whatIfs.find((leg) => leg.id === "old50-or-expiry")).toMatchObject({
       status: "closed",
       exitReason: "expiry",
-      exitBid: 1.5,
+      exitBid: 1.4,
+    });
+
+    const earlyMonday = { ...opened.book, trades: [retimed(opened.opened[0], "2026-11-24T14:40:00.000Z", "2026-11-30")] };
+    expect(advanceAvwapPaper(earlyMonday, [liveQuote("2026-11-30", 1.6)], new Date("2026-11-25T20:55:00.000Z")).closed).toHaveLength(0);
+    expect(advanceAvwapPaper(earlyMonday, [liveQuote("2026-11-30", 1.6)], new Date("2026-11-27T17:54:00.000Z")).closed).toHaveLength(0);
+    expect(advanceAvwapPaper(earlyMonday, [liveQuote("2026-11-30", 1.6)], new Date("2026-11-27T17:55:00.000Z")).closed[0]).toMatchObject({
+      exitReason: "preExpiry",
+      exitBid: 1.6,
     });
   });
 
-  it("closes the 25% and 14-day what-ifs after 3 trading days, after the primary day-3 exit", () => {
+  it("closes the 25% and 14-day what-ifs after 3 trading days while the primary is still open", () => {
     const opened = advanceAvwapPaper(emptyAvwapPaperBook(), [snapshot()], NOW);
     expect(timeStopDue(opened.opened[0].openedAt, new Date("2026-11-02T20:50:00.000Z"))).toBe(false);
     expect(timeStopDue(opened.opened[0].openedAt, new Date("2026-11-02T20:55:00.000Z"))).toBe(true);
-    const day3 = advanceAvwapPaper(opened.book, [snapshot({
-      quotes: [
-        { expiration: "2026-11-04", strike: 448, bid: 2.4, ask: 2.5 },
-        { expiration: "2026-11-11", strike: 448, bid: 2.4, ask: 2.5 },
-      ],
-    })], new Date("2026-10-30T19:55:00.000Z"));
-    expect(day3.closed[0].exitReason).toBe("day3");
-    expect(day3.closed[0].whatIfs.find((leg) => leg.id === "target25-or-3d")?.status).toBe("open");
-    expect(day3.closed[0].whatIfs.find((leg) => leg.id === "old50-or-expiry")?.status).toBe("open");
-    const held = advanceAvwapPaper(day3.book, [snapshot({
+    const held = advanceAvwapPaper(opened.book, [snapshot({
       quotes: [
         { expiration: "2026-11-04", strike: 448, bid: 2.4, ask: 2.5 },
         { expiration: "2026-11-11", strike: 448, bid: 2.4, ask: 2.5 },
@@ -448,69 +451,36 @@ describe("size, fees, and exits", () => {
     })], new Date("2026-11-02T20:55:00.000Z"));
     expect(held.closed).toHaveLength(0);
     const trade = held.book.trades[0];
-    expect(trade.status).toBe("closed");
-    expect(trade.exitReason).toBe("day3");
+    expect(trade.status).toBe("open");
     expect(trade.whatIfs.find((leg) => leg.id === "target25-or-3d")).toMatchObject({ status: "closed", exitReason: "time3", exitBid: 2.4 });
     expect(trade.whatIfs.find((leg) => leg.id === "dte14")).toMatchObject({ status: "closed", exitReason: "time3" });
     expect(trade.whatIfs.find((leg) => leg.id === "old50-or-expiry")?.status).toBe("open");
   });
 
-  it("sells at the bid when the bid is exactly 65% of the entry ask", () => {
+  it("keeps a 60% loss open until the last trading day before expiration", () => {
     const opened = advanceAvwapPaper(emptyAvwapPaperBook(), [snapshot()], NOW);
-    const entryAsk = opened.opened[0].entryAsk;
-    const stopBid = entryAsk * AVWAP_STOP_MULTIPLE;
-    expect(stopBid).toBeCloseTo(entryAsk * 0.65, 8);
-    const quoteAt = Date.parse("2026-10-28T13:44:10.000Z");
-    const above = advanceAvwapPaper(opened.book, [snapshot({
-      quotes: [{ expiration: "2026-11-04", strike: 448, bid: stopBid + 0.01, ask: stopBid + 0.05, quoteTime: quoteAt, source: "tastytrade" }],
-    })], new Date("2026-10-28T13:45:00.000Z"));
-    expect(above.closed).toHaveLength(0);
-    const stopped = advanceAvwapPaper(opened.book, [snapshot({
-      quotes: [{ expiration: "2026-11-04", strike: 448, bid: stopBid, ask: stopBid + 0.05, quoteTime: quoteAt, source: "tastytrade" }],
-    })], new Date("2026-10-28T13:45:00.000Z"));
-    expect(stopped.closed[0]).toMatchObject({
-      exitReason: "stop35",
-      exitBid: stopBid,
-      exitAsk: stopBid + 0.05,
-      lastQuoteAt: quoteAt,
-      quoteSource: "tastytrade",
-      pnlDollars: avwapPnl(entryAsk, stopBid, 3),
-    });
-    expect(stopped.closed[0].whatIfs.find((leg) => leg.id === "old50-or-expiry")?.status).toBe("open");
+    const bid = 2.2 * 0.4;
+    const losing = [snapshot({
+      quotes: [{ expiration: "2026-11-04", strike: 448, bid, ask: 1, source: "tastytrade" }],
+    })];
+    const early = advanceAvwapPaper(opened.book, losing, new Date("2026-11-02T20:55:00.000Z"));
+    expect(early.closed).toHaveLength(0);
+    expect(early.book.trades[0].status).toBe("open");
+    expect(early.book.trades[0].lastBid).toBeCloseTo(bid, 8);
+    const closed = advanceAvwapPaper(opened.book, losing, new Date("2026-11-03T20:55:00.000Z"));
+    expect(closed.closed[0]).toMatchObject({ exitReason: "preExpiry", exitBid: bid, quoteSource: "tastytrade" });
     expect(AVWAP_FEE_PER_SIDE).toBe(0.65);
   });
 
-  it("closes on trading day 3 and skips Thanksgiving", () => {
+  it("takes the +50% target when that bid and the pre-expiry scan arrive together", () => {
     const opened = advanceAvwapPaper(emptyAvwapPaperBook(), [snapshot()], NOW);
-    const book = { ...opened.book, trades: [retimed(opened.opened[0], "2026-11-24T14:40:00.000Z", "2026-12-04")] };
-    const day2 = advanceAvwapPaper(book, [liveQuote("2026-12-04", 2)], new Date("2026-11-25T20:55:00.000Z"));
-    expect(day2.closed).toHaveLength(0);
-    const beforeFinal = advanceAvwapPaper(book, [liveQuote("2026-12-04", 2)], new Date("2026-11-27T17:54:00.000Z"));
-    expect(beforeFinal.closed).toHaveLength(0);
-    const quoteAt = Date.parse("2026-11-27T17:54:20.000Z");
-    const closed = advanceAvwapPaper(book, [snapshot({
-      quotes: [{ expiration: "2026-12-04", strike: 448, bid: 2, ask: 2.1, quoteTime: quoteAt, source: "schwab" }],
-    })], new Date("2026-11-27T17:55:00.000Z"));
-    expect(closed.closed[0]).toMatchObject({
-      exitReason: "day3",
-      exitBid: 2,
-      exitAsk: 2.1,
-      lastQuoteAt: quoteAt,
-      quoteSource: "schwab",
-    });
-    expect(closed.closed[0].whatIfs.find((leg) => leg.id === "target25-or-3d")?.status).toBe("open");
-    expect(closed.closed[0].whatIfs.find((leg) => leg.id === "old50-or-expiry")?.status).toBe("open");
-  });
-
-  it("takes the +50% target when that bid and the day-3 scan arrive together", () => {
-    const opened = advanceAvwapPaper(emptyAvwapPaperBook(), [snapshot()], NOW);
-    const quoteAt = Date.parse("2026-10-30T19:54:05.000Z");
+    const quoteAt = Date.parse("2026-11-03T20:54:05.000Z");
     const both = advanceAvwapPaper(opened.book, [snapshot({
       quotes: [
         { expiration: "2026-11-04", strike: 448, bid: 3.3, ask: 3.4, quoteTime: quoteAt, source: "tastytrade" },
         { expiration: "2026-11-11", strike: 448, bid: 2.2, ask: 2.4 },
       ],
-    })], new Date("2026-10-30T19:55:00.000Z"));
+    })], new Date("2026-11-03T20:55:00.000Z"));
     expect(both.closed[0]).toMatchObject({
       exitReason: "target50",
       exitBid: 3.3,
@@ -524,15 +494,10 @@ describe("size, fees, and exits", () => {
     });
   });
 
-  it("closes at expiry when expiration comes before trading day 3, and at 0 when the bid is gone", () => {
+  it("closes at 0 when the bid is gone after expiration", () => {
     const opened = advanceAvwapPaper(emptyAvwapPaperBook(), [snapshot()], NOW);
-    const book = { ...opened.book, trades: [retimed(opened.opened[0], "2026-11-02T14:40:00.000Z", "2026-11-03")] };
-    const before = advanceAvwapPaper(book, [liveQuote("2026-11-03", 2)], new Date("2026-11-03T20:50:00.000Z"));
-    expect(before.closed).toHaveLength(0);
-    const expiry = advanceAvwapPaper(book, [liveQuote("2026-11-03", 2)], new Date("2026-11-03T20:55:00.000Z"));
-    expect(expiry.closed[0]).toMatchObject({ exitReason: "expiry", exitBid: 2, exitAsk: 2.1 });
-    expect(expiry.closed[0].exitReason).not.toBe("day3");
-    const missed = advanceAvwapPaper(book, [snapshot({ quotes: [] })], new Date("2026-11-04T14:40:00.000Z"));
+    const book = { ...opened.book, trades: [retimed(opened.opened[0], "2026-11-02T14:40:00.000Z", "2026-11-06")] };
+    const missed = advanceAvwapPaper(book, [snapshot({ quotes: [] })], new Date("2026-11-09T15:00:00.000Z"));
     expect(missed.closed[0]).toMatchObject({
       exitReason: "expiry",
       exitBid: 0,
@@ -548,10 +513,9 @@ describe("size, fees, and exits", () => {
     const openOld = parseAvwapPaperBook(JSON.stringify(raw));
     expect(openOld.trades[0].rulesVersion).toBe(AVWAP_RULES_OLD);
     expect(openOld.trades[0].whatIfs.some((leg) => leg.id === "old50-or-expiry")).toBe(true);
-    const stopBid = 2.2 * AVWAP_STOP_MULTIPLE;
     const held = advanceAvwapPaper(openOld, [snapshot({
-      quotes: [{ expiration: "2026-11-04", strike: 448, bid: stopBid, ask: 1.5 }],
-    })], new Date("2026-10-28T14:00:00.000Z"));
+      quotes: [{ expiration: "2026-11-04", strike: 448, bid: 2.2 * 0.4, ask: 1 }],
+    })], new Date("2026-11-03T20:55:00.000Z"));
     expect(held.closed).toHaveLength(0);
     expect(held.book.trades[0].status).toBe("open");
     expect(held.book.trades[0].rulesVersion).toBe(AVWAP_RULES_OLD);
@@ -574,8 +538,8 @@ describe("size, fees, and exits", () => {
     const still = again.book.trades.filter((trade) => trade.id.startsWith("old-")).sort((a, b) => a.id.localeCompare(b.id));
     expect(still.map((trade) => trade.pnlDollars)).toEqual([-10, -11, -12]);
     expect(still.map((trade) => trade.exitReason)).toEqual(["expiry", "expiry", "expiry"]);
-    expect(AVWAP_PAPER_NOTE).toMatch(/down 35%/);
-    expect(AVWAP_PAPER_NOTE).toMatch(/trading day 3/);
+    expect(AVWAP_PAPER_NOTE).toMatch(/last trading day before expiration/);
+    expect(AVWAP_PAPER_NOTE).not.toMatch(/trading day 3|down 35%/);
     expect(AVWAP_PAPER_NOTE).toMatch(/old rule: \+50% or expiry/);
     expect(AVWAP_PAPER_NOTE).toMatch(/3:55 PM ET/);
     expect(AVWAP_PAPER_NOTE).toMatch(/12:55 PM ET/);
@@ -646,7 +610,7 @@ describe("size, fees, and exits", () => {
     expect(advanceAvwapPaper(opened.book, [snapshot()], new Date("2026-11-26T15:30:00.000Z")).opened).toEqual([]);
     const brief = avwapPaperBrief(opened.book.trades, NOW);
     expect(brief.paperOnly).toBe(true);
-    expect(brief.note).toMatch(/down 35%/);
+    expect(brief.note).toMatch(/last trading day before expiration/);
     expect(brief.openRows[0]).toMatchObject({ symbol: "SPY", entryAsk: 2.2, entryBid: 2, status: "open", rulesVersion: AVWAP_RULES_VERSION });
     const plan = quotePlan(emptyAvwapPaperBook(), [snapshot()], NOW);
     expect(plan.length).toBeGreaterThan(0);

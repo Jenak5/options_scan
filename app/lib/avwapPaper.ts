@@ -7,6 +7,7 @@ import {
   isChicagoMarketHours,
   isMarketDay,
   isNyseHoliday,
+  previousChicagoTradingDay,
 } from "@/app/lib/marketHours";
 import { schwabOptionSymbol } from "@/app/lib/optionSymbol";
 
@@ -33,19 +34,12 @@ export const AVWAP_FEE_PER_SIDE = 0.65;
 /** Whole-contract debit cap from the backtest. One contract above this is skipped. */
 export const AVWAP_BUDGET_DOLLARS = 875;
 export const AVWAP_TARGET_FRACTION = 0.5;
-/** Sell when the bid is at or below 65% of the entry ask. That is a 35% loss. */
-export const AVWAP_STOP_MULTIPLE = 0.65;
 export const AVWAP_WHATIF_TARGET_FRACTION = 0.25;
 export const AVWAP_WHATIF_TRADING_DAYS = 3;
-/**
- * Primary time stop. Entry session is day 1. Full-day NYSE holidays do not count.
- * The close is the final scan of day 3.
- */
-export const AVWAP_HOLD_DAYS = 3;
 /** Trades stored before this exit. Target or expiry only. Their fills are not recomputed. */
 export const AVWAP_RULES_OLD = "old";
-/** Live paper exit: +50% bid, -35% bid, day-3 final scan, expiry if it comes first. */
-export const AVWAP_RULES_VERSION = "stop35-day3";
+/** Live paper exit: +50% bid, otherwise the last trading day before expiration. */
+export const AVWAP_RULES_VERSION = "target50-preexpiry";
 export type AvwapRulesVersion = typeof AVWAP_RULES_OLD | typeof AVWAP_RULES_VERSION;
 export type AvwapQuoteSource = "tastytrade" | "schwab";
 export const AVWAP_PRIMARY_DTE_MIN = 5;
@@ -82,7 +76,7 @@ const EARLY_FINAL_SCAN_MINUTE = 12 * 60 + 55;
 const EARLY_CLOSE_ET = new Set(["2026-11-27", "2026-12-24", "2027-11-26"]);
 
 export const AVWAP_PAPER_NOTE =
-  `Paper only. No order is placed. Symbols are SPY, IWM, and QQQ. A gap day is a session whose open is more than ${AVWAP_GAP_FRACTION * 100}% from the prior close. Anchored VWAP starts at that day's regular-hours open and uses 5-minute bars (1-minute bars are rolled up), typical price (high + low + close) / 3, with volume floored at 1. The signal is a regular-hours 5-minute close below that VWAP when the previous completed close was at or above it. A later cross counts. Five-minute bars are loaded back to the gap day. The paper trade buys the at-the-money put whose expiry is nearest 7 calendar days and inside 5–10 days, at the ask, in whole contracts whose debit is $${AVWAP_BUDGET_DOLLARS} or less. One contract over $${AVWAP_BUDGET_DOLLARS} is skipped. One open paper position per symbol. The exit price is the live option bid from Tastytrade or Schwab. The last print and the mid are not used. Sell at the bid when the bid is at least 50% above the entry ask. Sell at the bid when the bid is at or below ${AVWAP_STOP_MULTIPLE * 100}% of the entry ask (down 35%). Otherwise sell at the bid on the final scan of trading day 3, counting the entry day as day 1. Weekends and full-day NYSE holidays do not count, and an early close does. That final scan is 3:55 PM ET, or 12:55 PM ET on an early close. If expiration comes before day 3, close on the expiry-day final scan. A missing bid after expiration closes at 0. What-ifs on the same signal, kept so the rows stay comparable: old rule: +50% or expiry, on this same put, with no stop; the 7-day put at +25% or after 3 trading days not counting the entry day; and +50% or those same 3 trading days on a put nearest 14 calendar days (12–16). Fees are $${AVWAP_FEE_PER_SIDE.toFixed(2)} per contract per side. Two losing closes in a row block new entries for the rest of that Chicago day. Cumulative paper drawdown over $${AVWAP_DRAWDOWN_FLAG_DOLLARS.toLocaleString("en-US")} is flagged.`;
+  `Paper only. No order is placed. Symbols are SPY, IWM, and QQQ. A gap day is a session whose open is more than ${AVWAP_GAP_FRACTION * 100}% from the prior close. Anchored VWAP starts at that day's regular-hours open and uses 5-minute bars (1-minute bars are rolled up), typical price (high + low + close) / 3, with volume floored at 1. The signal is a regular-hours 5-minute close below that VWAP when the previous completed close was at or above it. A later cross counts. Five-minute bars are loaded back to the gap day. The paper trade buys the at-the-money put whose expiry is nearest 7 calendar days and inside 5–10 days, at the ask, in whole contracts whose debit is $${AVWAP_BUDGET_DOLLARS} or less. One contract over $${AVWAP_BUDGET_DOLLARS} is skipped. One open paper position per symbol. The exit price is the live option bid from Tastytrade or Schwab. The last print and the mid are not used. Sell at the bid when the bid is at least 50% above the entry ask. Otherwise sell at the bid on the final scan of the last trading day before expiration, whatever the gain or loss. That day skips weekends and full-day NYSE holidays. An early close still counts, and its final scan is 12:55 PM ET. A regular final scan is 3:55 PM ET. A missing bid after expiration closes at 0. What-ifs on the same signal, kept so the rows stay comparable: old rule: +50% or expiry, on this same put; the 7-day put at +25% or after 3 trading days not counting the entry day; and +50% or those same 3 trading days on a put nearest 14 calendar days (12–16). Fees are $${AVWAP_FEE_PER_SIDE.toFixed(2)} per contract per side. Two losing closes in a row block new entries for the rest of that Chicago day. Cumulative paper drawdown over $${AVWAP_DRAWDOWN_FLAG_DOLLARS.toLocaleString("en-US")} is flagged.`;
 
 export function isAvwapSymbol(value: string): value is AvwapSymbol {
   return value === "SPY" || value === "IWM" || value === "QQQ";
@@ -351,13 +345,6 @@ export function bidHitsTarget(bid: number, entryAsk: number, fraction: number): 
   return bid + 1e-9 >= entryAsk * (1 + fraction);
 }
 
-/** True when the live bid is at or below 65% of the entry ask. A bid one cent above stays open. */
-export function bidHitsStop(bid: number, entryAsk: number, multiple: number = AVWAP_STOP_MULTIPLE): boolean {
-  if (!(bid >= 0) || !(entryAsk > 0) || !Number.isFinite(bid) || !Number.isFinite(entryAsk)) return false;
-  if (!(multiple > 0) || !Number.isFinite(multiple)) return false;
-  return bid <= entryAsk * multiple + 1e-9;
-}
-
 /** 3:55 PM ET, or 12:55 PM ET on an early close. */
 export function isSessionFinalScan(now: Date): boolean {
   const day = newYorkDate(now);
@@ -394,27 +381,28 @@ export function timeStopDue(openedAt: number, now: Date, tradingDays: number = A
 }
 
 /**
- * Hold day of an open paper put. The entry session is day 1.
- * Weekends and full-day NYSE holidays do not count. Early closes do.
- * The count uses the same Chicago trading-day clock as the other paper scans.
+ * Last NYSE session before `expiration`. Weekends and full-day holidays are skipped.
+ * Early closes stay in. Null when the date cannot be placed.
  */
-export function avwapHoldDay(openedAt: number, now: Date): number {
-  if (!Number.isFinite(openedAt)) return 0;
-  return chicagoTradingDaysElapsed(new Date(openedAt), now) + 1;
+export function lastTradingDayBeforeExpiry(expiration: string): string | null {
+  return previousChicagoTradingDay(expiration);
 }
 
 /**
- * True on the final scan of trading day 3, or on any later scan if that one was missed.
- * Entry day is day 1. A full-day holiday does not advance the count.
+ * True on the final scan of the last trading day before expiration, or on any
+ * later scan if that one was missed. A loss does not block this close.
  */
-export function day3StopDue(openedAt: number, now: Date): boolean {
-  const day = avwapHoldDay(openedAt, now);
-  if (day > AVWAP_HOLD_DAYS) return true;
-  if (day < AVWAP_HOLD_DAYS) return false;
+export function preExpiryDue(expiration: string, now: Date): boolean {
+  const lastDay = lastTradingDayBeforeExpiry(expiration);
+  if (!lastDay) return false;
+  const today = newYorkDate(now);
+  if (!today) return false;
+  if (today > lastDay) return true;
+  if (today < lastDay) return false;
   return isSessionFinalScan(now);
 }
 
-export type AvwapPrimaryExit = "target50" | "stop35" | "day3" | "expiry";
+export type AvwapPrimaryExit = "target50" | "preExpiry" | "expiry";
 export type AvwapExitReason = AvwapPrimaryExit | "target25" | "time3";
 export type AvwapWhatIfId = "old50-or-expiry" | "target25-or-3d" | "dte14";
 
@@ -464,7 +452,7 @@ export interface AvwapPaperTrade {
   lastQuoteAt: number | null;
   /** Broker that sent the bid used for the latest mark or the close. */
   quoteSource: AvwapQuoteSource | null;
-  /** old keeps +50% or expiry. stop35-day3 is the live exit. */
+  /** old keeps +50% or expiry. target50-preexpiry is the live exit. */
   rulesVersion: AvwapRulesVersion;
   status: "open" | "closed";
   closedAt: number | null;
@@ -961,7 +949,6 @@ export function avwapPaperSection(book: AvwapPaperBook, now: Date, stored: boole
 
 export function formatAvwapPaperAlert(trade: AvwapPaperTrade): string {
   const target = trade.entryAsk * (1 + AVWAP_TARGET_FRACTION);
-  const stop = trade.entryAsk * AVWAP_STOP_MULTIPLE;
   const debit = trade.entryAsk * 100 * trade.contracts;
   const alt = trade.whatIfs.find((leg) => leg.id === "dte14");
   const altLine = !alt || alt.status === "skipped"
@@ -973,7 +960,7 @@ Paper only. No order is placed. This is not an A or a B alert.
 
 Gap-day anchored VWAP reject. Anchor ${escapeHtml(trade.anchorDate)} (${(trade.gap * 100).toFixed(2)}% vs the prior close). 5-minute close $${money(trade.signalClose)} below AVWAP $${money(trade.signalVwap)}.
 Buy <b>${trade.contracts}</b> at the ask $${money(trade.entryAsk)} (bid $${money(trade.entryBid)}). Debit $${money(debit)}, within the $${AVWAP_BUDGET_DOLLARS} cap.
-Sell at the bid when the bid is at least $${money(target)} (+50%), or when the bid is at or below $${money(stop)} (-35%). Otherwise sell at the bid on the final scan of trading day 3 (the entry day is day 1). If expiration comes first, close on the expiry-day final scan.
+Sell at the bid when the bid is at least $${money(target)} (+50%). Otherwise sell at the bid on the final scan of the last trading day before expiration.
 What-if, old rule: +50% or expiry, on this same put. What-if on this contract: +25% or sell after 3 trading days. ${altLine}`;
 }
 
@@ -1173,17 +1160,14 @@ function markTrade(trade: AvwapPaperTrade, snap: AvwapSnapshot | null, now: Date
       : trade;
     const live = trade.rulesVersion === AVWAP_RULES_VERSION;
     const target = bid != null && bidHitsTarget(bid, trade.entryAsk, AVWAP_TARGET_FRACTION);
-    const stop = live && bid != null && bidHitsStop(bid, trade.entryAsk);
-    const day3 = live && day3StopDue(trade.openedAt, now);
+    const preExpiry = live && preExpiryDue(trade.expiration, now);
     const expiry = isExpiryFinalScan(now, trade.expiration);
     const closeSource = source ?? trade.quoteSource;
     if (target && bid != null && ask != null) {
       next = closePrimary(withMark, bid, ask, "target50", null, nowMs, seenAt, closeSource);
-    } else if (stop && bid != null && ask != null) {
-      next = closePrimary(withMark, bid, ask, "stop35", null, nowMs, seenAt, closeSource);
-    } else if (day3 && bid != null && ask != null) {
-      next = closePrimary(withMark, bid, ask, "day3", null, nowMs, seenAt, closeSource);
-    } else if (expiry && bid != null && ask != null) {
+    } else if (preExpiry && bid != null && ask != null) {
+      next = closePrimary(withMark, bid, ask, "preExpiry", null, nowMs, seenAt, closeSource);
+    } else if (!live && expiry && bid != null && ask != null) {
       next = closePrimary(withMark, bid, ask, "expiry", null, nowMs, seenAt, closeSource);
     } else if (expiry && newYorkDate(now) > trade.expiration) {
       next = closePrimary(withMark, 0, ask, "expiry", "No bid after expiration. Closed at 0.", nowMs, null, null);
@@ -1599,7 +1583,7 @@ function parseWhatIf(value: unknown): AvwapWhatIf | null {
 }
 
 function isPrimaryExit(value: unknown): value is AvwapPrimaryExit {
-  return value === "target50" || value === "stop35" || value === "day3" || value === "expiry";
+  return value === "target50" || value === "preExpiry" || value === "expiry";
 }
 
 function isExitReason(value: unknown): value is AvwapExitReason {

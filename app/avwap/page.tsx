@@ -157,7 +157,7 @@ export default function AvwapPage() {
           <span style={{ color: "#06b6d4" }}>▣</span> AVWAP Paper
         </h1>
         <p style={{ margin: "6px 0 0", color: "#94a3b8", fontSize: 15, lineHeight: 1.45 }}>
-          Paper only. No order is placed. The 5-minute scan prices these rows on the live option bid from Tastytrade or Schwab.
+          Paper only. No order is placed. Exits use the live option bid from Tastytrade or Schwab: sell at +50%, or on the final scan of the last trading day before expiration.
         </p>
         <PageLinks current="avwap" />
       </div>
