@@ -45,6 +45,14 @@
     {
       "path": "/api/cron/candles",
       "schedule": "30 21 * * 1-5"
+    },
+    {
+      "path": "/api/cron/daily-note",
+      "schedule": "5 20 * * 1-5"
+    },
+    {
+      "path": "/api/cron/daily-note",
+      "schedule": "5 21 * * 1-5"
     }
   ]
 }

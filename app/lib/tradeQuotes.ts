@@ -4,7 +4,8 @@ import { FLOW_BATCH_SIZE } from "@/app/lib/flow";
 import { findContract, checkBidAskSpread } from "@/app/lib/gate";
 import { normalizeOptionSymbol, schwabOptionSymbol } from "@/app/lib/optionSymbol";
 import { preferredDataSource } from "@/app/lib/dataSourcePref";
-import { getOptionChain, getQuoteEntries, isFatalSchwabError, marketDataConfigured, rethrowIfSchwabOnly } from "@/app/lib/marketData";
+import { namedSource } from "@/app/lib/providerCopy";
+import { BothSourcesFailedError, getOptionChain, getQuoteEntries, isFatalSchwabError, marketDataConfigured, rethrowIfSchwabOnly } from "@/app/lib/marketData";
 import { SchwabConfigError, SchwabNotConnectedError, type QuoteEntriesResult } from "@/app/lib/schwab";
 
 /**
@@ -141,13 +142,37 @@ export interface PaperQuoteBatch {
   misses: Record<string, string>;
 }
 
-const QUOTE_NOT_CONFIGURED = "Schwab is not configured.";
-const QUOTE_NOT_CONNECTED = "Schwab is not connected.";
-const QUOTE_TIMEOUT = "The Schwab quote timed out.";
-const QUOTE_FAILED = "The Schwab quote failed.";
 const QUOTE_UNBUILT = "The option symbol could not be built.";
-const QUOTE_NO_MARKET = "Schwab returned a quote with no bid and no mid.";
-const QUOTE_NOT_RETURNED = "Schwab did not return this option.";
+
+function quoteNotConfigured(): string {
+  return preferredDataSource() === "tastytrade"
+    ? "Tastytrade is not configured."
+    : "Schwab is not configured.";
+}
+
+function quoteNotConnected(): string {
+  return "Schwab is not connected.";
+}
+
+function quoteTimedOut(): string {
+  return `The ${namedSource()} quote timed out.`;
+}
+
+function quoteFailed(): string {
+  return `The ${namedSource()} quote failed.`;
+}
+
+function quoteNoMarket(): string {
+  return preferredDataSource() === "tastytrade"
+    ? "Tastytrade returned a quote with no bid and no mid."
+    : "Schwab returned a quote with no bid and no mid.";
+}
+
+function quoteNotReturned(): string {
+  return preferredDataSource() === "tastytrade"
+    ? "Tastytrade did not return this option."
+    : "Schwab did not return this option.";
+}
 
 export async function quoteOpenPaperTrades(
   trades: readonly Quotable[],
@@ -155,7 +180,7 @@ export async function quoteOpenPaperTrades(
 ): Promise<PaperQuoteBatch> {
   const open = trades.filter((trade) => trade.closedAt == null);
   if (open.length === 0) return { quotes: {}, misses: {} };
-  if (!marketDataConfigured()) return { quotes: {}, misses: missAll(open, QUOTE_NOT_CONFIGURED) };
+  if (!marketDataConfigured()) return { quotes: {}, misses: missAll(open, quoteNotConfigured()) };
   try {
     return await withDeadline((signal) => fetchPaperQuotes(open, signal), timeoutMs);
   } catch (err) {
@@ -216,15 +241,15 @@ async function fetchPaperQuotes(
       claimed.add(key);
       const quote = paperQuoteFromContract(read.entries[j].contract);
       if (!quote) {
-        stamp(misses, ids, QUOTE_NO_MARKET);
-        logQuoteMiss(read.entries[j].symbol, QUOTE_NO_MARKET);
+        stamp(misses, ids, quoteNoMarket());
+        logQuoteMiss(read.entries[j].symbol, quoteNoMarket());
         continue;
       }
       for (let k = 0; k < ids.length; k++) quotes[ids[k]] = quote;
     }
     const missingReason = read.entries.length === 0
-      ? (read.problem ?? QUOTE_NOT_RETURNED)
-      : QUOTE_NOT_RETURNED;
+      ? (read.problem ?? quoteNotReturned())
+      : quoteNotReturned();
     for (let j = 0; j < batch.length; j++) {
       if (claimed.has(normalizeOptionSymbol(batch[j].symbol))) continue;
       stamp(misses, batch[j].ids, missingReason);
@@ -278,14 +303,18 @@ function logQuoteMiss(symbol: string, reason: string): void {
 }
 
 function quoteFailureReason(err: unknown): string {
-  if (isAbort(err)) return QUOTE_TIMEOUT;
-  if (err instanceof SchwabNotConnectedError) return QUOTE_NOT_CONNECTED;
-  if (err instanceof SchwabConfigError) return QUOTE_NOT_CONFIGURED;
-  if (err instanceof Error) {
-    const status = /Schwab market data request failed \((\d{3})\)/.exec(err.message);
-    if (status) return `Schwab market data request failed (${status[1]}).`;
+  if (err instanceof BothSourcesFailedError) return err.message.slice(0, 180);
+  if (isAbort(err)) return quoteTimedOut();
+  if (preferredDataSource() === "tastytrade" && (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError)) {
+    return "Tastytrade did not return this quote. Schwab backup is not connected.";
   }
-  return QUOTE_FAILED;
+  if (err instanceof SchwabNotConnectedError) return quoteNotConnected();
+  if (err instanceof SchwabConfigError) return quoteNotConfigured();
+  if (err instanceof Error) {
+    const status = /failed \((\d{3})\)/.exec(err.message);
+    if (status) return `${namedSource()} market data request failed (${status[1]}).`;
+  }
+  return quoteFailed();
 }
 
 function isAbort(err: unknown): boolean {

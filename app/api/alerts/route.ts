@@ -14,6 +14,7 @@ import { denyIfUnauthorized } from "@/app/lib/auth";
 import { flowCronSliceNote, planCronScan, selectAlertRows, watchlistFromEnv } from "@/app/lib/flow";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import { preferredDataSource } from "@/app/lib/dataSourcePref";
+import { providerFailureText } from "@/app/lib/providerCopy";
 import { BothSourcesFailedError, isSchwabBackupMiss } from "@/app/lib/marketData";
 import { noteBrowserScan } from "@/app/lib/pageScan";
 import { normalizeSkippedTickers } from "@/app/lib/scanHealth";
@@ -188,9 +189,7 @@ export async function GET(request: NextRequest) {
     if (err instanceof SchwabConfigError) {
       return NextResponse.json({ error: err.message, connected: false }, { status: 503 });
     }
-    const message = err instanceof Error && err.message.startsWith("Schwab ")
-      ? err.message.slice(0, 180)
-      : "Alert scan failed";
+    const message = providerFailureText(err, preferredDataSource() === "tastytrade" ? "Tastytrade market data request failed." : "Alert scan failed");
     console.error("Alert error:", message);
     return NextResponse.json({ error: message }, { status: 500 });
   }

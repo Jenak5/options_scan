@@ -7,6 +7,7 @@ import { evaluateGate, findContract } from "@/app/lib/gate";
 import { earningsForTicker } from "@/app/lib/earnings";
 import { keyLevelsForTicker } from "@/app/lib/levelScan";
 import { preferredDataSource } from "@/app/lib/dataSourcePref";
+import { providerFailureText } from "@/app/lib/providerCopy";
 import { getOptionChain, isSchwabBackupMiss } from "@/app/lib/marketData";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { gradeContract } from "@/app/lib/verdict";
@@ -127,7 +128,10 @@ export async function POST(request: NextRequest) {
     if (err instanceof SchwabConfigError) {
       return NextResponse.json({ error: err.message }, { status: 503 });
     }
-    const message = err instanceof Error ? safeMessage(err.message) : "Schwab market data request failed";
+    const message = providerFailureText(
+      err,
+      preferredDataSource() === "tastytrade" ? "Tastytrade market data request failed. Try again." : "Schwab market data request failed",
+    );
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }
@@ -243,7 +247,3 @@ function exitPlan(input: GateBody, ask: number | null) {
   return planExits({ premium, contracts, structure });
 }
 
-function safeMessage(message: string): string {
-  if (message.startsWith("Schwab ")) return message.slice(0, 180);
-  return preferredDataSource() === "tastytrade" ? "Market data request failed. Try again." : "Schwab market data request failed";
-}

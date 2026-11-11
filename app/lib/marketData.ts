@@ -147,9 +147,12 @@ async function note(kind: DataKind, label: string, source: DataSource, reason: s
   if (fallback) {
     fallbacks += 1;
     // "partial" marks the served record. It must not replace the Tastytrade reason.
-    if (reason && reason !== "partial") lastError = redactMarketText(reason);
+    if (reason && reason !== "partial") lastError = publicPrimaryReason(reason);
   }
-  if (source === "tastytrade" && !fallback) lastTastytradeSuccessAt = at;
+  if (source === "tastytrade" && !fallback) {
+    lastTastytradeSuccessAt = at;
+    backupNote = null;
+  }
   const tail = fallback ? ` (fallback: ${reason})` : "";
   console.info(`[market-data] ${kind} ${label} served by ${source}${tail}`);
   await persistStatus();
@@ -195,16 +198,23 @@ function backupFailureReason(err: unknown): string {
   if (err instanceof schwab.SchwabNotConnectedError || err instanceof schwab.SchwabConfigError) {
     return "Schwab backup not connected";
   }
-  if (err instanceof Error && /token refresh failed/i.test(err.message)) return "Schwab token refresh failed";
+  if (err instanceof Error && /token refresh failed/i.test(err.message)) return "Schwab backup token refresh failed";
   if (err instanceof Error) {
     const status = /failed \((\d{3})\)/.exec(err.message);
-    if (status) return `Schwab ${status[1]}`;
+    if (status) return `Schwab backup returned ${status[1]}`;
   }
   return "Schwab backup failed";
 }
 
+/** The miss that caused a fallback. Timeouts are named as Tastytrade, not Schwab. */
+function publicPrimaryReason(reason: string): string {
+  const text = redactMarketText(reason);
+  if (/timeout|timed out|exceeded \d+\s*s/i.test(text)) return "Tastytrade timed out";
+  return text;
+}
+
 async function failBoth(label: string, primaryReason: string, backupReason: string): Promise<BothSourcesFailedError> {
-  const primary = redactMarketText(primaryReason);
+  const primary = publicPrimaryReason(primaryReason);
   const disconnected = backupReason === SCHWAB_BACKUP_NOT_CONNECTED;
   lastError = primary;
   if (disconnected) backupNote = SCHWAB_BACKUP_NOT_CONNECTED;
@@ -214,7 +224,7 @@ async function failBoth(label: string, primaryReason: string, backupReason: stri
 }
 
 function logSkip(label: string, primaryReason: string, backupReason: string): void {
-  const primary = redactMarketText(primaryReason);
+  const primary = publicPrimaryReason(primaryReason);
   lastError = primary;
   if (backupReason === SCHWAB_BACKUP_NOT_CONNECTED) {
     backupNote = SCHWAB_BACKUP_NOT_CONNECTED;

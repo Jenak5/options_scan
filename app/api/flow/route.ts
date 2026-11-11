@@ -16,6 +16,7 @@ import {
 import { pinTodayAlerts } from "@/app/lib/flowAlerts";
 import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import { preferredDataSource } from "@/app/lib/dataSourcePref";
+import { providerFailureText } from "@/app/lib/providerCopy";
 import { BothSourcesFailedError, isSchwabBackupMiss } from "@/app/lib/marketData";
 import { chicagoDate, isChicagoMarketHours, isMarketDay, isNyseHoliday } from "@/app/lib/marketHours";
 import { noteBrowserScan, recordFlowPageSession } from "@/app/lib/pageScan";
@@ -173,10 +174,11 @@ async function handleFlow(request: NextRequest) {
         verdictBanner: verdictBanner(),
       }, { status: 503 });
     }
-    const message = err instanceof Error && err.message.startsWith("Schwab ")
-      ? err.message.slice(0, 180)
-      : preferredDataSource() === "tastytrade" ? "Market data request failed. Tap Refresh to retry." : "Schwab market data request failed";
-    // Only a Schwab-only setup reports "not connected", so a Tastytrade hiccup never asks for a Schwab reconnect.
+    const message = providerFailureText(
+      err,
+      preferredDataSource() === "tastytrade" ? "Tastytrade market data request failed. Tap Refresh to retry." : "Schwab market data request failed",
+    );
+    // Only a Schwab-only setup includes a reconnect URL. A Tastytrade miss names Tastytrade.
     return NextResponse.json({ error: message, connected: preferredDataSource() === "tastytrade" }, { status: 502 });
   }
 }

@@ -4,13 +4,12 @@ import { parseAvwapPaperBook } from "@/app/lib/avwapPaper";
 import { parseCallsPaperBook } from "@/app/lib/callsPaper";
 import { hasHealthBearer } from "@/app/lib/auth";
 import { buildMarketBrief } from "@/app/lib/brief";
-import { loadMarketDataHealth } from "@/app/lib/marketData";
+import { healthTastytradeEnabled, loadMarketDataHealth } from "@/app/lib/marketData";
 import { buildHealthReport, countShadowTotals } from "@/app/lib/healthReport";
 import { emptyScanHealth } from "@/app/lib/scanHealth";
 import { getSchwabStatus } from "@/app/lib/schwab";
 import { readAvwapPaperBookText, readCallsPaperBookText, readScanHealth, readShadowBookText, readTradeLogText } from "@/app/lib/schwabStore";
 import { parseShadowBook } from "@/app/lib/shadow";
-import { tastytradeEnabled } from "@/app/lib/tastytrade";
 import { quoteOpenPaperTrades } from "@/app/lib/tradeQuotes";
 import { parseTradeLog } from "@/app/lib/trades";
 import { readUnusualBook } from "@/app/lib/unusualFlowStore";
@@ -55,7 +54,7 @@ export async function GET(request: NextRequest) {
   const scan = buildHealthReport({
     health,
     schwabConnected: schwab,
-    tastytradeEnabled: tastytradeEnabled(),
+    tastytradeEnabled: healthTastytradeEnabled(marketData),
     alerts: book.records,
     openShadows: totals.openShadows,
     resolvedShadows: totals.resolvedShadows,

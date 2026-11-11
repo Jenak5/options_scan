@@ -8,6 +8,7 @@ import {
   type LetterGrade,
 } from "@/app/lib/alertConfig";
 import type { OptionContract, PutCall } from "@/app/lib/contract";
+import { delayedChainBlocked, delayedChainDetail, missingQuoteTimeDetail } from "@/app/lib/providerCopy";
 import { assessEventRisk, type EarningsFact } from "@/app/lib/eventRisk";
 import {
   calendarDaysBetween,
@@ -324,7 +325,7 @@ function quoteFreshness(input: GradeMyTradeInput): Freshness {
     return {
       state: "delayed",
       quotedAt,
-      detail: "Schwab marked this chain delayed. Real-time data is required.",
+      detail: delayedChainDetail(),
     };
   }
   if (!isChicagoMarketHours(input.now)) {
@@ -339,7 +340,7 @@ function quoteFreshness(input: GradeMyTradeInput): Freshness {
     return {
       state: "untimed",
       quotedAt: null,
-      detail: "Schwab did not send a quote time, so this quote cannot be checked for staleness.",
+      detail: missingQuoteTimeDetail(),
     };
   }
   const quoteClock = chicagoClock(new Date(quotedAt));
@@ -366,7 +367,7 @@ function quoteFreshness(input: GradeMyTradeInput): Freshness {
 function applyFreshness(checks: GradeCheckRow[], freshness: Freshness): GradeCheckRow[] {
   if (freshness.state === "live") return checks;
   const blocked = freshness.state === "delayed"
-    ? "Schwab marked this chain delayed, so this was not counted as a pass."
+    ? delayedChainBlocked()
     : freshness.detail;
   return checks.map((check) => {
     if (!QUOTE_CHECK_IDS.has(check.id)) return check;

@@ -14,6 +14,7 @@ import {
   storedMarkNote,
 } from "@/app/lib/brief";
 import { buildHealthReport } from "@/app/lib/healthReport";
+import { recordMarketData, resetDataSourceStatsForTests } from "@/app/lib/marketData";
 import { chicagoDate, isChicagoMarketHours } from "@/app/lib/marketHours";
 import { emptyScanHealth } from "@/app/lib/scanHealth";
 import {
@@ -41,7 +42,10 @@ const ENV_KEYS = [
   "CRON_SECRET",
   "SESSION_SECRET",
   "TASTYTRADE_ENABLED",
+  "TASTYTRADE_CLIENT_ID",
   "TASTYTRADE_CLIENT_SECRET",
+  "MARKET_DATA_PRIMARY",
+  "DATA_SOURCE",
   "TASTYTRADE_REFRESH_TOKEN",
   "TASTYTRADE_ACCOUNT_NUMBER",
   "SCHWAB_CLIENT_ID",
@@ -815,6 +819,7 @@ describe("GET /api/brief", () => {
       delete saved[key];
     }
     clearMemoryStoreForTests();
+    resetDataSourceStatsForTests();
     vi.restoreAllMocks();
   });
 
@@ -866,7 +871,7 @@ describe("GET /api/brief", () => {
     expect(body.scan.lastCronAt).toBe("2026-10-07T17:00:00.000Z");
     expect(body.scan.lastCronOutcome).toBe("success");
     expect(body.scan.schwabConnected).toBe(false);
-    expect(body.scan.tastytradeEnabled).toBe(true);
+    expect(body.scan.tastytradeEnabled).toBe(false);
     expect(body.scan.rulesVersion).toBe(3);
     expect(body.paper.note).toBe(NO_TRADES_NOTE);
     expect(body.marksNote).toBe(MARKS_NOTE);
@@ -882,6 +887,30 @@ describe("GET /api/brief", () => {
     expect(chain).not.toHaveBeenCalled();
     expect(marked).not.toHaveBeenCalled();
     expect(quoted).not.toHaveBeenCalled();
+  });
+
+  it("reports Tastytrade as the primary source after it has served data, without the old account flag", async () => {
+    rememberEnv(saved);
+    process.env.HEALTH_TOKEN = "health-token";
+    delete process.env.TASTYTRADE_ENABLED;
+    delete process.env.DATA_SOURCE;
+    process.env.MARKET_DATA_PRIMARY = "tastytrade";
+    process.env.TASTYTRADE_CLIENT_ID = "client-id";
+    process.env.TASTYTRADE_CLIENT_SECRET = "client-secret";
+    process.env.TASTYTRADE_REFRESH_TOKEN = "refresh-token";
+    clearMemoryStoreForTests();
+    resetDataSourceStatsForTests();
+    await recordMarketData("chain", "tastytrade", null, "SPY");
+    vi.spyOn(schwab, "getOptionChain").mockRejectedValue(new Error("brief must not call Schwab"));
+
+    const allowed = await GET(new NextRequest("https://options-scan.vercel.app/api/brief", {
+      headers: { authorization: "Bearer health-token" },
+    }));
+    expect(allowed.status).toBe(200);
+    const body = await allowed.json();
+    expect(body.scan.tastytradeEnabled).toBe(true);
+    expect(body.scan.marketData.primary).toBe("tastytrade");
+    expect(body.scan.marketData.preferred).toBe("tastytrade");
   });
 
   it("returns a live bid, ask, and mid for an open paper trade and does not write", async () => {

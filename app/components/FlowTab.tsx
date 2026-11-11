@@ -7,6 +7,7 @@ import { flowRowLabels, suggestedExitText } from "@/app/lib/scanLabels";
 import { arrangeFlowCards, dedupeShownAlerts, type FlowSort, type RightFilter, type VerdictFilter } from "@/app/components/flowArrange";
 import { defaultTimeStop, planExitsForAsk } from "@/app/lib/exits";
 import { FLOW_DISCLAIMER, gateCheckHref, type FlowRow } from "@/app/lib/flow";
+import { flowPageFailure } from "@/app/lib/flowPageError";
 import {
   LIKELY_SIDE_NOTE,
   OPENING_NOTE,
@@ -42,7 +43,7 @@ export function FlowTab() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [disconnected, setDisconnected] = useState(false);
-  const [reconnect, setReconnect] = useState("/api/schwab/connect");
+  const [reconnect, setReconnect] = useState("");
   const [disclaimer, setDisclaimer] = useState(FLOW_DISCLAIMER);
   const [verdictNote, setVerdictNote] = useState("");
   const [dailyStop, setDailyStop] = useState(false);
@@ -82,14 +83,15 @@ export function FlowTab() {
         setDailyStop(json.dailyStop === true);
         setWeeklyNote(typeof json.weeklyNote === "string" && json.weeklyNote ? json.weeklyNote : null);
         setWatchlistNote(typeof json.watchlistNote === "string" && json.watchlistNote ? json.watchlistNote : null);
-        if (json.connected === false || res.status === 409 || res.status === 503) {
+        const failure = flowPageFailure(res.status, json);
+        if (failure?.kind === "reconnect") {
           setDisconnected(true);
-          setReconnect(typeof json.reconnect === "string" ? json.reconnect : "");
-          setError(typeof json.error === "string" ? json.error : "Schwab is not connected. Use Reconnect Schwab.");
+          setReconnect(failure.href);
+          setError(failure.message);
           setFlows([]);
           return;
         }
-        if (!res.ok || json.error) throw new Error(json.error || "Flow scan failed");
+        if (failure?.kind === "error") throw new Error(failure.message);
         if (Array.isArray(json.data)) collected.push(...json.data);
         if (Array.isArray(json.errors)) {
           for (const item of json.errors) {

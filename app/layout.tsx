@@ -3,7 +3,7 @@ import { SchwabBanner } from "@/app/components/SchwabBanner";
 
 export const metadata: Metadata = {
   title: "Options Edge Scanner",
-  description: "Read-only options scanner with a Schwab trade gate",
+  description: "Read-only options scanner",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

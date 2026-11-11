@@ -20,6 +20,8 @@ interface SchwabStatus {
   warnRefreshSoon: boolean;
   message: string;
   notice?: ConnectionNotice;
+  schwabIsBackup?: boolean;
+  reconnectLabel?: string | null;
 }
 
 type NoticeKind = "success" | "error" | null;
@@ -78,11 +80,14 @@ export function SchwabBanner() {
 
   if (hidden) return null;
 
-  const storageWarning = status?.storageWarning ?? (status?.storage === "unconfigured" ? SCHWAB_STORAGE_UNCONFIGURED_MESSAGE : null);
+  const quiet = status?.schwabIsBackup === true && !status.reconnectLabel;
+  const reconnectLabel = noticeKind === "error" ? "Reconnect Schwab" : status?.reconnectLabel ?? null;
+  const storageWarning = quiet ? null : (status?.storageWarning ?? (status?.storage === "unconfigured" ? SCHWAB_STORAGE_UNCONFIGURED_MESSAGE : null));
   const showStorage = Boolean(storageWarning) && storageWarning !== notice;
   const severity = status?.notice?.severity ?? "ok";
   const lines = status?.notice?.lines ?? [];
   const backupOnly = lines.includes(SCHWAB_BACKUP_NOTE);
+  const showStatusMessage = !quiet && !loadError && !backupOnly && Boolean(status?.message) && status?.message !== notice && status?.message !== storageWarning && !lines.includes(status?.message ?? "");
   const urgent = severity === "down" || severity === "warn" || noticeKind === "error" || Boolean(storageWarning);
   const success = noticeKind === "success" && !urgent;
 
@@ -101,6 +106,10 @@ export function SchwabBanner() {
         ? "rgba(245,158,11,0.12)"
         : "rgba(255,255,255,0.03)";
   const color = success ? "#6ee7b7" : urgent ? "#fde68a" : "#94a3b8";
+  const showChecking = !loadError && !status;
+  const showAccessRefresh = !quiet && status?.connected === true && status.accessExpired && !status.refreshExpired;
+  const showBanner = Boolean(notice) || showStorage || lines.length > 0 || loadError || showStatusMessage || showChecking || showAccessRefresh || Boolean(reconnectLabel);
+  if (!showBanner) return null;
 
   return (
     <div style={{ padding: "12px 24px 0" }}>
@@ -128,36 +137,38 @@ export function SchwabBanner() {
             <div style={{ color: "#fbbf24", marginBottom: 4, fontWeight: 700 }}>{storageWarning}</div>
           )}
           {lines.map((line) => {
-            const quiet = line === SCHWAB_BACKUP_NOTE;
+            const backupLine = line === SCHWAB_BACKUP_NOTE;
             return (
-              <div key={line} style={{ marginTop: 4, fontWeight: quiet ? 500 : 700, color: quiet ? "#94a3b8" : severity === "down" ? "#fecaca" : "#fde68a" }}>
+              <div key={line} style={{ marginTop: 4, fontWeight: backupLine ? 500 : 700, color: backupLine ? "#94a3b8" : severity === "down" ? "#fecaca" : "#fde68a" }}>
                 {line}
               </div>
             );
           })}
-          {loadError && "Schwab status is unavailable."}
-          {!loadError && !backupOnly && status?.message && status.message !== notice && status.message !== storageWarning && !lines.includes(status.message) && status.message}
-          {!loadError && !status && "Checking Schwab…"}
-          {status?.connected && status.accessExpired && !status.refreshExpired && (
+          {loadError && "Status is unavailable."}
+          {showStatusMessage && status?.message}
+          {showChecking && "Checking status…"}
+          {showAccessRefresh && (
             <div style={{ marginTop: 4 }}>The access token will refresh on the next quote.</div>
           )}
         </div>
-        <a
-          href="/api/schwab/connect"
-          style={{
-            background: "rgba(6,182,212,0.15)",
-            color: "#06b6d4",
-            border: "1px solid rgba(6,182,212,0.35)",
-            borderRadius: 6,
-            padding: "8px 14px",
-            fontSize: 14,
-            fontWeight: 700,
-            textDecoration: "none",
-            whiteSpace: "nowrap",
-          }}
-        >
-          Reconnect Schwab
-        </a>
+        {reconnectLabel && (
+          <a
+            href="/api/schwab/connect"
+            style={{
+              background: "rgba(6,182,212,0.15)",
+              color: "#06b6d4",
+              border: "1px solid rgba(6,182,212,0.35)",
+              borderRadius: 6,
+              padding: "8px 14px",
+              fontSize: 14,
+              fontWeight: 700,
+              textDecoration: "none",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {reconnectLabel}
+          </a>
+        )}
       </div>
     </div>
   );

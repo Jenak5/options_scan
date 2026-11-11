@@ -1,4 +1,5 @@
 import type { OptionContract, PutCall } from "@/app/lib/contract";
+import { namedSource } from "@/app/lib/providerCopy";
 
 /**
  * Vol arb from a Schwab chain and Schwab daily closes.
@@ -7,16 +8,16 @@ import type { OptionContract, PutCall } from "@/app/lib/contract";
  */
 
 export const VOL_DISCLAIMER =
-  "Research view only, from Schwab market data. The app does not place orders. Cards are sorted by IV minus 20-day realized vol, cheapest first. CHEAP means ATM implied vol is at least 5 percentage points below that realized vol. RICH means it is at least 8 points above. A small positive gap is normal. This is not a 52-week IV rank.";
+  `Research view only, from ${namedSource()} market data. The app does not place orders. Cards are sorted by IV minus 20-day realized vol, cheapest first. CHEAP means ATM implied vol is at least 5 percentage points below that realized vol. RICH means it is at least 8 points above. A small positive gap is normal. This is not a 52-week IV rank.`;
 
 export const VOL_DEFINITIONS: ReadonlyArray<{ label: string; text: string }> = [
   {
     label: "ATM IV (~30d)",
-    text: "Schwab implied vol of the at-the-money call and put, averaged, on the expiration closest to 30 days.",
+    text: `${namedSource()} implied vol of the at-the-money call and put, averaged, on the expiration closest to 30 days.`,
   },
   {
     label: "RV 20d",
-    text: "Close-to-close realized vol from the last 20 sessions of Schwab daily prices, annualized with 252 trading days.",
+    text: `Close-to-close realized vol from the last 20 sessions of ${namedSource()} daily prices, annualized with 252 trading days.`,
   },
   {
     label: "RV 10d",
@@ -158,7 +159,7 @@ export function realizedVol(closes: number[], window: number, tradingDays: numbe
 /** One alert line. Same signal and numbers as the Vol Arb tab. */
 export function formatVolArbSummary(reading: VolArbReading): string {
   if (reading.atmIv30 == null || reading.rv20 == null || reading.ivRvSpread == null || reading.signal === "NO_READ") {
-    return reading.message ?? "Schwab did not return ATM IV and 20-day realized vol.";
+    return reading.message ?? `${namedSource()} did not return ATM IV and 20-day realized vol.`;
   }
   const spread = `${reading.ivRvSpread > 0 ? "+" : ""}${reading.ivRvSpread.toFixed(1)}`;
   return `${reading.signal} — ATM IV ${reading.atmIv30.toFixed(1)}% vs RV 20d ${reading.rv20.toFixed(1)}% (${spread})`;
@@ -178,7 +179,7 @@ export function buildVolArbReading(input: VolArbInput): VolArbReading {
   if (input.delayed) {
     return emptyReading(symbol, null, {
       status: "delayed",
-      message: "Schwab marked this chain delayed. Real-time implied vol is required, so these numbers are withheld.",
+      message: `${namedSource()} marked this chain delayed. Real-time implied vol is required, so these numbers are withheld.`,
     });
   }
   if (!symbol) {
@@ -209,15 +210,15 @@ export function buildVolArbReading(input: VolArbInput): VolArbReading {
   let message: string | null = null;
   if (atmIv30 == null && rv20 == null) {
     status = "missing";
-    message = "Schwab did not return implied vol or enough daily prices for this symbol.";
+    message = `${namedSource()} did not return implied vol or enough daily prices for this symbol.`;
   } else if (atmIv30 == null) {
     status = "missing";
-    message = "Schwab chain had no usable at-the-money implied vol. Realized vol is from Schwab daily prices.";
+    message = `${namedSource()} chain had no usable at-the-money implied vol. Realized vol is from ${namedSource()} daily prices.`;
   } else if (rv20 == null) {
     status = "missing";
     message = input.priceHistoryFailed
-      ? "Schwab daily prices did not load, so realized vol is missing. Implied vol is from the chain."
-      : "Not enough Schwab daily prices to compute 20-day realized vol. Implied vol is from the chain.";
+      ? `${namedSource()} daily prices did not load, so realized vol is missing. Implied vol is from the chain.`
+      : `Not enough ${namedSource()} daily prices to compute 20-day realized vol. Implied vol is from the chain.`;
   }
 
   const signalNote = status === "ok" && ivRvSpread != null

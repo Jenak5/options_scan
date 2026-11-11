@@ -23,7 +23,8 @@ import { keyLevelsForTicker, prefetchLevelHistory } from "@/app/lib/levelScan";
 import { annotateFlowRows, carryPriorSession } from "@/app/lib/marketContext";
 import { chainInterestFromContracts, type ChainInterest } from "@/app/lib/openingCheck";
 import { quotePointFromContract, type FlowQuotePoint } from "@/app/lib/prints";
-import { BothSourcesFailedError, getOptionChain, requireMarketData, rethrowIfSchwabOnly } from "@/app/lib/marketData";
+import { getOptionChain, requireMarketData, rethrowIfSchwabOnly } from "@/app/lib/marketData";
+import { describeScanError } from "@/app/lib/providerCopy";
 import { getTradeSideDataAvailable } from "@/app/lib/marketDataHealth";
 import { readFlowSnapshots, writeFlowSnapshots } from "@/app/lib/schwabStore";
 
@@ -401,9 +402,5 @@ export function budgetBlocks(now: number, deadline: number | null | undefined): 
 }
 
 function safeScanMessage(err: unknown): string {
-  if (err instanceof BothSourcesFailedError) return err.message.slice(0, 180);
-  if (err instanceof Error && err.message.trim()) {
-    return err.message.replace(/bearer\s+\S+/gi, "bearer [redacted]").replace(/\s+/g, " ").slice(0, 180);
-  }
-  return "Market data request failed";
+  return describeScanError(err);
 }
