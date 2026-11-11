@@ -23,8 +23,8 @@ describe("JG-VWAP backtest signal", () => {
     const missing = jgReplayMissing().join(" ");
     expect(missing).toMatch(/5-minute/);
     expect(missing).toMatch(/2018-05-01/);
-    expect(missing).toMatch(/VXN/);
     expect(missing).toMatch(/VIX/);
+    expect(missing).toMatch(/QQQ and for SPX/);
     const noVol = jgFindSignal({
       bars: [],
       daily: [
@@ -32,13 +32,13 @@ describe("JG-VWAP backtest signal", () => {
         { date: "2024-04-02", high: 1, low: 1, close: 1 },
       ],
       volIndex: null,
-      volSymbol: "VXN",
+      volSymbol: "VIX",
       day: "2024-04-04",
       nowMs: Date.parse("2024-04-04T20:00:00.000Z"),
       atrUsed: null,
     });
     expect(noVol.status).toBe("none");
-    if (noVol.status === "none") expect(noVol.reason).toMatch(/VXN/);
+    if (noVol.status === "none") expect(noVol.reason).toMatch(/VIX prior close/);
   });
 
   it("takes the first call retest and rejects a VWAP break of -0.10", () => {
@@ -47,7 +47,7 @@ describe("JG-VWAP backtest signal", () => {
       bars: call.bars,
       daily: call.daily,
       volIndex: 20,
-      volSymbol: "VXN",
+      volSymbol: "VIX",
       day: call.day,
       nowMs: call.nowMs,
       atrUsed: 0.5,
@@ -66,7 +66,7 @@ describe("JG-VWAP backtest signal", () => {
       bars: rejected.bars,
       daily: rejected.daily,
       volIndex: 20,
-      volSymbol: "VXN",
+      volSymbol: "VIX",
       day: rejected.day,
       nowMs: rejected.nowMs,
       atrUsed: 0.5,
@@ -81,7 +81,7 @@ describe("JG-VWAP backtest signal", () => {
       bars: call.bars,
       daily: call.daily,
       volIndex: 20,
-      volSymbol: "VXN",
+      volSymbol: "VIX",
       day: call.day,
       nowMs: call.nowMs,
       atrUsed: null,
@@ -95,7 +95,7 @@ describe("JG-VWAP backtest signal", () => {
       bars: call.bars,
       daily: call.daily,
       volIndex: 20,
-      volSymbol: "VXN",
+      volSymbol: "VIX",
       day: call.day,
       nowMs: call.nowMs,
       atrUsed: 0.5,

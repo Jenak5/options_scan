@@ -18,7 +18,7 @@ const EXPECTED = [
 ];
 
 const daily = loadDaily();
-const vxn = loadVxn();
+const vol = loadVol();
 
 describe("JG-VWAP fixture replay", () => {
   it.each(EXPECTED)("$date matches the backtest", (row) => {
@@ -49,8 +49,8 @@ function replay(day: string): {
   const result = jgFindSignal({
     bars,
     daily,
-    volIndex: priorVxn(day),
-    volSymbol: "VXN",
+    volIndex: priorVol(day),
+    volSymbol: "VIX",
     day,
     nowMs: last.t + 5 * 60_000,
     atrUsed: null,
@@ -77,17 +77,17 @@ function loadDaily(): JgDailyBar[] {
   });
 }
 
-function loadVxn(): { date: string; close: number }[] {
-  return readFileSync(join(DIR, "vxn_daily.csv"), "utf8").trim().split("\n").slice(1).map((line) => {
+function loadVol(): { date: string; close: number }[] {
+  return readFileSync(join(DIR, "vol_daily.csv"), "utf8").trim().split("\n").slice(1).map((line) => {
     const [date, close] = line.split(",");
     return { date, close: Number(close) };
   }).filter((row) => Number.isFinite(row.close));
 }
 
-function priorVxn(day: string): number | null {
+function priorVol(day: string): number | null {
   let close: number | null = null;
-  for (let i = 0; i < vxn.length; i++) {
-    if (vxn[i].date < day) close = vxn[i].close;
+  for (let i = 0; i < vol.length; i++) {
+    if (vol[i].date < day) close = vol[i].close;
   }
   return close;
 }

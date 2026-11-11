@@ -518,7 +518,7 @@ async function handleCron(request: NextRequest) {
       now,
       outcome,
       reason: timeBudget ? "time budget" : null,
-      beforeSchwab: countsBefore.schwab,
+      before: countsBefore,
       qualifiedKeys: qualifiedSetupKeys(graded, tradingDay),
       alertsSent,
     });
@@ -533,7 +533,7 @@ async function handleCron(request: NextRequest) {
         now,
         outcome: "skipped",
         reason: err.message,
-        beforeSchwab: countsBefore.schwab,
+        before: countsBefore,
         qualifiedKeys: [],
         alertsSent,
       });
@@ -552,7 +552,7 @@ async function handleCron(request: NextRequest) {
         now,
         outcome,
         reason: line,
-        beforeSchwab: countsBefore.schwab,
+        before: countsBefore,
         qualifiedKeys: [],
         alertsSent,
       });
@@ -576,7 +576,7 @@ async function handleCron(request: NextRequest) {
       now,
       outcome: "failed",
       reason: message,
-      beforeSchwab: countsBefore.schwab,
+      before: countsBefore,
       qualifiedKeys: [],
       alertsSent,
     });
@@ -606,22 +606,31 @@ async function noteCronScan(input: {
   now: Date;
   outcome: "success" | "partial" | "failed" | "skipped";
   reason: string | null;
-  beforeSchwab: number;
+  before: { tastytrade: number; schwab: number };
   qualifiedKeys: readonly string[];
   alertsSent: number;
 }): Promise<void> {
+  const counts = dataSourceStatus().counts;
   try {
     await recordScanDay({
       at: input.now.getTime(),
       outcome: input.outcome,
       reason: input.reason,
-      usedSchwab: dataSourceStatus().counts.schwab > input.beforeSchwab,
+      tastytradeCalls: callsSince(counts.tastytrade, input.before.tastytrade),
+      schwabCalls: callsSince(counts.schwab, input.before.schwab),
       qualifiedKeys: input.qualifiedKeys,
       alertsSent: input.alertsSent,
     });
   } catch (err) {
     console.warn(err instanceof Error ? err.message : "Could not record the daily scan tally");
   }
+}
+
+/** Calls served during this scan. One Schwab fill does not mark the whole scan as Schwab. */
+function callsSince(after: number, before: number): number {
+  if (!Number.isFinite(after) || !Number.isFinite(before)) return 0;
+  const delta = Math.floor(after - before);
+  return delta > 0 ? delta : 0;
 }
 
 function emptySummary(outcome: ScanRunSummary["outcome"], reason: string | null = null): ScanRunSummary {

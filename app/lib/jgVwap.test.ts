@@ -114,6 +114,7 @@ describe("JG-VWAP budget and filters", () => {
 describe("JG-VWAP paper pass", () => {
   it("logs QQQ in budget and SPX over budget on SPXW when the SPX chain is empty", async () => {
     const seen: string[] = [];
+    const volSeen: string[] = [];
     const messages: string[] = [];
     const deps = memoryDeps({
       history(symbol) {
@@ -126,6 +127,10 @@ describe("JG-VWAP paper pass", () => {
         if (symbol === "SPX") return chain([], null);
         return chain([contract({ strike: 5100, putCall: "call", bid: 9.6, ask: 10, expiration: DAY })], 5100);
       },
+      vol(symbol) {
+        volSeen.push(symbol);
+        return [];
+      },
       send(message) {
         messages.push(message);
         return true;
@@ -134,11 +139,12 @@ describe("JG-VWAP paper pass", () => {
 
     const first = await runJgVwapPaper(NOW, deps.deps);
     expect(seen).toEqual(["QQQ", "SPX", "SPXW"]);
+    expect(volSeen).toEqual(["VIX"]);
     expect(jgChainRoots("SPX")).toEqual(["SPX", "SPXW"]);
     expect(first.opened).toBe(0);
     expect(first.saved).toBe(true);
     expect(first.spxRoot).toBe("SPXW");
-    expect(first.logNote).toMatch(/VXN|VIX|daily closes|5-minute/);
+    expect(first.logNote).toMatch(/VIX|daily closes|5-minute/);
     expect(messages).toHaveLength(0);
     const priced = advanceJgVwap(emptyJgVwapBook(), [
       snapshot("QQQ", "QQQ", 102, 100, [contract({ strike: 102, putCall: "call", bid: 1.9, ask: 2 })]),
@@ -150,10 +156,13 @@ describe("JG-VWAP paper pass", () => {
     expect(qqq).toMatchObject({ contracts: 1, budgetContracts: 4, overBudget: false, putCall: "call", root: "QQQ" });
     expect(spx).toMatchObject({ contracts: 0, budgetContracts: 1, overBudget: true, root: "SPXW" });
     expect(formatJgVwapAlert(qqq as JgVwapTrade)).toContain("ATR used");
+    expect(formatJgVwapAlert(qqq as JgVwapTrade)).toContain("prior close and VIX");
     expect(formatJgVwapAlert(spx as JgVwapTrade)).toContain("Over budget");
     expect(formatJgVwapAlert(qqq as JgVwapTrade)).toContain("Suggested size");
     const card = jgVwapSection(priced.book);
     expect(card.label).toBe("JG-VWAP paper test");
+    expect(card.note).toContain("QQQ and SPX both use VIX");
+    expect(card.note).toContain("prior close × VIX / 100 / sqrt(252)");
     expect(card.buckets.find((bucket) => bucket.key === "QQQ")).toMatchObject({ trades: 0, open: 1 });
     expect(card.buckets.find((bucket) => bucket.key === "SPX-over-budget")).toMatchObject({ open: 1 });
     expect(jgVwapSection(parseJgVwapBook(deps.text())).note).toContain("SPXW");
@@ -405,7 +414,7 @@ describe("JG-VWAP ATR sizing", () => {
     });
     const result = await runJgVwapPaper(NOW, deps.deps);
     expect(result.opened).toBe(0);
-    expect(result.logNote).toMatch(/VXN|daily closes|5-minute/);
+    expect(result.logNote).toMatch(/VIX|daily closes|5-minute/);
     expect(messages).toHaveLength(0);
   });
 
@@ -587,7 +596,7 @@ describe("JG-VWAP 1DTE", () => {
     });
     const result = await runJgVwapPaper(NOW, deps.deps);
     expect(result.opened).toBe(0);
-    expect(result.logNote).toMatch(/VXN|daily closes|5-minute/);
+    expect(result.logNote).toMatch(/VIX|daily closes|5-minute/);
     expect(messages).toHaveLength(0);
   });
 });
@@ -632,7 +641,7 @@ function testSignal(spot: number, vwap: number, atrUsed: number | null): JgSigna
     atrUsed,
     priorClose: spot,
     volIndex,
-    volSymbol: "VXN",
+    volSymbol: "VIX",
   };
 }
 
@@ -698,7 +707,7 @@ function atrDays(count: number, high: number, low: number, close: number): Candl
 function memoryDeps(input: {
   history: (symbol: string) => CandleBar[];
   daily?: (symbol: string) => CandleBar[];
-  vol?: () => CandleBar[];
+  vol?: (symbol: "VIX") => CandleBar[];
   chain: (symbol: string) => ChainParseResult;
   send?: (message: string) => boolean;
 }): { deps: JgVwapDeps; text: () => string | null } {
@@ -706,7 +715,7 @@ function memoryDeps(input: {
   const deps: JgVwapDeps = {
     history: async (symbol) => input.history(symbol),
     daily: async (symbol) => (input.daily ? input.daily(symbol) : []),
-    vol: async () => (input.vol ? input.vol() : []),
+    vol: async (symbol) => (input.vol ? input.vol(symbol) : []),
     chain: async (symbol) => input.chain(symbol),
     readBook: async () => stored,
     writeBook: async (change) => {

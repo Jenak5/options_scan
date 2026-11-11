@@ -32,23 +32,25 @@ describe("daily note copy", () => {
     const tally: DayTally = {
       ...emptyDayTally("2026-11-11"),
       scans: 78,
-      schwabScans: 0,
+      tastytradeCalls: 1200,
+      schwabCalls: 0,
       timedOut: 2,
       failed: 0,
       qualifiedKeys: [],
       alertsSent: 0,
     };
     expect(formatDailyNote(tally, "Tastytrade")).toBe(
-      "Options scanner today: 78 scans ran on Tastytrade (0 used Schwab, 2 timed out). 0 setups qualified, so no alerts were sent.",
+      "Options scanner today: 78 scans ran on Tastytrade (Schwab served 0 of 1200 calls, 2 timed out). 0 setups qualified, so no alerts were sent.",
     );
   });
 
-  it("names Schwab when every scan fell back, and counts qualified setups once", () => {
+  it("names Schwab when Schwab served most calls, and counts qualified setups once", () => {
     const first = applyScanDay(emptyDayTally("2026-11-11"), "2026-11-11", {
       at: Date.parse("2026-11-11T15:00:00.000Z"),
       outcome: "partial",
       reason: "time budget",
-      usedSchwab: true,
+      tastytradeCalls: 2,
+      schwabCalls: 40,
       qualifiedKeys: ["AAPL|2026-11-20|270|call"],
       alertsSent: 1,
     });
@@ -56,15 +58,55 @@ describe("daily note copy", () => {
       at: Date.parse("2026-11-11T15:05:00.000Z"),
       outcome: "success",
       reason: null,
-      usedSchwab: true,
+      tastytradeCalls: 0,
+      schwabCalls: 30,
       qualifiedKeys: ["AAPL|2026-11-20|270|call", "MSFT|2026-11-20|400|put"],
       alertsSent: 0,
     });
     expect(second.scans).toBe(2);
+    expect(second.tastytradeCalls).toBe(2);
+    expect(second.schwabCalls).toBe(70);
     expect(second.qualifiedKeys).toEqual(["AAPL|2026-11-20|270|call", "MSFT|2026-11-20|400|put"]);
     expect(second.timedOut).toBe(1);
     expect(formatDailyNote(second, "Tastytrade")).toBe(
-      "Options scanner today: 2 scans ran on Schwab (2 used Schwab, 1 timed out). 2 setups qualified (A/B), 1 alert was sent.",
+      "Options scanner today: 2 scans ran on Schwab (Schwab served 70 of 72 calls, 1 timed out). 2 setups qualified (A/B), 1 alert was sent.",
+    );
+  });
+
+  it("keeps Tastytrade when Schwab filled only a few calls", () => {
+    const tally = applyScanDay(emptyDayTally("2026-11-11"), "2026-11-11", {
+      at: CST_NOTE.getTime(),
+      outcome: "success",
+      reason: null,
+      tastytradeCalls: 40,
+      schwabCalls: 1,
+      qualifiedKeys: [],
+      alertsSent: 0,
+    });
+    expect(formatDailyNote(tally, "Tastytrade")).toBe(
+      "Options scanner today: 1 scan ran on Tastytrade (Schwab served 1 of 41 calls, 0 timed out). 0 setups qualified, so no alerts were sent.",
+    );
+    const tied = applyScanDay(tally, "2026-11-11", {
+      at: CST_NOTE.getTime(),
+      outcome: "success",
+      reason: null,
+      tastytradeCalls: 0,
+      schwabCalls: 39,
+      qualifiedKeys: [],
+      alertsSent: 0,
+    });
+    expect(formatDailyNote(tied, "Tastytrade")).toContain("ran on Tastytrade (Schwab served 40 of 80 calls");
+  });
+
+  it("names Schwab without a call share when Schwab is the configured source", () => {
+    const tally: DayTally = {
+      ...emptyDayTally("2026-11-11"),
+      scans: 3,
+      schwabCalls: 9,
+      timedOut: 1,
+    };
+    expect(formatDailyNote(tally, "Schwab")).toBe(
+      "Options scanner today: 3 scans ran on Schwab (1 timed out). 0 setups qualified, so no alerts were sent.",
     );
   });
 
@@ -73,7 +115,8 @@ describe("daily note copy", () => {
       at: CST_NOTE.getTime(),
       outcome: "failed",
       reason: "Tastytrade timed out",
-      usedSchwab: false,
+      tastytradeCalls: 4,
+      schwabCalls: 0,
       qualifiedKeys: ["NVDA|2026-11-20|140|call"],
       alertsSent: 0,
     });
@@ -128,7 +171,8 @@ describe("daily note delivery", () => {
       at: CST_NOTE.getTime(),
       outcome: "success",
       reason: null,
-      usedSchwab: false,
+      tastytradeCalls: 10,
+      schwabCalls: 0,
       qualifiedKeys: [],
       alertsSent: 0,
     });
@@ -139,7 +183,7 @@ describe("daily note delivery", () => {
     expect(first.sent).toBe(true);
     if (first.sent) {
       expect(first.note).toBe(
-        "Options scanner today: 2 scans ran on Tastytrade (0 used Schwab, 1 timed out). 0 setups qualified, so no alerts were sent.",
+        "Options scanner today: 2 scans ran on Tastytrade (Schwab served 0 of 10 calls, 1 timed out). 0 setups qualified, so no alerts were sent.",
       );
     }
     expect(second).toMatchObject({ sent: false, reason: "already sent" });
@@ -184,5 +228,11 @@ describe("day tally parse", () => {
   it("drops a body that is not a tally", () => {
     expect(parseDayTally("[]")).toBeNull();
     expect(parseDayTally("{\"date\":\"2026-11-11\",\"scans\":2,\"qualifiedKeys\":[\"AAPL\"]}")?.scans).toBe(2);
+    const legacy = parseDayTally("{\"date\":\"2026-11-11\",\"scans\":40,\"schwabScans\":40,\"timedOut\":1,\"qualifiedKeys\":[]}");
+    expect(legacy?.tastytradeCalls).toBe(0);
+    expect(legacy?.schwabCalls).toBe(0);
+    expect(formatDailyNote(legacy as DayTally, "Tastytrade")).toBe(
+      "Options scanner today: 40 scans ran on Tastytrade (Schwab served 0 calls, 1 timed out). 0 setups qualified, so no alerts were sent.",
+    );
   });
 });

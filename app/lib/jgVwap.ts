@@ -18,12 +18,12 @@ import { completedSessionMinutes } from "@/app/lib/vwapPut";
 /**
  * Paper-only J.G. Banks 0DTE entry with a session-VWAP filter.
  * Direction comes from the backtest, not from which side of VWAP price is on.
- * See jgSignal.ts. A missing trend, level, or vol index is no trade.
+ * See jgSignal.ts. A missing trend, level, or VIX close is no trade.
  * Nothing here grades an alert, sends the A/B Telegram path, or places an order.
  *
  * Session VWAP matches the other paper rule: completed regular-hours minutes,
  * typical price (H+L+C)/3, volume floored at 1, anchored at 9:30 ET.
- * The day's implied move is spot × annualized IV × sqrt(1/365).
+ * The day's implied move is prior close × VIX / 100 / sqrt(252). QQQ and SPX both use VIX.
  *
  * 0DTE expires the same day. 1DTE uses the next NYSE trading day's expiry.
  * Both are entered and closed the same session: the implied-move stop, or
@@ -207,7 +207,7 @@ export function jgSpreadTooWide(bid: number, ask: number): boolean {
   return (ask - bid) / mid > JG_VWAP_TEST.maxSpreadOfMid + 1e-12;
 }
 
-/** Prior close × (VXN or VIX / 100) / sqrt(252). volIndex is the index level, such as 18.5. */
+/** Prior close × (VIX / 100) / sqrt(252). volIndex is the VIX level, such as 18.5. QQQ and SPX both use VIX. */
 export function jgImpliedMove(priorClose: number, volIndex: number): number | null {
   if (!(priorClose > 0) || !(volIndex > 0) || !Number.isFinite(priorClose) || !Number.isFinite(volIndex)) return null;
   const move = priorClose * (volIndex / 100) / Math.sqrt(252);
@@ -572,7 +572,7 @@ Paper only. This is not an A or a B, and it is outside the daily A/B alert cap. 
 ${atrLine}
 ${buy}
 Underlying $${trimPrice(trade.entryUnderlying)} vs session VWAP $${trimPrice(trade.vwap)}. Level $${trimPrice(trade.level ?? trade.vwap)}.
-Stop if the underlying trades ${stopWord} $${trimPrice(trade.stopUnderlying)} (0.75× the day's implied move from the prior close and the vol index).
+Stop if the underlying trades ${stopWord} $${trimPrice(trade.stopUnderlying)} (0.75× the day's implied move from the prior close and VIX).
 ${exitLine}${root}`;
 }
 
@@ -801,7 +801,7 @@ function sectionNote(book: JgVwapBook): string {
   const known = JG_VWAP_SIZE_0DTE_DOLLARS;
   const unknown = JG_VWAP_SIZE_UNKNOWN_DOLLARS;
   const spx = spxNote(book);
-  return `${JG_VWAP_TEST.label}. These rows are left out of the A and B totals above. Each entry sends a Telegram message labeled PAPER TEST - JG-VWAP 0DTE or PAPER TEST - JG-VWAP 1DTE, and that message is outside the daily A/B cap. QQQ uses VXN and SPX uses VIX. One 0DTE and one 1DTE paper entry per ticker per day. 0DTE expires that day. 1DTE uses the next trading day's expiry, skipping weekends and full-day NYSE holidays. Both close the same day, at the implied-move stop or at 3:45 PM ET (1:00 PM ET on an early close). If that next-day expiry is not in the chain, 1DTE is skipped and the scan log says so. The logged strike is the nearest strike of that expiry whose spread is within ${JG_VWAP_TEST.maxSpreadOfMid * 100}% of the mid. Buy at the ask, sell at the bid, $${JG_VWAP_TEST.feePerSide.toFixed(2)} a contract each side. ATR used is today's high minus today's low so far, divided by the 14-day average true range of completed daily bars. 0DTE suggested size is $${known} when ATR used is known. 1DTE suggested size is $${budget} when ATR used is from ${JG_VWAP_ATR_BAND_LOW} through ${JG_VWAP_ATR_BAND_HIGH}, and $${unknown} otherwise. Both use $${unknown} when ATR cannot be computed. Scored contracts are floor(suggested size / (ask × 100)). A size that buys zero contracts is not scored. The flat $${budget} size stays as a comparison: floor(${budget} / (ask × 100)), and a contract above $${budget} is logged as 1 and flagged over budget. Over-budget SPX stays in its own bucket. Over-budget QQQ is flagged on the row and left out of the QQQ totals. The stop is ${JG_VWAP_TEST.stopFractionOfImpliedMove}× the implied move (prior close × VXN or VIX / 100 / sqrt(252)) against the 5-minute close. Direction is prior-day EMA8/EMA21 agreeing with the last completed week. The entry is the first 5-minute retest of an hourly pivot break between 9:45 and 14:30 ET, with close×volume VWAP still on the trade side (aligned distance at least -0.10). Anything still open is sold at the bid at 3:45 PM ET the same day, or at 1:00 PM ET on an NYSE early close. Full-day NYSE holidays are skipped. Market hours only. No order is placed. ${spx}`;
+  return `${JG_VWAP_TEST.label}. These rows are left out of the A and B totals above. Each entry sends a Telegram message labeled PAPER TEST - JG-VWAP 0DTE or PAPER TEST - JG-VWAP 1DTE, and that message is outside the daily A/B cap. QQQ and SPX both use VIX. One 0DTE and one 1DTE paper entry per ticker per day. 0DTE expires that day. 1DTE uses the next trading day's expiry, skipping weekends and full-day NYSE holidays. Both close the same day, at the implied-move stop or at 3:45 PM ET (1:00 PM ET on an early close). If that next-day expiry is not in the chain, 1DTE is skipped and the scan log says so. The logged strike is the nearest strike of that expiry whose spread is within ${JG_VWAP_TEST.maxSpreadOfMid * 100}% of the mid. Buy at the ask, sell at the bid, $${JG_VWAP_TEST.feePerSide.toFixed(2)} a contract each side. ATR used is today's high minus today's low so far, divided by the 14-day average true range of completed daily bars. 0DTE suggested size is $${known} when ATR used is known. 1DTE suggested size is $${budget} when ATR used is from ${JG_VWAP_ATR_BAND_LOW} through ${JG_VWAP_ATR_BAND_HIGH}, and $${unknown} otherwise. Both use $${unknown} when ATR cannot be computed. Scored contracts are floor(suggested size / (ask × 100)). A size that buys zero contracts is not scored. The flat $${budget} size stays as a comparison: floor(${budget} / (ask × 100)), and a contract above $${budget} is logged as 1 and flagged over budget. Over-budget SPX stays in its own bucket. Over-budget QQQ is flagged on the row and left out of the QQQ totals. The stop is ${JG_VWAP_TEST.stopFractionOfImpliedMove}× the implied move (prior close × VIX / 100 / sqrt(252)) against the 5-minute close. Direction is prior-day EMA8/EMA21 agreeing with the last completed week. The entry is the first 5-minute retest of an hourly pivot break between 9:45 and 14:30 ET, with close×volume VWAP still on the trade side (aligned distance at least -0.10). Anything still open is sold at the bid at 3:45 PM ET the same day, or at 1:00 PM ET on an NYSE early close. Full-day NYSE holidays are skipped. Market hours only. No order is placed. ${spx}`;
 }
 
 function spxNote(book: JgVwapBook): string {
