@@ -22,7 +22,9 @@ import { runJgVwapPaper } from "@/app/lib/jgVwapRun";
 import { openMissingShadows, openScanTickers, recordEarningsWindowShadows, recordExperimentalShadows, recordVwapRejectionPuts, runShadowPass } from "@/app/lib/shadowStore";
 import { chicagoDate, isChicagoMarketHours, isChicagoMinuteWindow, isMarketDay } from "@/app/lib/marketHours";
 import { preferredDataSource } from "@/app/lib/dataSourcePref";
-import { BothSourcesFailedError, isFatalSchwabError, isSchwabBackupMiss, rethrowIfSchwabOnly } from "@/app/lib/marketData";
+import { recordAbandonedScan, recordScanDay } from "@/app/lib/dayTally";
+import { BothSourcesFailedError, dataSourceStatus, isFatalSchwabError, isSchwabBackupMiss, rethrowIfSchwabOnly } from "@/app/lib/marketData";
+import { namedSource, providerFailureText } from "@/app/lib/providerCopy";
 import { emptyScanHealth, formatScanRunLine, normalizeSkippedTickers, SCAN_TIME_BUDGET_MS, scanLockIsStale, scanSlotDecision, skipNotifyDue, skipTelegramText, skipWarning, type ScanHealth, type ScanRunSummary } from "@/app/lib/scanHealth";
 import { probeTastytrade, tastytradeEnabled } from "@/app/lib/tastytrade";
 import { planExitsForAsk } from "@/app/lib/exits";
@@ -117,7 +119,7 @@ function convictionFor(ticker: string, signal: VolSignal | null): { emoji: strin
   if (signal === "CHEAP") return { emoji: "✅", tier: "HIGH CONVICTION", note: "Estimated flow + cheap vol versus realized" };
   if (signal === "RICH") return { emoji: "🔴", tier: "LOW — SKIP", note: "Options look expensive versus realized vol" };
   if (signal === "NEUTRAL") return { emoji: "🔵", tier: "MEDIUM", note: "Neutral vol — the volume estimate is the signal" };
-  return { emoji: "❓", tier: "UNSCORED", note: "Schwab did not return ATM IV versus realized vol" };
+  return { emoji: "❓", tier: "UNSCORED", note: `${namedSource()} did not return ATM IV versus realized vol` };
 }
 
 function formatAlert(
@@ -243,6 +245,7 @@ async function handleCron(request: NextRequest) {
   const log: string[] = [];
   let alertsSent = 0;
   let shadowAt: number | null = null;
+  const countsBefore = { ...dataSourceStatus().counts };
 
   try {
     // Paper check first. The flow scan can run long enough that a cross would
@@ -404,7 +407,7 @@ async function handleCron(request: NextRequest) {
       const reading = volByTicker.get(row.ticker) ?? null;
       const volSummary = reading
         ? formatVolArbSummary(reading)
-        : (volMiss.get(row.ticker) ?? "Schwab did not return a vol reading for this symbol.");
+        : (volMiss.get(row.ticker) ?? `${namedSource()} did not return a vol reading for this symbol.`);
       const signal = reading && reading.signal !== "NO_READ" ? reading.signal : null;
       log.push(`${row.ticker}: vol ${volSummary}`);
 
@@ -511,6 +514,14 @@ async function handleCron(request: NextRequest) {
     summary.outcome = outcome;
     summary.reason = timeBudget ? "time budget" : null;
     await rememberScan(outcome, now, timeBudget ? "time budget" : null, shadowAt, skippedNames);
+    await noteCronScan({
+      now,
+      outcome,
+      reason: timeBudget ? "time budget" : null,
+      beforeSchwab: countsBefore.schwab,
+      qualifiedKeys: qualifiedSetupKeys(graded, tradingDay),
+      alertsSent,
+    });
   } catch (err) {
     if (isFatalSchwabError(err) && err instanceof Error) {
       console.warn(skipWarning(err.message));
@@ -518,6 +529,14 @@ async function handleCron(request: NextRequest) {
       summary.outcome = "skipped";
       summary.reason = err.message;
       await rememberScan("skipped", now, err.message, shadowAt);
+      await noteCronScan({
+        now,
+        outcome: "skipped",
+        reason: err.message,
+        beforeSchwab: countsBefore.schwab,
+        qualifiedKeys: [],
+        alertsSent,
+      });
       console.info(formatScanRunLine(summary));
       return NextResponse.json({ alertsSent: 0, skipped: true, reason: err.message, log });
     }
@@ -529,12 +548,18 @@ async function handleCron(request: NextRequest) {
       const outcome = skipped.length > 0 ? "partial" : "success";
       summary.outcome = outcome;
       await rememberScan(outcome, now, null, shadowAt, skipped);
+      await noteCronScan({
+        now,
+        outcome,
+        reason: line,
+        beforeSchwab: countsBefore.schwab,
+        qualifiedKeys: [],
+        alertsSent,
+      });
       console.info(formatScanRunLine(summary));
       return NextResponse.json({ alertsSent, alertsSaved: summary.alertsSaved, log });
     }
-    const message = err instanceof Error && err.message.startsWith("Schwab ")
-      ? err.message.slice(0, 180)
-      : "Estimated flow scan failed";
+    const message = providerFailureText(err, preferredDataSource() === "tastytrade" ? "Tastytrade market data request failed." : "Estimated flow scan failed").slice(0, 180);
     console.warn(skipWarning(message));
     log.push(message);
     summary.outcome = "failed";
@@ -547,12 +572,56 @@ async function handleCron(request: NextRequest) {
       log.push("Shadow alert update failed");
     }
     await rememberScan("failed", now, message, shadowAt);
+    await noteCronScan({
+      now,
+      outcome: "failed",
+      reason: message,
+      beforeSchwab: countsBefore.schwab,
+      qualifiedKeys: [],
+      alertsSent,
+    });
     console.info(formatScanRunLine(summary));
     return NextResponse.json({ error: message, log }, { status: 500 });
   }
 
   console.info(formatScanRunLine(summary));
   return NextResponse.json({ alertsSent, alertsSaved: summary.alertsSaved, log });
+}
+
+function qualifiedSetupKeys(
+  graded: readonly { row: FlowRow; verdict: AlertVerdict }[],
+  tradingDay: string,
+): string[] {
+  const keys: string[] = [];
+  for (let i = 0; i < graded.length; i++) {
+    const item = graded[i];
+    if (item.verdict.verdict !== "TAKE" || !isAlertGrade(item.verdict.grade)) continue;
+    const key = `${tradingDay}|${item.row.ticker}|${item.row.expiration}|${item.row.strike}|${item.row.putCall}`;
+    if (keys.indexOf(key) === -1) keys.push(key);
+  }
+  return keys;
+}
+
+async function noteCronScan(input: {
+  now: Date;
+  outcome: "success" | "partial" | "failed" | "skipped";
+  reason: string | null;
+  beforeSchwab: number;
+  qualifiedKeys: readonly string[];
+  alertsSent: number;
+}): Promise<void> {
+  try {
+    await recordScanDay({
+      at: input.now.getTime(),
+      outcome: input.outcome,
+      reason: input.reason,
+      usedSchwab: dataSourceStatus().counts.schwab > input.beforeSchwab,
+      qualifiedKeys: input.qualifiedKeys,
+      alertsSent: input.alertsSent,
+    });
+  } catch (err) {
+    console.warn(err instanceof Error ? err.message : "Could not record the daily scan tally");
+  }
 }
 
 function emptySummary(outcome: ScanRunSummary["outcome"], reason: string | null = null): ScanRunSummary {
@@ -606,6 +675,9 @@ async function markShadows(
 async function claimScanSlot(now: number, manual: boolean): Promise<"ok" | "busy" | "recent"> {
   let current = await readScanHealth().catch(() => emptyScanHealth());
   if (scanLockIsStale(current, now)) {
+    if (current.runStartedAt != null) {
+      await recordAbandonedScan(current.runStartedAt, now).catch(() => undefined);
+    }
     try {
       await writeScanHealth({
         ...current,

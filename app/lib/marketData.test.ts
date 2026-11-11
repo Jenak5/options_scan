@@ -147,6 +147,24 @@ describe("market data router", () => {
     expect(dataSourceStatus().preferred).toBe("schwab");
   });
 
+  it("names a Tastytrade timeout and labels a Schwab 400 as the backup", async () => {
+    tt.chain.mockRejectedValueOnce(new Error("DXLink fetch exceeded 200 s"));
+    sw.chain.mockRejectedValueOnce(new Error("Schwab market data request failed (400)"));
+    await expect(getOptionChain({ symbol: "SPXW" })).rejects.toThrow(
+      "SPXW skipped: Tastytrade timed out; Schwab backup returned 400",
+    );
+  });
+
+  it("clears the Schwab backup note after Tastytrade serves the next chain", async () => {
+    sw.backup.mockResolvedValueOnce(false);
+    tt.chain.mockRejectedValueOnce(new Error("Tastytrade option chain failed (401)"));
+    await expect(getOptionChain({ symbol: "XLF" })).rejects.toThrow(/401/);
+    expect(dataSourceStatus().backupNote).toBe("Schwab backup not connected");
+    tt.chain.mockResolvedValueOnce(chain(2));
+    await getOptionChain({ symbol: "SPY" });
+    expect(dataSourceStatus().backupNote).toBeNull();
+  });
+
   it("stops on a Schwab disconnect when DATA_SOURCE=schwab", async () => {
     process.env.DATA_SOURCE = "schwab";
     sw.chain.mockRejectedValueOnce(Object.assign(new Error("Schwab is not connected. Use Reconnect Schwab."), { name: "SchwabNotConnectedError" }));

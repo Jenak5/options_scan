@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import { isFlowTicker } from "@/app/lib/flow";
 import { preferredDataSource } from "@/app/lib/dataSourcePref";
+import { namedSource, providerFailureText } from "@/app/lib/providerCopy";
 import { BothSourcesFailedError, isSchwabBackupMiss } from "@/app/lib/marketData";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { VOL_DEFINITIONS, VOL_DISCLAIMER } from "@/app/lib/volArb";
@@ -45,7 +46,7 @@ export async function GET(request: NextRequest) {
     const scan = await scanVolArb({ symbols: parsed.symbols, bypassCache: fresh });
     return NextResponse.json({
       connected: true,
-      source: "Schwab market data",
+      source: `${namedSource()} market data`,
       disclaimer: VOL_DISCLAIMER,
       definitions: VOL_DEFINITIONS,
       rows: scan.rows,
@@ -59,7 +60,7 @@ export async function GET(request: NextRequest) {
       const skipped = err instanceof BothSourcesFailedError ? [err.label] : parsed.symbols;
       return NextResponse.json({
         connected: true,
-        source: "Schwab market data",
+        source: `${namedSource()} market data`,
         disclaimer: VOL_DISCLAIMER,
         definitions: VOL_DEFINITIONS,
         rows: [],
@@ -91,9 +92,10 @@ export async function GET(request: NextRequest) {
         disclaimer: VOL_DISCLAIMER,
       }, { status: 503 });
     }
-    const message = err instanceof Error && err.message.startsWith("Schwab ")
-      ? err.message.slice(0, 180)
-      : preferredDataSource() === "tastytrade" ? "Market data request failed. Try again." : "Schwab market data request failed";
+    const message = providerFailureText(
+      err,
+      preferredDataSource() === "tastytrade" ? "Tastytrade market data request failed. Try again." : "Schwab market data request failed",
+    );
     return NextResponse.json({
       error: message,
       connected: preferredDataSource() === "tastytrade",

@@ -139,7 +139,7 @@ export default function GatePage() {
           <span style={{ color: "#06b6d4" }}>▣</span> Trade gate
         </h1>
         <p style={{ margin: "4px 0 0", color: "#64748b", fontSize: 14 }}>
-          ${ACCOUNT_SIZE_DOLLARS.toLocaleString()} account · max loss ${MAX_LOSS_DOLLARS} · read-only Schwab quotes
+          ${ACCOUNT_SIZE_DOLLARS.toLocaleString()} account · max loss ${MAX_LOSS_DOLLARS} · read-only market quotes
         </p>
         <PageLinks current="gate" />
       </div>

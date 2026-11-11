@@ -281,11 +281,19 @@ export function connectionNotice(input: {
   showTastytrade?: boolean;
   /** Tastytrade is preferred, so a dead Schwab login does not stop scans. */
   schwabIsBackup?: boolean;
+  /**
+   * A read missed on Tastytrade and Schwab was needed to fill it.
+   * While Tastytrade is healthy this stays false, so the banner stays quiet.
+   */
+  backupNeeded?: boolean;
 }): ConnectionNotice {
   const lines: string[] = [];
   let severity: ConnectionNotice["severity"] = "ok";
-  const backupDown = input.schwabIsBackup === true && (!input.configured || !input.connected || input.refreshExpired);
-  if (backupDown) {
+  const ignoreSchwab = input.schwabIsBackup === true && input.backupNeeded !== true;
+  const backupDown = !ignoreSchwab && input.schwabIsBackup === true && (!input.configured || !input.connected || input.refreshExpired);
+  if (ignoreSchwab) {
+    // Schwab is only the backup and nothing needed it. Do not mention it.
+  } else if (backupDown) {
     lines.push(SCHWAB_BACKUP_NOTE);
   } else if (!input.configured) {
     severity = "down";
@@ -294,7 +302,7 @@ export function connectionNotice(input: {
     severity = "down";
     lines.push("Schwab is disconnected. Reconnect Schwab. New scans, the scorecard, and Learning mode are not collecting quotes until you do.");
   }
-  if (!backupDown && (input.refreshExpired || input.warnRefreshSoon)) {
+  if (!ignoreSchwab && !backupDown && (input.refreshExpired || input.warnRefreshSoon)) {
     const countdown = refreshCountdown(input.refreshDaysLeft, input.refreshExpired || !input.connected);
     if (countdown) {
       if (severity === "ok") severity = "warn";
@@ -316,6 +324,48 @@ export function connectionNotice(input: {
     lines.push(input.health.tastytradeMessage);
   }
   return { severity, lines };
+}
+
+/** Tastytrade is serving, so a disconnected Schwab login is not an outage. */
+export function tastytradePrimaryHealthy(input: {
+  schwabIsBackup: boolean;
+  lastOutcome: ScanOutcome | null;
+  marketServed: boolean;
+}): boolean {
+  if (!input.schwabIsBackup) return false;
+  if (input.lastOutcome === "failed" || input.lastOutcome === "skipped") return false;
+  if (input.marketServed) return true;
+  return input.lastOutcome === "success" || input.lastOutcome === "partial";
+}
+
+/**
+ * Schwab backup copy is for a miss that actually needed Schwab.
+ * A healthy Tastytrade day does not qualify, even if an older backup note is stored.
+ */
+export function schwabBackupNeeded(input: {
+  schwabIsBackup: boolean;
+  tastytradeHealthy: boolean;
+  backupNote: string | null;
+}): boolean {
+  if (!input.schwabIsBackup || input.tastytradeHealthy) return false;
+  return input.backupNote != null && input.backupNote.length > 0;
+}
+
+/**
+ * Button label. Null hides it.
+ * Schwab-primary keeps "Reconnect Schwab". A needed backup says so.
+ */
+export function schwabReconnectLabel(input: {
+  schwabIsBackup: boolean;
+  tastytradeHealthy: boolean;
+  backupNeeded: boolean;
+  connected: boolean;
+  configured: boolean;
+}): string | null {
+  if (!input.schwabIsBackup) return "Reconnect Schwab";
+  if (input.tastytradeHealthy || !input.backupNeeded) return null;
+  if (input.connected && input.configured) return null;
+  return "Reconnect Schwab backup";
 }
 
 export function skipWarning(reason: string): string {

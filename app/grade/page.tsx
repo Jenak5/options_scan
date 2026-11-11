@@ -190,7 +190,7 @@ export default function GradePage() {
                 </>
               ) : (
                 <p style={{ margin: 0, color: "#94a3b8", fontSize: 15, lineHeight: 1.45 }}>
-                  Schwab did not return this contract, so bid, ask, last, mid, and spread are not shown.
+                  The quote did not include this contract, so bid, ask, last, mid, and spread are not shown.
                 </p>
               )}
             </div>

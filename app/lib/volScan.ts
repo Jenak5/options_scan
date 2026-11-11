@@ -4,7 +4,8 @@ import {
   compareVolReadings,
   type VolArbReading,
 } from "@/app/lib/volArb";
-import { BothSourcesFailedError, getOptionChain, getPriceHistory, requireMarketData, rethrowIfSchwabOnly } from "@/app/lib/marketData";
+import { getOptionChain, getPriceHistory, requireMarketData, rethrowIfSchwabOnly } from "@/app/lib/marketData";
+import { describeScanError } from "@/app/lib/providerCopy";
 
 /**
  * Reads Schwab chains and Schwab daily prices for the vol view.
@@ -160,9 +161,5 @@ function sleep(ms: number): Promise<void> {
 }
 
 function safeMessage(err: unknown): string {
-  if (err instanceof BothSourcesFailedError) return err.message.slice(0, 180);
-  if (err instanceof Error && err.message.trim()) {
-    return err.message.replace(/bearer\s+\S+/gi, "bearer [redacted]").replace(/\s+/g, " ").slice(0, 180);
-  }
-  return "Market data request failed";
+  return describeScanError(err);
 }

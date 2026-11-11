@@ -1,4 +1,5 @@
 import type { OptionContract, PutCall } from "@/app/lib/contract";
+import { delayedChainDetail } from "@/app/lib/providerCopy";
 import { CHEAP_CONTRACT_MID, CHEAP_MAX_SPREAD_DOLLARS } from "@/app/lib/marketContext";
 import {
   DAILY_STOP_CONSECUTIVE_LOSSES,
@@ -247,7 +248,7 @@ function delayedCheck(delayed: boolean): GateCheck {
       id: "delayed",
       label: "Real-time quotes",
       status: "FAIL",
-      detail: "Schwab marked this chain delayed. Real-time data is required.",
+      detail: delayedChainDetail(),
     };
   }
   return { id: "delayed", label: "Real-time quotes", status: "PASS", detail: "Quotes are not marked delayed." };

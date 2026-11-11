@@ -14,7 +14,10 @@ import {
   scanLockIsStale,
   scanSlotDecision,
   scanSlotKey,
+  schwabBackupNeeded,
+  schwabReconnectLabel,
   skipNotifyDue,
+  tastytradePrimaryHealthy,
   skipTelegramText,
   skipWarning,
   SCAN_IN_PROGRESS_MS,
@@ -151,7 +154,7 @@ describe("connection notice", () => {
     expect(notice.lines.join(" ")).toMatch(/Schwab quotes are separate/);
   });
 
-  it("uses a quiet backup note when Tastytrade is the source and Schwab is expired", () => {
+  it("uses a quiet backup note only when a scan actually needed the Schwab backup", () => {
     const notice = connectionNotice({
       configured: true,
       connected: false,
@@ -160,12 +163,30 @@ describe("connection notice", () => {
       refreshDaysLeft: 0,
       now: SESSION,
       schwabIsBackup: true,
+      backupNeeded: true,
       health: health({ lastSuccessAt: SESSION - 60_000 }),
     });
     expect(notice.severity).toBe("ok");
     expect(notice.lines).toEqual([SCHWAB_BACKUP_NOTE]);
     expect(notice.lines.join(" ")).not.toMatch(/Scans cannot run/);
     expect(notice.lines.join(" ")).not.toMatch(/disconnected/i);
+  });
+
+  it("stays silent about Schwab when Tastytrade is primary and the backup was not needed", () => {
+    const notice = connectionNotice({
+      configured: true,
+      connected: false,
+      refreshExpired: true,
+      warnRefreshSoon: true,
+      refreshDaysLeft: 0,
+      now: SESSION,
+      schwabIsBackup: true,
+      backupNeeded: false,
+      health: health({ lastSuccessAt: SESSION - 60_000 }),
+    });
+    expect(notice.severity).toBe("ok");
+    expect(notice.lines).toEqual([]);
+    expect(notice.lines.join(" ")).not.toMatch(/Schwab|Reconnect/);
   });
 
   it("hides a stored Tastytrade failure while Tastytrade is turned off", () => {
@@ -186,6 +207,42 @@ describe("connection notice", () => {
     });
     expect(notice.severity).toBe("ok");
     expect(notice.lines).toEqual([]);
+  });
+});
+
+describe("schwab banner label", () => {
+  it("hides the reconnect button while Tastytrade is healthy", () => {
+    expect(tastytradePrimaryHealthy({
+      schwabIsBackup: true,
+      lastOutcome: "success",
+      marketServed: true,
+    })).toBe(true);
+    expect(schwabBackupNeeded({
+      schwabIsBackup: true,
+      tastytradeHealthy: true,
+      backupNote: "Schwab backup not connected",
+    })).toBe(false);
+    expect(schwabReconnectLabel({
+      schwabIsBackup: true,
+      tastytradeHealthy: true,
+      backupNeeded: false,
+      connected: false,
+      configured: true,
+    })).toBeNull();
+    expect(schwabReconnectLabel({
+      schwabIsBackup: true,
+      tastytradeHealthy: false,
+      backupNeeded: true,
+      connected: false,
+      configured: true,
+    })).toBe("Reconnect Schwab backup");
+    expect(schwabReconnectLabel({
+      schwabIsBackup: false,
+      tastytradeHealthy: false,
+      backupNeeded: false,
+      connected: false,
+      configured: true,
+    })).toBe("Reconnect Schwab");
   });
 });
 

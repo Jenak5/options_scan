@@ -9,6 +9,7 @@ import { gradeMyTrade, parseGradeRequest, type GradeTradeResult } from "@/app/li
 import { keyLevelsForTicker } from "@/app/lib/levelScan";
 import type { KeyLevels } from "@/app/lib/levels";
 import { preferredDataSource } from "@/app/lib/dataSourcePref";
+import { providerFailureText } from "@/app/lib/providerCopy";
 import { BothSourcesFailedError, getOptionChain, isFatalSchwabError, isSchwabBackupMiss } from "@/app/lib/marketData";
 import { SchwabConfigError, SchwabNotConnectedError } from "@/app/lib/schwab";
 import { readFlowSnapshots } from "@/app/lib/schwabStore";
@@ -239,9 +240,10 @@ async function loadChain(input: { ticker: string; expiration: string; strike: nu
 function providerMessage(err: unknown): string {
   if (err instanceof BothSourcesFailedError) return err.message.slice(0, 180);
   if (preferredDataSource() === "tastytrade" && (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError)) {
-    return "Schwab backup not connected; this quote was not graded.";
+    return "Tastytrade did not return this quote. Schwab backup is not connected, so this quote was not graded.";
   }
   if (err instanceof SchwabNotConnectedError || err instanceof SchwabConfigError) return err.message;
-  if (err instanceof Error && err.message.startsWith("Schwab ")) return err.message.slice(0, 180);
-  return "Schwab market data request failed, so this quote was not graded.";
+  const text = providerFailureText(err);
+  if (text.endsWith(".")) return `${text.slice(0, -1)}, so this quote was not graded.`;
+  return `${text}, so this quote was not graded.`;
 }

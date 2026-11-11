@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { denyIfUnauthorized } from "@/app/lib/auth";
 import { preferredDataSource } from "@/app/lib/dataSourcePref";
-import { connectionNotice, emptyScanHealth } from "@/app/lib/scanHealth";
+import { healthTastytradeEnabled, loadMarketDataHealth } from "@/app/lib/marketData";
+import {
+  connectionNotice,
+  emptyScanHealth,
+  schwabBackupNeeded,
+  schwabReconnectLabel,
+  tastytradePrimaryHealthy,
+} from "@/app/lib/scanHealth";
 import { getSchwabStatus, noteRefreshWindow } from "@/app/lib/schwab";
 import { readScanHealth } from "@/app/lib/schwabStore";
 import { tastytradeEnabled } from "@/app/lib/tastytrade";
@@ -15,8 +22,22 @@ export async function GET(request: NextRequest) {
 
   const status = await getSchwabStatus();
   await noteRefreshWindow(status);
-  const health = await readScanHealth().catch(() => emptyScanHealth());
+  const [health, marketData] = await Promise.all([
+    readScanHealth().catch(() => emptyScanHealth()),
+    loadMarketDataHealth().catch(() => null),
+  ]);
   const now = Date.now();
+  const schwabIsBackup = preferredDataSource() === "tastytrade";
+  const tastytradeHealthy = tastytradePrimaryHealthy({
+    schwabIsBackup,
+    lastOutcome: health.lastOutcome,
+    marketServed: healthTastytradeEnabled(marketData),
+  });
+  const backupNeeded = schwabBackupNeeded({
+    schwabIsBackup,
+    tastytradeHealthy,
+    backupNote: marketData?.backupNote ?? null,
+  });
   const notice = connectionNotice({
     configured: status.configured,
     connected: status.connected,
@@ -26,7 +47,15 @@ export async function GET(request: NextRequest) {
     now,
     health,
     showTastytrade: tastytradeEnabled(),
-    schwabIsBackup: preferredDataSource() === "tastytrade",
+    schwabIsBackup,
+    backupNeeded,
+  });
+  const reconnectLabel = schwabReconnectLabel({
+    schwabIsBackup,
+    tastytradeHealthy,
+    backupNeeded,
+    connected: status.connected,
+    configured: status.configured,
   });
   return NextResponse.json({
     configured: status.configured,
@@ -39,6 +68,10 @@ export async function GET(request: NextRequest) {
     warnRefreshSoon: status.warnRefreshSoon,
     message: status.message,
     notice,
+    schwabIsBackup,
+    tastytradeHealthy,
+    backupNeeded,
+    reconnectLabel,
     scan: {
       lastSuccessAt: health.lastSuccessAt,
       lastRunAt: health.lastRunAt,
