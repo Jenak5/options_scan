@@ -9,8 +9,8 @@ import { newYorkDate } from "@/app/lib/flow";
  * Levels are 5-bar pivots on 60-minute bars anchored at 9:30 ET.
  * A 5-minute retest after an hourly break is the signal. First one per day.
  * VWAP is cumulative close×volume / volume from 9:30 ET.
- * Implied move is prior close × vol index / 100 / sqrt(252).
- * Missing history or a missing vol index is no trade. Nothing here is invented.
+ * Implied move is prior close × VIX / 100 / sqrt(252). QQQ and SPX both use VIX.
+ * Missing history or a missing VIX close is no trade. Nothing here is invented.
  */
 
 const FIVE_MS = 5 * 60_000;
@@ -45,7 +45,8 @@ export interface JgSignal {
   atrUsed: number | null;
   priorClose: number;
   volIndex: number;
-  volSymbol: "VXN" | "VIX";
+  /** Always VIX. QQQ and SPX use the same index. */
+  volSymbol: "VIX";
 }
 
 export type JgSignalResult =
@@ -57,9 +58,9 @@ export interface JgSignalInput {
   /** Regular-hours bars. Each bar is 5 minutes, timestamped at its start. */
   bars: readonly CandleBar[];
   daily: readonly JgDailyBar[];
-  /** Prior close of VXN (QQQ) or VIX (SPX). Null when the feed did not return one. */
+  /** Prior VIX close. Null when the feed did not return one. QQQ and SPX both use VIX. */
   volIndex: number | null;
-  volSymbol: "VXN" | "VIX";
+  volSymbol: "VIX";
   day: string;
   nowMs: number;
   /** Today's range / ATR14. Null when either piece is missing. The caller computes it. */
@@ -131,8 +132,8 @@ export function jgReplayMissing(): string[] {
   return [
     "QQQ 5-minute regular-hours bars from 12 trading days before each replay date through that date",
     "QQQ daily highs, lows, and closes from 2018-05-01 so EMA8/EMA21 match the backtest seed",
-    "CBOE VXN daily closes, using the prior session's close",
-    "SPX needs the same bars plus a prior VIX close; without VIX that name is no trade",
+    "CBOE VIX daily closes, using the prior session's close, for QQQ and for SPX",
+    "SPX needs the same bars; without a prior VIX close that name is no trade",
   ];
 }
 

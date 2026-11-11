@@ -299,13 +299,10 @@ export function candlePeriod(frequencyType: "minute" | "daily", frequency: numbe
 
 /**
  * dxFeed base symbol for an equity or index candle.
- * VIX and SPX are filled as typed. VXN is not: the feed's index symbol is `$VXN`,
- * and a bare `VXN` subscription stays empty through the session.
+ * VIX and SPX are sent uppercased, as typed.
  */
 export function tastytradeCandleBase(symbol: string): string {
-  const upper = symbol.trim().toUpperCase();
-  if (upper === "VXN") return "$VXN";
-  return upper;
+  return symbol.trim().toUpperCase();
 }
 
 /** DXLink candle subscription, or null when the symbol is not one this client may send. */

@@ -5,6 +5,8 @@ import { sendTelegramAlert } from "@/app/lib/telegram";
 
 /**
  * One Chicago trading day's scan counts, and the close-of-day Telegram note.
+ * The note names the provider that served more market-data calls.
+ * A few Schwab backup fills do not make the day "ran on Schwab".
  * The note is claimed before it is sent so a second cron cannot send it again.
  * Nothing here reads Schwab.
  */
@@ -19,7 +21,10 @@ const MAX_QUALIFIED_KEYS = 80;
 export interface DayTally {
   date: string;
   scans: number;
-  schwabScans: number;
+  /** Market-data calls this day that Tastytrade served. */
+  tastytradeCalls: number;
+  /** Market-data calls this day that Schwab served. */
+  schwabCalls: number;
   timedOut: number;
   failed: number;
   qualifiedKeys: string[];
@@ -34,7 +39,10 @@ export interface ScanDayEvent {
   at: number;
   outcome: "success" | "partial" | "failed" | "skipped";
   reason: string | null;
-  usedSchwab: boolean;
+  /** Calls this scan served from Tastytrade. A missing or negative value counts as zero. */
+  tastytradeCalls: number;
+  /** Calls this scan served from Schwab. A missing or negative value counts as zero. */
+  schwabCalls: number;
   qualifiedKeys: readonly string[];
   alertsSent: number;
 }
@@ -55,7 +63,8 @@ export function emptyDayTally(date: string): DayTally {
   return {
     date,
     scans: 0,
-    schwabScans: 0,
+    tastytradeCalls: 0,
+    schwabCalls: 0,
     timedOut: 0,
     failed: 0,
     qualifiedKeys: [],
@@ -85,7 +94,8 @@ export function applyScanDay(current: DayTally, date: string, event: ScanDayEven
   return {
     ...base,
     scans: base.scans + 1,
-    schwabScans: base.schwabScans + (event.usedSchwab ? 1 : 0),
+    tastytradeCalls: base.tastytradeCalls + count(event.tastytradeCalls),
+    schwabCalls: base.schwabCalls + count(event.schwabCalls),
     timedOut: base.timedOut + (timeout ? 1 : 0),
     failed: base.failed + (failed ? 1 : 0),
     qualifiedKeys: keys,
@@ -93,19 +103,34 @@ export function applyScanDay(current: DayTally, date: string, event: ScanDayEven
   };
 }
 
+/**
+ * The headline names the provider that served more calls.
+ * Schwab is named only when it served the majority. A few backup fills stay in the share.
+ * When Schwab is the configured source, every call is Schwab, so the share is omitted.
+ */
 export function formatDailyNote(tally: DayTally, primary: "Tastytrade" | "Schwab" = "Tastytrade"): string {
   const scans = tally.scans;
   const scanWord = scans === 1 ? "scan" : "scans";
   const qualified = qualifiedSentence(tally.qualifiedKeys.length, tally.alertsSent);
-  if (primary === "Schwab") {
-    const parts = [`${tally.timedOut} timed out`];
-    if (tally.failed > 0) parts.push(`${tally.failed} failed`);
-    return `Options scanner today: ${scans} ${scanWord} ran on Schwab (${parts.join(", ")}). ${qualified}`;
-  }
-  const source = scans > 0 && tally.schwabScans === scans ? "Schwab" : "Tastytrade";
-  const parts = [`${tally.schwabScans} used Schwab`, `${tally.timedOut} timed out`];
+  const parts: string[] = [];
+  if (primary !== "Schwab") parts.push(schwabCallShare(tally));
+  parts.push(`${tally.timedOut} timed out`);
   if (tally.failed > 0) parts.push(`${tally.failed} failed`);
+  const source = primary === "Schwab" ? "Schwab" : servedSource(tally);
   return `Options scanner today: ${scans} ${scanWord} ran on ${source} (${parts.join(", ")}). ${qualified}`;
+}
+
+function servedSource(tally: DayTally): "Tastytrade" | "Schwab" {
+  if (tally.schwabCalls > tally.tastytradeCalls) return "Schwab";
+  return "Tastytrade";
+}
+
+function schwabCallShare(tally: DayTally): string {
+  const schwab = tally.schwabCalls;
+  const total = schwab + tally.tastytradeCalls;
+  if (total <= 0) return "Schwab served 0 calls";
+  const noun = total === 1 ? "call" : "calls";
+  return `Schwab served ${schwab} of ${total} ${noun}`;
 }
 
 function qualifiedSentence(qualified: number, alertsSent: number): string {
@@ -315,7 +340,8 @@ export function parseDayTally(text: string): DayTally | null {
     return {
       date: parsed.date,
       scans: count(parsed.scans),
-      schwabScans: count(parsed.schwabScans),
+      tastytradeCalls: count(parsed.tastytradeCalls),
+      schwabCalls: count(parsed.schwabCalls),
       timedOut: count(parsed.timedOut),
       failed: count(parsed.failed),
       qualifiedKeys: keys,

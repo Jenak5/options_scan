@@ -77,8 +77,8 @@ describe("tastytrade market parsers", () => {
     expect(entries[0].symbol).toBe("SPY   261014C00775000");
   });
 
-  it("subscribes VXN candles at the dxFeed index symbol", () => {
-    expect(historyCandleSymbol({ symbol: "vxn", frequencyType: "daily", frequency: 1 })).toBe("$VXN{=1d}");
+  it("subscribes VIX and equity candles as typed", () => {
+    expect(historyCandleSymbol({ symbol: "vix", frequencyType: "daily", frequency: 1 })).toBe("VIX{=1d}");
     expect(historyCandleSymbol({ symbol: "VIX", frequencyType: "daily", frequency: 1 })).toBe("VIX{=1d}");
     expect(historyCandleSymbol({
       symbol: "SPY", frequencyType: "minute", frequency: 5, needExtendedHoursData: false,

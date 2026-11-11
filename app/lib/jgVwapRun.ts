@@ -37,8 +37,8 @@ export interface JgVwapDeps {
   history: (symbol: string, now: Date) => Promise<CandleBar[]>;
   /** Completed daily bars from the same price-history source as the intraday candles. */
   daily: (symbol: string, now: Date) => Promise<CandleBar[]>;
-  /** Daily bars for VXN or VIX. Empty when that index did not load. */
-  vol: (symbol: "VXN" | "VIX", now: Date) => Promise<CandleBar[]>;
+  /** Daily VIX bars. Empty when that index did not load. QQQ and SPX share this read. */
+  vol: (symbol: "VIX", now: Date) => Promise<CandleBar[]>;
   chain: (symbol: string, fromDay: string, toDay: string) => Promise<ChainParseResult>;
   readBook: () => Promise<string | null>;
   writeBook: (change: (current: string | null) => string) => Promise<boolean>;
@@ -71,15 +71,15 @@ export async function runJgVwapPaper(now: Date, deps: JgVwapDeps = defaultDeps()
   let spxChainMiss = false;
   let spxVwapMiss = false;
   const signalNotes: string[] = [];
+  const volBarsPromise = deps.vol("VIX", now);
 
   for (let i = 0; i < JG_VWAP_TICKERS.length; i++) {
     const ticker = JG_VWAP_TICKERS[i];
     const symbol = jgHistorySymbol(ticker);
-    const volSymbol = ticker === "SPX" ? "VIX" : "VXN";
     const [bars, dailyBars, volBars] = await Promise.all([
       deps.history(symbol, now),
       deps.daily(symbol, now),
-      deps.vol(volSymbol, now),
+      volBarsPromise,
     ]);
     const daily = toDaily(dailyBars);
     const atrUsed = jgAtrUsed(jgTodayRange(bars, now.getTime()), jgAtr14(dailyBars, day));
@@ -88,7 +88,7 @@ export async function runJgVwapPaper(now: Date, deps: JgVwapDeps = defaultDeps()
       bars,
       daily,
       volIndex,
-      volSymbol,
+      volSymbol: "VIX",
       day,
       nowMs: now.getTime(),
       atrUsed,
@@ -244,7 +244,7 @@ async function loadDaily(symbol: string, now: Date): Promise<CandleBar[]> {
   }
 }
 
-async function loadVol(symbol: "VXN" | "VIX", now: Date): Promise<CandleBar[]> {
+async function loadVol(symbol: "VIX", now: Date): Promise<CandleBar[]> {
   try {
     const candles = await getPriceHistory({
       symbol,
