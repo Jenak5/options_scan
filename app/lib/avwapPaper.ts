@@ -23,7 +23,7 @@ import { schwabOptionSymbol } from "@/app/lib/optionSymbol";
  * the bid, and the debit cap is $875.
  */
 
-export const AVWAP_SYMBOLS = ["SPY", "IWM", "QQQ", "NVDA", "AAPL", "TSLA"] as const;
+export const AVWAP_SYMBOLS = ["SPY", "IWM", "QQQ", "NVDA", "AAPL", "TSLA", "PLTR"] as const;
 export type AvwapSymbol = (typeof AVWAP_SYMBOLS)[number];
 
 /** RESULTS.md: "the last gap of more than 1%". A gap equal to 1% is not a gap day. */

@@ -80,6 +80,7 @@ describe("health report", () => {
           NVDA: { anchorDate: null, gap: null, reason: "not checked yet", entered: false },
           AAPL: { anchorDate: null, gap: null, reason: "not checked yet", entered: false },
           TSLA: { anchorDate: null, gap: null, reason: "not checked yet", entered: false },
+          PLTR: { anchorDate: null, gap: null, reason: "not checked yet", entered: false },
         },
       },
       callsPaper: emptyCallsPaperHealth(),
