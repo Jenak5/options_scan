@@ -120,7 +120,7 @@ function whatIfText(leg: WhatIf | null): string {
 function symbolReasons(page: Section): string {
   const names = page.symbols && page.symbols.length > 0
     ? page.symbols
-    : ["SPY", "IWM", "QQQ", "NVDA", "AAPL", "TSLA"];
+    : ["SPY", "IWM", "QQQ", "NVDA", "AAPL", "TSLA", "PLTR"];
   const parts: string[] = [];
   for (let i = 0; i < names.length; i++) {
     const reason = page.health.symbols?.[names[i]]?.reason;

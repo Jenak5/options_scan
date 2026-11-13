@@ -287,6 +287,7 @@ describe("gap day and signal", () => {
     expect(section.health.symbols.NVDA.reason).toMatch(/no bars/);
     expect(section.health.symbols.AAPL.reason).toMatch(/no bars/);
     expect(section.health.symbols.TSLA.reason).toMatch(/no bars/);
+    expect(section.health.symbols.PLTR.reason).toMatch(/no bars/);
     expect(formatAvwapPaperLog({
       opened: 0,
       closed: 0,
@@ -531,19 +532,20 @@ describe("AVWAP paper scan", () => {
 
 const DRY_NOW = new Date("2026-11-12T14:40:00.000Z");
 
-describe("NVDA, AAPL, and TSLA", () => {
+describe("NVDA, AAPL, TSLA, and PLTR", () => {
   it("keeps the $875 cap and the 15-name scan budget", () => {
-    expect(AVWAP_SYMBOLS).toEqual(["SPY", "IWM", "QQQ", "NVDA", "AAPL", "TSLA"]);
+    expect(AVWAP_SYMBOLS).toEqual(["SPY", "IWM", "QQQ", "NVDA", "AAPL", "TSLA", "PLTR"]);
     expect(isAvwapSymbol("NVDA")).toBe(true);
     expect(isAvwapSymbol("AAPL")).toBe(true);
     expect(isAvwapSymbol("TSLA")).toBe(true);
+    expect(isAvwapSymbol("PLTR")).toBe(true);
     expect(isAvwapSymbol("AMD")).toBe(false);
     expect(AVWAP_BUDGET_DOLLARS).toBe(875);
     expect(AVWAP_BUDGET_DOLLARS).toBe(DEFAULT_MAX_LOSS_DOLLARS);
-    expect(AVWAP_PAPER_NOTE).toContain("NVDA, AAPL, and TSLA");
+    expect(AVWAP_PAPER_NOTE).toContain("SPY, IWM, QQQ, NVDA, AAPL, TSLA, and PLTR");
     expect(AVWAP_PAPER_NOTE).toContain("Paper only");
     expect(CORE_FLOW_WATCHLIST).toHaveLength(15);
-    expect(CORE_FLOW_WATCHLIST).toEqual(expect.arrayContaining(["SPY", "QQQ", "IWM", "AAPL", "NVDA", "TSLA"]));
+    expect(CORE_FLOW_WATCHLIST).toEqual(expect.arrayContaining(["SPY", "QQQ", "IWM", "AAPL", "NVDA", "TSLA", "PLTR"]));
     expect(SCAN_TIME_BUDGET_MS).toBe(240_000);
     expect(AVWAP_HISTORY_BUDGET_MS).toBeLessThan(SCAN_TIME_BUDGET_MS);
     const waves = candleWaves(AVWAP_SYMBOLS.map((symbol) => avwapMinuteHistoryInput(symbol, Date.parse("2026-11-01"), Date.parse("2026-11-12"))));
@@ -556,9 +558,9 @@ describe("NVDA, AAPL, and TSLA", () => {
     expect(repeated).toHaveLength(2);
   });
 
-  it("detects a gap and an anchored cross on NVDA, AAPL, and TSLA", () => {
+  it("detects a gap and an anchored cross on NVDA, AAPL, TSLA, and PLTR", () => {
     const now = DRY_NOW.getTime();
-    for (const symbol of ["NVDA", "AAPL", "TSLA"] as const) {
+    for (const symbol of ["NVDA", "AAPL", "TSLA", "PLTR"] as const) {
       const gap = latestGapDay([
         { date: "2026-11-11", open: 100, close: 100 },
         { date: "2026-11-12", open: 103, close: 101 },
@@ -577,7 +579,7 @@ describe("NVDA, AAPL, and TSLA", () => {
     ])).toBeNull();
   });
 
-  it("dry-runs all six symbols and skips a put over $875 without a spread", () => {
+  it("dry-runs all seven symbols and skips a put over $875 without a spread", () => {
     const snapshots = AVWAP_SYMBOLS.map((symbol) => drySnapshot(symbol));
     const result = advanceAvwapPaper(emptyAvwapPaperBook(), snapshots, DRY_NOW);
     const lines = AVWAP_SYMBOLS.map((symbol) => `${symbol}: ${dryOutcome(result.book.checks[symbol])}`);
@@ -588,9 +590,10 @@ describe("NVDA, AAPL, and TSLA", () => {
       "NVDA: entered",
       "AAPL: skipped: no gap of more than 1% in the daily bars",
       "TSLA: skipped: one contract costs more than $875",
+      "PLTR: entered",
     ]);
     const opened = result.opened.map((trade) => trade.symbol).sort();
-    expect(opened).toEqual(["NVDA", "SPY"]);
+    expect(opened).toEqual(["NVDA", "PLTR", "SPY"]);
     for (const trade of result.opened) {
       expect(trade.putCall).toBe("put");
       expect(trade.entryAsk * 100).toBeLessThanOrEqual(875);
@@ -614,7 +617,7 @@ describe("AVWAP candle batch", () => {
     setAvwapHistoryReadersForTests(null);
   });
 
-  it("asks DXLink for all six symbols in one session and does not call Schwab", async () => {
+  it("asks DXLink for all seven symbols in one session and does not call Schwab", async () => {
     const now = new Date("2026-11-12T15:00:00.000Z");
     const seen: string[][] = [];
     const timeouts: number[] = [];
@@ -725,6 +728,7 @@ const DRY: Record<AvwapSymbol, { prev: number; open: number; nogapOpen: number; 
   NVDA: { prev: 140, open: 145, nogapOpen: 141, ask: 3.5, mode: "enter" },
   AAPL: { prev: 220, open: 226, nogapOpen: 221.5, ask: 2.2, mode: "nogap" },
   TSLA: { prev: 250, open: 260, nogapOpen: 251, ask: 12.5, mode: "enter" },
+  PLTR: { prev: 25, open: 26.2, nogapOpen: 25.1, ask: 1.8, mode: "enter" },
 };
 
 function dryOutcome(check: { entered: boolean; reason: string } | undefined): string {
