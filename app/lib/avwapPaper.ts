@@ -7,6 +7,7 @@ import {
   isChicagoMarketHours,
   isMarketDay,
   isNyseHoliday,
+  previousChicagoTradingDay,
 } from "@/app/lib/marketHours";
 import { schwabOptionSymbol } from "@/app/lib/optionSymbol";
 
@@ -35,6 +36,12 @@ export const AVWAP_BUDGET_DOLLARS = 875;
 export const AVWAP_TARGET_FRACTION = 0.5;
 export const AVWAP_WHATIF_TARGET_FRACTION = 0.25;
 export const AVWAP_WHATIF_TRADING_DAYS = 3;
+/** Trades stored before this exit. Target or expiry only. Their fills are not recomputed. */
+export const AVWAP_RULES_OLD = "old";
+/** Live paper exit: +50% bid, otherwise the last trading day before expiration. */
+export const AVWAP_RULES_VERSION = "target50-preexpiry";
+export type AvwapRulesVersion = typeof AVWAP_RULES_OLD | typeof AVWAP_RULES_VERSION;
+export type AvwapQuoteSource = "tastytrade" | "schwab";
 export const AVWAP_PRIMARY_DTE_MIN = 5;
 export const AVWAP_PRIMARY_DTE_MAX = 10;
 export const AVWAP_PRIMARY_DTE_TARGET = 7;
@@ -69,7 +76,7 @@ const EARLY_FINAL_SCAN_MINUTE = 12 * 60 + 55;
 const EARLY_CLOSE_ET = new Set(["2026-11-27", "2026-12-24", "2027-11-26"]);
 
 export const AVWAP_PAPER_NOTE =
-  `Paper only. No order is placed. Symbols are SPY, IWM, and QQQ. A gap day is a session whose open is more than ${AVWAP_GAP_FRACTION * 100}% from the prior close. Anchored VWAP starts at that day's regular-hours open and uses 5-minute bars (1-minute bars are rolled up), typical price (high + low + close) / 3, with volume floored at 1. The signal is a regular-hours 5-minute close below that VWAP when the previous completed close was at or above it. A later cross counts. Five-minute bars are loaded back to the gap day. The paper trade buys the at-the-money put whose expiry is nearest 7 calendar days and inside 5–10 days, at the ask, in whole contracts whose debit is $${AVWAP_BUDGET_DOLLARS} or less. One contract over $${AVWAP_BUDGET_DOLLARS} is skipped. One open paper position per symbol. Sell at the bid when the bid is at least 50% above the entry ask, otherwise on the expiry-day final scan (3:55 PM ET, or 12:55 PM ET on an early close). What-ifs on the same signal: sell the 7-day put at +25% or after 3 trading days, and the same rule on a put nearest 14 calendar days (12–16). Fees are $${AVWAP_FEE_PER_SIDE.toFixed(2)} per contract per side. Two losing closes in a row block new entries for the rest of that Chicago day. Cumulative paper drawdown over $${AVWAP_DRAWDOWN_FLAG_DOLLARS.toLocaleString("en-US")} is flagged.`;
+  `Paper only. No order is placed. Symbols are SPY, IWM, and QQQ. A gap day is a session whose open is more than ${AVWAP_GAP_FRACTION * 100}% from the prior close. Anchored VWAP starts at that day's regular-hours open and uses 5-minute bars (1-minute bars are rolled up), typical price (high + low + close) / 3, with volume floored at 1. The signal is a regular-hours 5-minute close below that VWAP when the previous completed close was at or above it. A later cross counts. Five-minute bars are loaded back to the gap day. The paper trade buys the at-the-money put whose expiry is nearest 7 calendar days and inside 5–10 days, at the ask, in whole contracts whose debit is $${AVWAP_BUDGET_DOLLARS} or less. One contract over $${AVWAP_BUDGET_DOLLARS} is skipped. One open paper position per symbol. The exit price is the live option bid from Tastytrade or Schwab. The last print and the mid are not used. Sell at the bid when the bid is at least 50% above the entry ask. Otherwise sell at the bid on the final scan of the last trading day before expiration, whatever the gain or loss. That day skips weekends and full-day NYSE holidays. An early close still counts, and its final scan is 12:55 PM ET. A regular final scan is 3:55 PM ET. A missing bid after expiration closes at 0. What-ifs on the same signal, kept so the rows stay comparable: old rule: +50% or expiry, on this same put; the 7-day put at +25% or after 3 trading days not counting the entry day; and +50% or those same 3 trading days on a put nearest 14 calendar days (12–16). Fees are $${AVWAP_FEE_PER_SIDE.toFixed(2)} per contract per side. Two losing closes in a row block new entries for the rest of that Chicago day. Cumulative paper drawdown over $${AVWAP_DRAWDOWN_FLAG_DOLLARS.toLocaleString("en-US")} is flagged.`;
 
 export function isAvwapSymbol(value: string): value is AvwapSymbol {
   return value === "SPY" || value === "IWM" || value === "QQQ";
@@ -373,8 +380,31 @@ export function timeStopDue(openedAt: number, now: Date, tradingDays: number = A
   return isSessionFinalScan(now);
 }
 
-export type AvwapExitReason = "target50" | "target25" | "time3" | "expiry";
-export type AvwapWhatIfId = "target25-or-3d" | "dte14";
+/**
+ * Last NYSE session before `expiration`. Weekends and full-day holidays are skipped.
+ * Early closes stay in. Null when the date cannot be placed.
+ */
+export function lastTradingDayBeforeExpiry(expiration: string): string | null {
+  return previousChicagoTradingDay(expiration);
+}
+
+/**
+ * True on the final scan of the last trading day before expiration, or on any
+ * later scan if that one was missed. A loss does not block this close.
+ */
+export function preExpiryDue(expiration: string, now: Date): boolean {
+  const lastDay = lastTradingDayBeforeExpiry(expiration);
+  if (!lastDay) return false;
+  const today = newYorkDate(now);
+  if (!today) return false;
+  if (today > lastDay) return true;
+  if (today < lastDay) return false;
+  return isSessionFinalScan(now);
+}
+
+export type AvwapPrimaryExit = "target50" | "preExpiry" | "expiry";
+export type AvwapExitReason = AvwapPrimaryExit | "target25" | "time3";
+export type AvwapWhatIfId = "old50-or-expiry" | "target25-or-3d" | "dte14";
 
 export interface AvwapWhatIf {
   id: AvwapWhatIfId;
@@ -418,12 +448,17 @@ export interface AvwapPaperTrade {
   entryBid: number;
   lastBid: number | null;
   lastAsk: number | null;
+  /** Quote time from the live feed when it sent one, otherwise the scan time. */
   lastQuoteAt: number | null;
+  /** Broker that sent the bid used for the latest mark or the close. */
+  quoteSource: AvwapQuoteSource | null;
+  /** old keeps +50% or expiry. target50-preexpiry is the live exit. */
+  rulesVersion: AvwapRulesVersion;
   status: "open" | "closed";
   closedAt: number | null;
   exitBid: number | null;
   exitAsk: number | null;
-  exitReason: "target50" | "expiry" | null;
+  exitReason: AvwapPrimaryExit | null;
   exitNote: string | null;
   pnlDollars: number | null;
   whatIfs: AvwapWhatIf[];
@@ -451,6 +486,9 @@ export interface AvwapMark {
   strike: number;
   bid: number;
   ask: number;
+  /** Epoch milliseconds from the live quote. Null when the feed did not send a time. */
+  quoteTime?: number | null;
+  source?: AvwapQuoteSource | null;
 }
 
 export interface AvwapMarket {
@@ -794,6 +832,9 @@ export interface AvwapBriefRow {
   pnlDollars: number | null;
   unrealizedPnlDollars: number | null;
   exitReason: AvwapPaperTrade["exitReason"];
+  quoteSource: AvwapQuoteSource | null;
+  lastQuoteAt: string | null;
+  rulesVersion: AvwapRulesVersion;
   openedAt: string;
   closedAt: string | null;
 }
@@ -803,6 +844,7 @@ export interface AvwapPaperBrief extends AvwapPaperHealth {
   note: string;
   whatIf25PnlDollars: number;
   whatIf14PnlDollars: number;
+  whatIfOldPnlDollars: number;
   openRows: AvwapBriefRow[];
   closedToday: AvwapBriefRow[];
 }
@@ -827,6 +869,7 @@ export function avwapPaperBrief(
     note: AVWAP_PAPER_NOTE,
     whatIf25PnlDollars: whatIfTotal(trades, "target25-or-3d"),
     whatIf14PnlDollars: whatIfTotal(trades, "dte14"),
+    whatIfOldPnlDollars: whatIfTotal(trades, "old50-or-expiry"),
     openRows,
     closedToday,
   };
@@ -854,6 +897,7 @@ export interface AvwapPaperSection {
   drawdown: AvwapDrawdown;
   whatIf25PnlDollars: number;
   whatIf14PnlDollars: number;
+  whatIfOldPnlDollars: number;
   notes: Partial<Record<AvwapSymbol, string>>;
   updatedAt: number | null;
   open: AvwapViewTrade[];
@@ -894,6 +938,7 @@ export function avwapPaperSection(book: AvwapPaperBook, now: Date, stored: boole
     drawdown,
     whatIf25PnlDollars: whatIfTotal(book.trades, "target25-or-3d"),
     whatIf14PnlDollars: whatIfTotal(book.trades, "dte14"),
+    whatIfOldPnlDollars: whatIfTotal(book.trades, "old50-or-expiry"),
     notes: book.notes,
     updatedAt: book.updatedAt,
     open,
@@ -905,6 +950,7 @@ export function avwapPaperSection(book: AvwapPaperBook, now: Date, stored: boole
 export function formatAvwapPaperAlert(trade: AvwapPaperTrade): string {
   const target = trade.entryAsk * (1 + AVWAP_TARGET_FRACTION);
   const debit = trade.entryAsk * 100 * trade.contracts;
+  const lastDay = lastTradingDayBeforeExpiry(trade.expiration) ?? trade.expiration;
   const alt = trade.whatIfs.find((leg) => leg.id === "dte14");
   const altLine = !alt || alt.status === "skipped"
     ? `14-day what-if skipped${alt?.skipReason ? `: ${escapeHtml(alt.skipReason)}` : "."}`
@@ -915,8 +961,8 @@ Paper only. No order is placed. This is not an A or a B alert.
 
 Gap-day anchored VWAP reject. Anchor ${escapeHtml(trade.anchorDate)} (${(trade.gap * 100).toFixed(2)}% vs the prior close). 5-minute close $${money(trade.signalClose)} below AVWAP $${money(trade.signalVwap)}.
 Buy <b>${trade.contracts}</b> at the ask $${money(trade.entryAsk)} (bid $${money(trade.entryBid)}). Debit $${money(debit)}, within the $${AVWAP_BUDGET_DOLLARS} cap.
-Sell at the bid when the bid is at least $${money(target)} (+50%). Otherwise close on the expiry-day final scan.
-What-if on this contract: +25% or sell after 3 trading days. ${altLine}`;
+Sell at the bid when the bid is at least $${money(target)} (+50%). Otherwise sell at the bid on the final scan of ${escapeHtml(lastDay)}.
+What-if, old rule: +50% or expiry, on this same put. What-if on this contract: +25% or sell after 3 trading days. ${altLine}`;
 }
 
 interface Setup {
@@ -1001,9 +1047,11 @@ function openTrade(snap: AvwapSnapshot, setup: Setup, today: string, nowMs: numb
   if (contracts == null || contracts < 1) return null;
   const dte = calendarDaysBetween(today, quote.expiration);
   if (dte == null || dte < AVWAP_PRIMARY_DTE_MIN || dte > AVWAP_PRIMARY_DTE_MAX) return null;
+  const oldRule = liveWhatIf("old50-or-expiry", "old rule: +50% or expiry", quote, contracts);
   const primary = liveWhatIf("target25-or-3d", "7 DTE, +25% or 3 trading days", quote, contracts);
   const altQuote = pickQuote(snap.quotes, today, AVWAP_ALT_DTE_MIN, AVWAP_ALT_DTE_MAX, AVWAP_ALT_DTE_TARGET, setup.strike);
   const alt = altLeg(altQuote, setup.strike);
+  const seenAt = quoteTimeOf(quote);
   return {
     id: `avwap-${snap.symbol}-${setup.signal.at}`,
     symbol: snap.symbol,
@@ -1023,7 +1071,9 @@ function openTrade(snap: AvwapSnapshot, setup: Setup, today: string, nowMs: numb
     entryBid: quote.bid,
     lastBid: quote.bid,
     lastAsk: quote.ask,
-    lastQuoteAt: nowMs,
+    lastQuoteAt: seenAt ?? nowMs,
+    quoteSource: quoteSourceOf(quote),
+    rulesVersion: AVWAP_RULES_VERSION,
     status: "open",
     closedAt: null,
     exitBid: null,
@@ -1031,7 +1081,7 @@ function openTrade(snap: AvwapSnapshot, setup: Setup, today: string, nowMs: numb
     exitReason: null,
     exitNote: null,
     pnlDollars: null,
-    whatIfs: [primary, alt],
+    whatIfs: [oldRule, primary, alt],
   };
 }
 
@@ -1098,17 +1148,30 @@ function markTrade(trade: AvwapPaperTrade, snap: AvwapSnapshot | null, now: Date
     const quote = findMark(quotes, trade.expiration, trade.strike);
     const bid = quote ? quote.bid : null;
     const ask = quote ? quote.ask : null;
+    const seenAt = quote ? quoteTimeOf(quote) : null;
+    const source = quote ? quoteSourceOf(quote) : null;
     const withMark: AvwapPaperTrade = quote
-      ? { ...trade, lastBid: bid, lastAsk: ask, lastQuoteAt: nowMs }
+      ? {
+        ...trade,
+        lastBid: bid,
+        lastAsk: ask,
+        lastQuoteAt: seenAt ?? nowMs,
+        quoteSource: source ?? trade.quoteSource,
+      }
       : trade;
+    const live = trade.rulesVersion === AVWAP_RULES_VERSION;
     const target = bid != null && bidHitsTarget(bid, trade.entryAsk, AVWAP_TARGET_FRACTION);
+    const preExpiry = live && preExpiryDue(trade.expiration, now);
     const expiry = isExpiryFinalScan(now, trade.expiration);
+    const closeSource = source ?? trade.quoteSource;
     if (target && bid != null && ask != null) {
-      next = closePrimary(withMark, bid, ask, "target50", null, nowMs);
-    } else if (expiry && bid != null && ask != null) {
-      next = closePrimary(withMark, bid, ask, "expiry", null, nowMs);
+      next = closePrimary(withMark, bid, ask, "target50", null, nowMs, seenAt, closeSource);
+    } else if (preExpiry && bid != null && ask != null) {
+      next = closePrimary(withMark, bid, ask, "preExpiry", null, nowMs, seenAt, closeSource);
+    } else if (!live && expiry && bid != null && ask != null) {
+      next = closePrimary(withMark, bid, ask, "expiry", null, nowMs, seenAt, closeSource);
     } else if (expiry && newYorkDate(now) > trade.expiration) {
-      next = closePrimary(withMark, 0, ask, "expiry", "No bid after expiration. Closed at 0.", nowMs);
+      next = closePrimary(withMark, 0, ask, "expiry", "No bid after expiration. Closed at 0.", nowMs, null, null);
     } else {
       next = withMark;
     }
@@ -1120,9 +1183,11 @@ function closePrimary(
   trade: AvwapPaperTrade,
   bid: number,
   ask: number | null,
-  reason: "target50" | "expiry",
+  reason: AvwapPrimaryExit,
   note: string | null,
   nowMs: number,
+  quoteAt: number | null,
+  source: AvwapQuoteSource | null,
 ): AvwapPaperTrade {
   return {
     ...trade,
@@ -1135,7 +1200,8 @@ function closePrimary(
     pnlDollars: avwapPnl(trade.entryAsk, bid, trade.contracts),
     lastBid: bid,
     lastAsk: ask,
-    lastQuoteAt: nowMs,
+    lastQuoteAt: quoteAt ?? nowMs,
+    quoteSource: source,
   };
 }
 
@@ -1147,14 +1213,18 @@ function markWhatIf(leg: AvwapWhatIf, quotes: readonly AvwapMark[], now: Date, o
     : leg;
   const bid = quote ? quote.bid : null;
   const ask = quote ? quote.ask : null;
-  if (leg.id === "target25-or-3d") {
+  if (leg.id === "old50-or-expiry") {
+    if (bid != null && ask != null && bidHitsTarget(bid, leg.entryAsk, AVWAP_TARGET_FRACTION)) {
+      return closeWhatIf(marked, bid, ask, "target50", null, now.getTime());
+    }
+  } else if (leg.id === "target25-or-3d") {
     if (bid != null && ask != null && bidHitsTarget(bid, leg.entryAsk, AVWAP_WHATIF_TARGET_FRACTION)) {
       return closeWhatIf(marked, bid, ask, "target25", null, now.getTime());
     }
   } else if (bid != null && ask != null && bidHitsTarget(bid, leg.entryAsk, AVWAP_TARGET_FRACTION)) {
     return closeWhatIf(marked, bid, ask, "target50", null, now.getTime());
   }
-  if (timeStopDue(openedAt, now) && bid != null && ask != null) {
+  if (leg.id !== "old50-or-expiry" && timeStopDue(openedAt, now) && bid != null && ask != null) {
     return closeWhatIf(marked, bid, ask, "time3", null, now.getTime());
   }
   if (leg.expiration && isExpiryFinalScan(now, leg.expiration)) {
@@ -1294,6 +1364,9 @@ function briefRow(trade: AvwapPaperTrade): AvwapBriefRow {
     pnlDollars: trade.pnlDollars,
     unrealizedPnlDollars: unrealized,
     exitReason: trade.exitReason,
+    quoteSource: trade.quoteSource,
+    lastQuoteAt: trade.lastQuoteAt == null ? null : new Date(trade.lastQuoteAt).toISOString(),
+    rulesVersion: trade.rulesVersion,
     openedAt: new Date(trade.openedAt).toISOString(),
     closedAt: trade.closedAt == null ? null : new Date(trade.closedAt).toISOString(),
   };
@@ -1467,11 +1540,13 @@ function parseTrade(value: unknown): AvwapPaperTrade | null {
     lastBid: finiteNumber(row.lastBid),
     lastAsk: finiteNumber(row.lastAsk),
     lastQuoteAt: finiteNumber(row.lastQuoteAt),
+    quoteSource: parseQuoteSource(row.quoteSource),
+    rulesVersion: parseAvwapRulesVersion(row.rulesVersion),
     status,
     closedAt: closed ? finiteNumber(row.closedAt) : null,
     exitBid: closed ? exitBid : null,
     exitAsk: closed ? finiteNumber(row.exitAsk) : null,
-    exitReason: closed && (row.exitReason === "target50" || row.exitReason === "expiry") ? row.exitReason : null,
+    exitReason: closed && isPrimaryExit(row.exitReason) ? row.exitReason : null,
     exitNote: typeof row.exitNote === "string" ? row.exitNote.slice(0, 200) : null,
     pnlDollars: closed ? pnl : null,
     whatIfs,
@@ -1481,7 +1556,7 @@ function parseTrade(value: unknown): AvwapPaperTrade | null {
 function parseWhatIf(value: unknown): AvwapWhatIf | null {
   if (!value || typeof value !== "object") return null;
   const row = value as Record<string, unknown>;
-  const id = row.id === "target25-or-3d" || row.id === "dte14" ? row.id : null;
+  const id = row.id === "old50-or-expiry" || row.id === "target25-or-3d" || row.id === "dte14" ? row.id : null;
   if (!id) return null;
   const status = row.status === "open" || row.status === "closed" || row.status === "skipped" ? row.status : null;
   if (!status) return null;
@@ -1508,8 +1583,29 @@ function parseWhatIf(value: unknown): AvwapWhatIf | null {
   };
 }
 
+function isPrimaryExit(value: unknown): value is AvwapPrimaryExit {
+  return value === "target50" || value === "preExpiry" || value === "expiry";
+}
+
 function isExitReason(value: unknown): value is AvwapExitReason {
-  return value === "target50" || value === "target25" || value === "time3" || value === "expiry";
+  return isPrimaryExit(value) || value === "target25" || value === "time3";
+}
+
+function parseAvwapRulesVersion(value: unknown): AvwapRulesVersion {
+  return value === AVWAP_RULES_VERSION ? AVWAP_RULES_VERSION : AVWAP_RULES_OLD;
+}
+
+function parseQuoteSource(value: unknown): AvwapQuoteSource | null {
+  return value === "tastytrade" || value === "schwab" ? value : null;
+}
+
+function quoteTimeOf(quote: AvwapMark): number | null {
+  const at = quote.quoteTime;
+  return typeof at === "number" && Number.isFinite(at) && at > 0 ? at : null;
+}
+
+function quoteSourceOf(quote: AvwapMark): AvwapQuoteSource | null {
+  return quote.source === "tastytrade" || quote.source === "schwab" ? quote.source : null;
 }
 
 function finiteNumber(value: unknown): number | null {

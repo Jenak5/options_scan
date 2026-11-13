@@ -16,9 +16,13 @@ import {
   type AvwapSnapshot,
 } from "@/app/lib/avwapPaper";
 import { newYorkDate } from "@/app/lib/flow";
-import { getPriceHistory, getQuoteEntries } from "@/app/lib/marketData";
-import type { PriceCandle } from "@/app/lib/schwabParse";
+import { preferredDataSource } from "@/app/lib/dataSourcePref";
+import { getPriceHistory, recordMarketData } from "@/app/lib/marketData";
+import { redactReason } from "@/app/lib/marketDataHealth";
+import { createSchwabProvider, createTastytradeProvider } from "@/app/lib/marketProviders";
+import type { PriceCandle, ParsedQuote } from "@/app/lib/schwabParse";
 import { normalizeOptionSymbol } from "@/app/lib/optionSymbol";
+import { schwabBackupAvailable } from "@/app/lib/schwab";
 import { readAvwapPaperBookText, resolveStoreKind, updateAvwapPaperBook } from "@/app/lib/schwabStore";
 import { sendTelegramAlert } from "@/app/lib/telegram";
 
@@ -32,6 +36,9 @@ import { sendTelegramAlert } from "@/app/lib/telegram";
 export interface AvwapQuote {
   bid: number;
   ask: number;
+  /** Epoch milliseconds from the live quote. Null when the feed did not send a time. */
+  quoteTime?: number | null;
+  source?: "tastytrade" | "schwab" | null;
 }
 
 export interface AvwapPaperDeps {
@@ -143,6 +150,8 @@ function attachQuotes(
       strike: request.strike,
       bid: quote.bid,
       ask: quote.ask,
+      quoteTime: quote.quoteTime ?? null,
+      source: quote.source === "tastytrade" || quote.source === "schwab" ? quote.source : null,
     });
   }
   return { ...market, quotes: marks };
@@ -197,18 +206,113 @@ async function loadMinutes(symbol: string, now: Date, anchorDate: string | null)
   return Array.from(byTime.values()).sort((a, b) => a.t - b.t);
 }
 
+const tastytradeQuotes = createTastytradeProvider();
+const schwabQuotes = createSchwabProvider();
+
+/**
+ * Live option bids for the paper book. Tastytrade first, then Schwab for
+ * symbols still missing, matching the market-data router. Each fill keeps
+ * the source that sent it. Bid and ask only: the last print and the mid
+ * are not read. No order, account, or transaction call.
+ */
 async function loadQuotes(symbols: readonly string[]): Promise<Map<string, AvwapQuote>> {
   const map = new Map<string, AvwapQuote>();
-  if (symbols.length === 0) return map;
-  const read = await getQuoteEntries(symbols.slice());
-  for (let i = 0; i < read.entries.length; i++) {
-    const entry = read.entries[i];
+  const wanted = uniqueSymbols(symbols);
+  if (wanted.length === 0) return map;
+  if (preferredDataSource() === "schwab") {
+    try {
+      const read = await schwabQuotes.getQuoteEntries(wanted);
+      takePuts(read.entries, "schwab", map);
+      await recordMarketData("quotes", "schwab", null, `${wanted.length} symbols`);
+      return map;
+    } catch (err) {
+      if (isAbort(err)) throw err;
+      throw new Error("AVWAP option quotes were not read");
+    }
+  }
+
+  let reason = "empty Tastytrade answer";
+  try {
+    const read = await tastytradeQuotes.getQuoteEntries(wanted);
+    takePuts(read.entries, "tastytrade", map);
+    if (missingSymbols(wanted, map).length === 0) {
+      await recordMarketData("quotes", "tastytrade", null, `${wanted.length} symbols`);
+      return map;
+    }
+    reason = map.size > 0 ? "partial Tastytrade quote" : "empty Tastytrade answer";
+  } catch (err) {
+    if (isAbort(err)) throw err;
+    reason = redactReason(err);
+  }
+
+  const missing = missingSymbols(wanted, map);
+  if (!(await schwabBackupAvailable())) {
+    if (map.size > 0) {
+      await recordMarketData("quotes", "tastytrade", "partial", `${wanted.length} symbols`);
+      return map;
+    }
+    throw new Error("AVWAP option quotes were not read");
+  }
+
+  try {
+    const filled = await schwabQuotes.getQuoteEntries(missing);
+    const before = map.size;
+    takePuts(filled.entries, "schwab", map);
+    await recordMarketData("quotes", map.size > before ? "schwab" : "tastytrade", reason, `${wanted.length} symbols`);
+    return map;
+  } catch (err) {
+    if (isAbort(err)) throw err;
+    if (map.size > 0) {
+      await recordMarketData("quotes", "tastytrade", "partial", `${wanted.length} symbols`);
+      return map;
+    }
+    throw new Error("AVWAP option quotes were not read");
+  }
+}
+
+function takePuts(entries: readonly ParsedQuote[], source: "tastytrade" | "schwab", map: Map<string, AvwapQuote>): void {
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
     const contract = entry.contract;
     if (contract.putCall !== "put") continue;
     if (!(contract.ask >= 0) || !(contract.bid >= 0)) continue;
-    map.set(normalizeOptionSymbol(entry.symbol), { bid: contract.bid, ask: contract.ask });
+    if (!Number.isFinite(contract.bid) || !Number.isFinite(contract.ask)) continue;
+    const key = normalizeOptionSymbol(entry.symbol);
+    if (map.has(key)) continue;
+    const quoteTime = contract.quoteTime;
+    map.set(key, {
+      bid: contract.bid,
+      ask: contract.ask,
+      quoteTime: typeof quoteTime === "number" && Number.isFinite(quoteTime) && quoteTime > 0 ? quoteTime : null,
+      source,
+    });
   }
-  return map;
+}
+
+function uniqueSymbols(symbols: readonly string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < symbols.length; i++) {
+    const symbol = symbols[i].trim();
+    if (!symbol) continue;
+    const key = normalizeOptionSymbol(symbol);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(symbol);
+  }
+  return out;
+}
+
+function missingSymbols(wanted: readonly string[], map: ReadonlyMap<string, AvwapQuote>): string[] {
+  const missing: string[] = [];
+  for (let i = 0; i < wanted.length; i++) {
+    if (!map.has(normalizeOptionSymbol(wanted[i]))) missing.push(wanted[i]);
+  }
+  return missing;
+}
+
+function isAbort(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
 }
 
 function toBar(candle: PriceCandle): CandleBar {

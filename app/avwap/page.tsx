@@ -37,6 +37,9 @@ interface Trade {
   entryBid: number;
   lastBid: number | null;
   lastAsk: number | null;
+  lastQuoteAt: number | null;
+  quoteSource: "tastytrade" | "schwab" | null;
+  rulesVersion: string;
   status: "open" | "closed";
   exitBid: number | null;
   exitAsk: number | null;
@@ -76,6 +79,7 @@ interface Section {
   };
   whatIf25PnlDollars: number;
   whatIf14PnlDollars: number;
+  whatIfOldPnlDollars: number;
   notes: Partial<Record<string, string>>;
   updatedAt: number | null;
   open: Trade[];
@@ -116,6 +120,15 @@ function whatIfText(leg: WhatIf | null): string {
   return `${leg.exitReason ?? "closed"} ${money(leg.pnlDollars)}`;
 }
 
+function exitDetail(trade: Trade): string {
+  if (trade.status !== "closed") return "";
+  const reason = trade.exitReason ?? "closed";
+  const bid = trade.exitBid == null ? "" : ` · bid ${money(trade.exitBid)}`;
+  const quoteTime = trade.lastQuoteAt == null ? "" : ` · quote ${when(trade.lastQuoteAt)} ET`;
+  const source = trade.quoteSource === "tastytrade" || trade.quoteSource === "schwab" ? ` · ${trade.quoteSource}` : "";
+  return `${reason}${bid}${quoteTime}${source}`;
+}
+
 export default function AvwapPage() {
   const [page, setPage] = useState<Section | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -144,7 +157,7 @@ export default function AvwapPage() {
           <span style={{ color: "#06b6d4" }}>▣</span> AVWAP Paper
         </h1>
         <p style={{ margin: "6px 0 0", color: "#94a3b8", fontSize: 15, lineHeight: 1.45 }}>
-          Paper only. No order is placed. The 5-minute scan records these rows from Schwab quotes and price history.
+          Paper only. No order is placed. Exits use the live option bid from Tastytrade or Schwab: sell at +50%, or on the final scan of the last trading day before expiration.
         </p>
         <PageLinks current="avwap" />
       </div>
@@ -168,6 +181,7 @@ export default function AvwapPage() {
               <Stat label="Primary P&L" value={money(health?.cumulativePnlDollars)} />
               <Stat label="Open mark" value={money(page.drawdown.openUnrealizedDollars)} />
               <Stat label="Max drawdown" value={money(health?.maxDrawdownDollars)} />
+              <Stat label="Old rule" value={money(page.whatIfOldPnlDollars)} />
               <Stat label="+25% / 3-day" value={money(page.whatIf25PnlDollars)} />
               <Stat label="14 DTE what-if" value={money(page.whatIf14PnlDollars)} />
             </div>
@@ -202,6 +216,7 @@ function TradeTable({ rows, empty, showRunning = false }: { rows: Trade[]; empty
             <th>Exit or last bid / ask</th>
             <th>P&L</th>
             {showRunning ? <th>Running</th> : null}
+            <th>Old rule</th>
             <th>+25% / 3-day</th>
             <th>14 DTE</th>
             <th>When</th>
@@ -218,15 +233,19 @@ function TradeTable({ rows, empty, showRunning = false }: { rows: Trade[]; empty
                   ${trade.strike} put {trade.expiration}
                   <div style={{ color: "#64748b", fontSize: 12 }}>
                     anchor {trade.anchorDate} · close {trade.signalClose.toFixed(2)} vs VWAP {trade.signalVwap.toFixed(2)}
-                    {trade.exitReason ? ` · ${trade.exitReason}` : ""}
+                    {trade.rulesVersion ? ` · version ${trade.rulesVersion}` : ""}
                     {trade.exitNote ? ` · ${trade.exitNote}` : ""}
                   </div>
+                  {trade.status === "closed" ? (
+                    <div style={{ color: "#cbd5e1", fontSize: 12 }}>{exitDetail(trade)}</div>
+                  ) : null}
                 </td>
                 <td>{trade.contracts}</td>
                 <td>{quote(trade.entryBid, trade.entryAsk)}</td>
                 <td>{exit}</td>
                 <td style={{ color: pnl != null && pnl < 0 ? "#fca5a5" : "#86efac" }}>{money(pnl)}</td>
                 {showRunning ? <td>{money(trade.runningPnlDollars)}</td> : null}
+                <td>{whatIfText(whatIf(trade, "old50-or-expiry"))}</td>
                 <td>{whatIfText(whatIf(trade, "target25-or-3d"))}</td>
                 <td>{whatIfText(whatIf(trade, "dte14"))}</td>
                 <td>{trade.status === "closed" ? when(trade.closedAt) : when(trade.openedAt)}</td>
