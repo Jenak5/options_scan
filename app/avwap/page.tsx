@@ -56,6 +56,7 @@ interface Section {
   note: string;
   paperOnly: true;
   stored: boolean;
+  symbols?: string[];
   budgetDollars: number;
   feePerSide: number;
   drawdownFlagDollars: number;
@@ -116,6 +117,18 @@ function whatIfText(leg: WhatIf | null): string {
   return `${leg.exitReason ?? "closed"} ${money(leg.pnlDollars)}`;
 }
 
+function symbolReasons(page: Section): string {
+  const names = page.symbols && page.symbols.length > 0
+    ? page.symbols
+    : ["SPY", "IWM", "QQQ", "NVDA", "AAPL", "TSLA"];
+  const parts: string[] = [];
+  for (let i = 0; i < names.length; i++) {
+    const reason = page.health.symbols?.[names[i]]?.reason;
+    if (reason) parts.push(`${names[i]}: ${reason}.`);
+  }
+  return parts.length > 0 ? ` ${parts.join(" ")}` : "";
+}
+
 export default function AvwapPage() {
   const [page, setPage] = useState<Section | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -172,10 +185,7 @@ export default function AvwapPage() {
               <Stat label="14 DTE what-if" value={money(page.whatIf14PnlDollars)} />
             </div>
             <p style={{ color: "#64748b", fontSize: 13, margin: "0 0 18px" }}>
-              Fees are ${page.feePerSide.toFixed(2)} per contract per side. Debit cap ${page.budgetDollars}. Last check {page.health.lastCheckAt ? when(Date.parse(page.health.lastCheckAt)) : "—"}.
-              {page.health.symbols?.SPY ? ` SPY: ${page.health.symbols.SPY.reason}.` : ""}
-              {page.health.symbols?.IWM ? ` IWM: ${page.health.symbols.IWM.reason}.` : ""}
-              {page.health.symbols?.QQQ ? ` QQQ: ${page.health.symbols.QQQ.reason}.` : ""}
+              Fees are ${page.feePerSide.toFixed(2)} per contract per side. Debit cap ${page.budgetDollars}. Last check {page.health.lastCheckAt ? when(Date.parse(page.health.lastCheckAt)) : "—"}.{symbolReasons(page)}
             </p>
             <h2 style={{ fontSize: 16, margin: "0 0 8px" }}>Open</h2>
             <TradeTable rows={page.open} empty="No open AVWAP paper position." />

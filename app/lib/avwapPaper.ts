@@ -23,7 +23,7 @@ import { schwabOptionSymbol } from "@/app/lib/optionSymbol";
  * the bid, and the debit cap is $875.
  */
 
-export const AVWAP_SYMBOLS = ["SPY", "IWM", "QQQ"] as const;
+export const AVWAP_SYMBOLS = ["SPY", "IWM", "QQQ", "NVDA", "AAPL", "TSLA"] as const;
 export type AvwapSymbol = (typeof AVWAP_SYMBOLS)[number];
 
 /** RESULTS.md: "the last gap of more than 1%". A gap equal to 1% is not a gap day. */
@@ -68,11 +68,17 @@ const EARLY_FINAL_SCAN_MINUTE = 12 * 60 + 55;
 /** NYSE early closes. Cash session ends at 1:00 PM ET. Same dates as the other paper scans. */
 const EARLY_CLOSE_ET = new Set(["2026-11-27", "2026-12-24", "2027-11-26"]);
 
+function avwapSymbolSentence(): string {
+  const names = AVWAP_SYMBOLS as readonly string[];
+  if (names.length <= 1) return names.join("");
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+}
+
 export const AVWAP_PAPER_NOTE =
-  `Paper only. No order is placed. Symbols are SPY, IWM, and QQQ. A gap day is a session whose open is more than ${AVWAP_GAP_FRACTION * 100}% from the prior close. Anchored VWAP starts at that day's regular-hours open and uses 5-minute bars (1-minute bars are rolled up), typical price (high + low + close) / 3, with volume floored at 1. The signal is a regular-hours 5-minute close below that VWAP when the previous completed close was at or above it. A later cross counts. Five-minute bars are loaded back to the gap day. The paper trade buys the at-the-money put whose expiry is nearest 7 calendar days and inside 5–10 days, at the ask, in whole contracts whose debit is $${AVWAP_BUDGET_DOLLARS} or less. One contract over $${AVWAP_BUDGET_DOLLARS} is skipped. One open paper position per symbol. Sell at the bid when the bid is at least 50% above the entry ask, otherwise on the expiry-day final scan (3:55 PM ET, or 12:55 PM ET on an early close). What-ifs on the same signal: sell the 7-day put at +25% or after 3 trading days, and the same rule on a put nearest 14 calendar days (12–16). Fees are $${AVWAP_FEE_PER_SIDE.toFixed(2)} per contract per side. Two losing closes in a row block new entries for the rest of that Chicago day. Cumulative paper drawdown over $${AVWAP_DRAWDOWN_FLAG_DOLLARS.toLocaleString("en-US")} is flagged.`;
+  `Paper only. No order is placed. Symbols are ${avwapSymbolSentence()}. A gap day is a session whose open is more than ${AVWAP_GAP_FRACTION * 100}% from the prior close. Anchored VWAP starts at that day's regular-hours open and uses 5-minute bars (1-minute bars are rolled up), typical price (high + low + close) / 3, with volume floored at 1. The signal is a regular-hours 5-minute close below that VWAP when the previous completed close was at or above it. A later cross counts. Five-minute bars are loaded back to the gap day. The paper trade buys the at-the-money put whose expiry is nearest 7 calendar days and inside 5–10 days, at the ask, in whole contracts whose debit is $${AVWAP_BUDGET_DOLLARS} or less. One contract over $${AVWAP_BUDGET_DOLLARS} is skipped. One open paper position per symbol. Sell at the bid when the bid is at least 50% above the entry ask, otherwise on the expiry-day final scan (3:55 PM ET, or 12:55 PM ET on an early close). What-ifs on the same signal: sell the 7-day put at +25% or after 3 trading days, and the same rule on a put nearest 14 calendar days (12–16). Fees are $${AVWAP_FEE_PER_SIDE.toFixed(2)} per contract per side. Two losing closes in a row block new entries for the rest of that Chicago day. Cumulative paper drawdown over $${AVWAP_DRAWDOWN_FLAG_DOLLARS.toLocaleString("en-US")} is flagged.`;
 
 export function isAvwapSymbol(value: string): value is AvwapSymbol {
-  return value === "SPY" || value === "IWM" || value === "QQQ";
+  return (AVWAP_SYMBOLS as readonly string[]).includes(value);
 }
 
 /** Weekday session inside America/Chicago 8:30–15:00, and not a full-day NYSE holiday. */
@@ -477,11 +483,9 @@ export function emptySymbolCheck(reason = "not checked yet"): AvwapSymbolCheck {
 }
 
 export function emptySymbolChecks(): Record<AvwapSymbol, AvwapSymbolCheck> {
-  return {
-    SPY: emptySymbolCheck(),
-    IWM: emptySymbolCheck(),
-    QQQ: emptySymbolCheck(),
-  };
+  const checks = {} as Record<AvwapSymbol, AvwapSymbolCheck>;
+  for (let i = 0; i < AVWAP_SYMBOLS.length; i++) checks[AVWAP_SYMBOLS[i]] = emptySymbolCheck();
+  return checks;
 }
 
 export function emptyAvwapPaperBook(): AvwapPaperBook {

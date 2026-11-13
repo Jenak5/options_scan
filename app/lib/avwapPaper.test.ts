@@ -5,6 +5,8 @@ import {
   AVWAP_DRAWDOWN_FLAG_DOLLARS,
   AVWAP_FEE_PER_SIDE,
   AVWAP_GAP_FRACTION,
+  AVWAP_PAPER_NOTE,
+  AVWAP_SYMBOLS,
   advanceAvwapPaper,
   anchorCovered,
   atmStrike,
@@ -20,6 +22,7 @@ import {
   firstAvwapReject,
   fiveMinuteBars,
   formatAvwapPaperAlert,
+  isAvwapSymbol,
   isGapSession,
   latestAvwapCross,
   latestGapDay,
@@ -32,8 +35,24 @@ import {
   timeStopDue,
   type AvwapPaperTrade,
   type AvwapSnapshot,
+  type AvwapSymbol,
 } from "@/app/lib/avwapPaper";
-import { formatAvwapPaperLog, runAvwapPaper, type AvwapPaperDeps } from "@/app/lib/avwapPaperRun";
+import {
+  AVWAP_HISTORY_BUDGET_MS,
+  avwapMinuteHistoryInput,
+  candleWaves,
+  formatAvwapPaperLog,
+  loadAvwapDailyBars,
+  loadAvwapMinuteBars,
+  runAvwapPaper,
+  setAvwapHistoryReadersForTests,
+  type AvwapPaperDeps,
+} from "@/app/lib/avwapPaperRun";
+import { CORE_FLOW_WATCHLIST } from "@/app/lib/flow";
+import { SCAN_TIME_BUDGET_MS } from "@/app/lib/scanHealth";
+import { DEFAULT_MAX_LOSS_DOLLARS } from "@/app/lib/risk";
+import { equityHistoryKey, type EquityHistoryInput } from "@/app/lib/tastytradeMarket";
+import type { PriceCandle } from "@/app/lib/schwabParse";
 import { normalizeOptionSymbol } from "@/app/lib/optionSymbol";
 import { clearMemoryStoreForTests } from "@/app/lib/schwabStore";
 
@@ -265,6 +284,9 @@ describe("gap day and signal", () => {
     expect(section.health.lastCheckAt).toBe(now.toISOString());
     expect(section.health.symbols.SPY.reason).toMatch(/2026-09-17/);
     expect(section.health.symbols.QQQ.reason).toMatch(/no bars/);
+    expect(section.health.symbols.NVDA.reason).toMatch(/no bars/);
+    expect(section.health.symbols.AAPL.reason).toMatch(/no bars/);
+    expect(section.health.symbols.TSLA.reason).toMatch(/no bars/);
     expect(formatAvwapPaperLog({
       opened: 0,
       closed: 0,
@@ -506,6 +528,234 @@ describe("AVWAP paper scan", () => {
     expect(parseAvwapPaperBook(deps.text()).notes.SPY).toMatch(/\$875/);
   });
 });
+
+const DRY_NOW = new Date("2026-11-12T14:40:00.000Z");
+
+describe("NVDA, AAPL, and TSLA", () => {
+  it("keeps the $875 cap and the 15-name scan budget", () => {
+    expect(AVWAP_SYMBOLS).toEqual(["SPY", "IWM", "QQQ", "NVDA", "AAPL", "TSLA"]);
+    expect(isAvwapSymbol("NVDA")).toBe(true);
+    expect(isAvwapSymbol("AAPL")).toBe(true);
+    expect(isAvwapSymbol("TSLA")).toBe(true);
+    expect(isAvwapSymbol("AMD")).toBe(false);
+    expect(AVWAP_BUDGET_DOLLARS).toBe(875);
+    expect(AVWAP_BUDGET_DOLLARS).toBe(DEFAULT_MAX_LOSS_DOLLARS);
+    expect(AVWAP_PAPER_NOTE).toContain("NVDA, AAPL, and TSLA");
+    expect(AVWAP_PAPER_NOTE).toContain("Paper only");
+    expect(CORE_FLOW_WATCHLIST).toHaveLength(15);
+    expect(CORE_FLOW_WATCHLIST).toEqual(expect.arrayContaining(["SPY", "QQQ", "IWM", "AAPL", "NVDA", "TSLA"]));
+    expect(SCAN_TIME_BUDGET_MS).toBe(240_000);
+    expect(AVWAP_HISTORY_BUDGET_MS).toBeLessThan(SCAN_TIME_BUDGET_MS);
+    const waves = candleWaves(AVWAP_SYMBOLS.map((symbol) => avwapMinuteHistoryInput(symbol, Date.parse("2026-11-01"), Date.parse("2026-11-12"))));
+    expect(waves).toHaveLength(1);
+    expect(waves[0].map((input) => input.symbol)).toEqual([...AVWAP_SYMBOLS]);
+    const repeated = candleWaves([
+      avwapMinuteHistoryInput("TSLA", Date.parse("2026-11-01"), Date.parse("2026-11-08")),
+      avwapMinuteHistoryInput("TSLA", Date.parse("2026-11-08"), Date.parse("2026-11-12")),
+    ]);
+    expect(repeated).toHaveLength(2);
+  });
+
+  it("detects a gap and an anchored cross on NVDA, AAPL, and TSLA", () => {
+    const now = DRY_NOW.getTime();
+    for (const symbol of ["NVDA", "AAPL", "TSLA"] as const) {
+      const gap = latestGapDay([
+        { date: "2026-11-11", open: 100, close: 100 },
+        { date: "2026-11-12", open: 103, close: 101 },
+      ]);
+      expect(gap?.date).toBe("2026-11-12");
+      expect(isGapSession(103, 100)).toBe(true);
+      const bars = crossBars(103);
+      const signal = latestAvwapCross(bars, "2026-11-12", now);
+      expect(signal, symbol).not.toBeNull();
+      expect(signal && signal.close < signal.vwap).toBe(true);
+      expect(signal && signal.priorClose >= signal.priorVwap).toBe(true);
+    }
+    expect(latestGapDay([
+      { date: "2026-11-11", open: 220, close: 220 },
+      { date: "2026-11-12", open: 221.5, close: 222 },
+    ])).toBeNull();
+  });
+
+  it("dry-runs all six symbols and skips a put over $875 without a spread", () => {
+    const snapshots = AVWAP_SYMBOLS.map((symbol) => drySnapshot(symbol));
+    const result = advanceAvwapPaper(emptyAvwapPaperBook(), snapshots, DRY_NOW);
+    const lines = AVWAP_SYMBOLS.map((symbol) => `${symbol}: ${dryOutcome(result.book.checks[symbol])}`);
+    expect(lines).toEqual([
+      "SPY: entered",
+      "IWM: no signal: anchored at 2026-11-12; no close below the anchored VWAP after a prior close at or above it",
+      "QQQ: skipped: one contract costs more than $875",
+      "NVDA: entered",
+      "AAPL: skipped: no gap of more than 1% in the daily bars",
+      "TSLA: skipped: one contract costs more than $875",
+    ]);
+    const opened = result.opened.map((trade) => trade.symbol).sort();
+    expect(opened).toEqual(["NVDA", "SPY"]);
+    for (const trade of result.opened) {
+      expect(trade.putCall).toBe("put");
+      expect(trade.entryAsk * 100).toBeLessThanOrEqual(875);
+      expect(formatAvwapPaperAlert(trade)).toContain(trade.symbol);
+      expect(formatAvwapPaperAlert(trade)).toContain("PAPER ONLY");
+      expect(formatAvwapPaperAlert(trade)).not.toContain("spread");
+    }
+    expect(result.book.notes.QQQ).toBe("one contract costs more than $875");
+    expect(result.book.notes.TSLA).toBe("one contract costs more than $875");
+    expect(result.opened.find((trade) => trade.symbol === "TSLA")).toBeUndefined();
+    const plan = quotePlan(emptyAvwapPaperBook(), AVWAP_SYMBOLS.map((symbol) => drySnapshot(symbol, "enter")), DRY_NOW);
+    expect(plan.length).toBeGreaterThan(0);
+    expect(plan.length).toBeLessThanOrEqual(100);
+    expect(new Set(plan.map((item) => item.symbol))).toEqual(new Set(AVWAP_SYMBOLS));
+    expect(plan.every((item) => item.occ.includes("P"))).toBe(true);
+  });
+});
+
+describe("AVWAP candle batch", () => {
+  afterEach(() => {
+    setAvwapHistoryReadersForTests(null);
+  });
+
+  it("asks DXLink for all six symbols in one session and does not call Schwab", async () => {
+    const now = new Date("2026-11-12T15:00:00.000Z");
+    const seen: string[][] = [];
+    const timeouts: number[] = [];
+    setAvwapHistoryReadersForTests({
+      source: "tastytrade",
+      prefetch: async (inputs, timeoutMs) => {
+        seen.push(inputs.map((input) => input.symbol));
+        timeouts.push(timeoutMs);
+        const map = new Map<string, PriceCandle[]>();
+        for (let i = 0; i < inputs.length; i++) {
+          map.set(equityHistoryKey(inputs[i]), coveringCandles(inputs[i].frequencyType === "daily"));
+        }
+        return map;
+      },
+      router: async () => {
+        throw new Error("router backup ran");
+      },
+      schwab: async () => {
+        throw new Error("Schwab ran as primary");
+      },
+    });
+    const daily = await Promise.all(AVWAP_SYMBOLS.map((symbol) => loadAvwapDailyBars(symbol, now)));
+    expect(daily.every((bars) => bars.length > 0)).toBe(true);
+    expect(seen).toEqual([[...AVWAP_SYMBOLS]]);
+    expect(timeouts).toEqual([15_000]);
+    seen.length = 0;
+    timeouts.length = 0;
+    const minutes = await Promise.all(AVWAP_SYMBOLS.map((symbol) => loadAvwapMinuteBars(symbol, now, "2026-09-17")));
+    expect(minutes.every((bars) => bars.length > 0)).toBe(true);
+    const chunks = minuteHistoryChunks("2026-09-17", now.getTime());
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(seen).toHaveLength(chunks.length);
+    expect(seen.every((batch) => batch.join(",") === AVWAP_SYMBOLS.join(","))).toBe(true);
+    expect(timeouts.every((ms) => ms === 15_000)).toBe(true);
+  });
+
+  it("uses Schwab chunks only after Tastytrade misses, and keeps each chunk inside 8 days", async () => {
+    const now = new Date("2026-11-12T15:00:00.000Z");
+    const routerInputs: EquityHistoryInput[] = [];
+    const schwabInputs: EquityHistoryInput[] = [];
+    setAvwapHistoryReadersForTests({
+      source: "tastytrade",
+      prefetch: async () => new Map(),
+      router: async (input) => {
+        routerInputs.push(input);
+        return [candleAt("2026-11-12T14:30:00.000Z")];
+      },
+      schwab: async (input) => {
+        schwabInputs.push(input);
+        return [candleAt("2026-11-12T14:30:00.000Z")];
+      },
+      schwabReady: async () => true,
+    });
+    const bars = await loadAvwapMinuteBars("TSLA", now, "2026-11-10");
+    expect(bars.length).toBeGreaterThan(0);
+    expect(schwabInputs).toEqual([]);
+    expect(routerInputs.length).toBeGreaterThan(0);
+    expect(routerInputs.every((input) => input.symbol === "TSLA")).toBe(true);
+    expect(routerInputs.every((input) => (input.endDate ?? 0) - (input.startDate ?? 0) <= 8 * 24 * 60 * 60 * 1000)).toBe(true);
+
+    routerInputs.length = 0;
+    setAvwapHistoryReadersForTests({
+      source: "tastytrade",
+      prefetch: async () => {
+        throw new Error("DXLink down");
+      },
+      router: async (input) => {
+        routerInputs.push(input);
+        return [];
+      },
+      schwab: async (input) => {
+        schwabInputs.push(input);
+        return [candleAt("2026-11-12T14:30:00.000Z")];
+      },
+      schwabReady: async () => true,
+    });
+    const backedUp = await loadAvwapMinuteBars("QQQ", now, "2026-11-10");
+    expect(backedUp.length).toBeGreaterThan(0);
+    expect(routerInputs).toEqual([]);
+    expect(schwabInputs.length).toBeGreaterThan(0);
+    expect(schwabInputs.every((input) => input.symbol === "QQQ")).toBe(true);
+    expect(schwabInputs.every((input) => (input.endDate ?? 0) - (input.startDate ?? 0) <= 8 * 24 * 60 * 60 * 1000)).toBe(true);
+  });
+});
+
+function drySnapshot(symbol: AvwapSymbol, force?: "enter"): AvwapSnapshot {
+  const spec = DRY[symbol];
+  const mode = force ?? spec.mode;
+  const open = mode === "nogap" ? spec.nogapOpen : spec.open;
+  const bars = mode === "flat" ? flatBars(open) : crossBars(open);
+  const strike = atmStrike(bars[bars.length - 1].c) ?? 1;
+  const ask = mode === "enter" ? spec.ask : 2.2;
+  return {
+    symbol,
+    daily: [
+      { date: "2026-11-11", open: spec.prev, close: spec.prev },
+      { date: "2026-11-12", open, close: open },
+    ],
+    bars,
+    quotes: [{ expiration: "2026-11-19", strike, bid: Math.max(0.05, ask - 0.1), ask }],
+  };
+}
+
+const DRY: Record<AvwapSymbol, { prev: number; open: number; nogapOpen: number; ask: number; mode: "enter" | "flat" | "nogap" }> = {
+  SPY: { prev: 500, open: 510, nogapOpen: 502, ask: 2.2, mode: "enter" },
+  IWM: { prev: 200, open: 204, nogapOpen: 201, ask: 2.2, mode: "flat" },
+  QQQ: { prev: 400, open: 408, nogapOpen: 402, ask: 9, mode: "enter" },
+  NVDA: { prev: 140, open: 145, nogapOpen: 141, ask: 3.5, mode: "enter" },
+  AAPL: { prev: 220, open: 226, nogapOpen: 221.5, ask: 2.2, mode: "nogap" },
+  TSLA: { prev: 250, open: 260, nogapOpen: 251, ask: 12.5, mode: "enter" },
+};
+
+function dryOutcome(check: { entered: boolean; reason: string } | undefined): string {
+  if (!check) return "skipped: not checked";
+  if (check.entered) return "entered";
+  if (check.reason.includes("no close below")) return `no signal: ${check.reason}`;
+  return `skipped: ${check.reason}`;
+}
+
+function crossBars(open: number): CandleBar[] {
+  return [
+    bar("2026-11-12T14:30:00.000Z", open, open, open, open, 1000),
+    bar("2026-11-12T14:35:00.000Z", open, open, open - 3, open - 2, 1000),
+  ];
+}
+
+function flatBars(open: number): CandleBar[] {
+  return [
+    bar("2026-11-12T14:30:00.000Z", open, open + 1, open, open + 0.6, 1000),
+    bar("2026-11-12T14:35:00.000Z", open + 0.6, open + 1.4, open + 0.5, open + 1, 1000),
+  ];
+}
+
+function candleAt(iso: string): PriceCandle {
+  return { datetime: Date.parse(iso), open: 10, high: 11, low: 9, close: 10, volume: 100 };
+}
+
+function coveringCandles(daily: boolean): PriceCandle[] {
+  if (daily) return [candleAt("2026-11-11T14:00:00.000Z"), candleAt("2026-11-12T14:00:00.000Z")];
+  return [candleAt("2026-09-17T14:30:00.000Z"), candleAt("2026-11-12T14:55:00.000Z")];
+}
 
 function memoryDeps(daily = vi.fn(async (symbol: string) => (symbol === "SPY" ? gapDays() : [
   bar("2026-10-27T14:00:00.000Z", 100, 101, 99, 100, 10),
