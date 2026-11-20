@@ -22,6 +22,7 @@ import {
   SCHWAB_BLOB_AVWAP_PAPER_PATH,
   SCHWAB_BLOB_CALLS_PAPER_PATH,
   SCHWAB_BLOB_UNUSUAL_PATH,
+  SCHWAB_BLOB_EOD_FLOW_PATH,
   SCHWAB_BLOB_SHADOW_BOOK_PATH,
   SCHWAB_BLOB_TRADE_LOG_PATH,
   SCHWAB_BLOB_TOKEN_ENV,
@@ -90,6 +91,7 @@ const JG_VWAP_BOOK_KEY = "oes:paper:jg-vwap";
 const AVWAP_PAPER_BOOK_KEY = "oes:paper:avwap";
 const CALLS_PAPER_BOOK_KEY = "oes:paper:calls";
 const UNUSUAL_BOOK_KEY = "oes:flow:unusual";
+const EOD_FLOW_KEY = "oes:eod:flow";
 const BLOB_WRITE_ATTEMPTS = 4;
 const JSON_CONDITIONAL_ATTEMPTS = 3;
 /** Re-read the token store only inside this window before access-token expiry. */
@@ -142,6 +144,7 @@ interface MemoryBag {
   avwapPaperBook: string | null;
   callsPaperBook: string | null;
   unusualBook: string | null;
+  eodFlow: string | null;
 }
 
 interface TokenEnvelope {
@@ -263,7 +266,7 @@ export function setSchwabBlobClientForTests(next: SchwabBlobClient | null): void
 function memoryBag(): MemoryBag {
   const g = globalThis as typeof globalThis & { __oesSchwabMemory?: MemoryBag };
   if (!g.__oesSchwabMemory) {
-    g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null, avwapPaperBook: null, callsPaperBook: null, unusualBook: null };
+    g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null, avwapPaperBook: null, callsPaperBook: null, unusualBook: null, eodFlow: null };
   } else if (!g.__oesSchwabMemory.flowSnapshots) {
     g.__oesSchwabMemory.flowSnapshots = {};
   }
@@ -274,12 +277,13 @@ function memoryBag(): MemoryBag {
   if (g.__oesSchwabMemory.avwapPaperBook === undefined) g.__oesSchwabMemory.avwapPaperBook = null;
   if (g.__oesSchwabMemory.callsPaperBook === undefined) g.__oesSchwabMemory.callsPaperBook = null;
   if (g.__oesSchwabMemory.unusualBook === undefined) g.__oesSchwabMemory.unusualBook = null;
+  if (g.__oesSchwabMemory.eodFlow === undefined) g.__oesSchwabMemory.eodFlow = null;
   return g.__oesSchwabMemory;
 }
 
 export function clearMemoryStoreForTests(): void {
   const g = globalThis as typeof globalThis & { __oesSchwabMemory?: MemoryBag };
-  g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null, avwapPaperBook: null, callsPaperBook: null, unusualBook: null };
+  g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null, avwapPaperBook: null, callsPaperBook: null, unusualBook: null, eodFlow: null };
   memoryStoreStatus = null;
   tokenCache = null;
   tokenBlobBlockedUntil = 0;
@@ -1127,6 +1131,82 @@ export async function updateUnusualBook(change: (current: string | null) => stri
   }
 }
 
+/**
+ * Daily QQQ and NDX end-of-day flow. Same store order as the trade log.
+ * A failed read does not overwrite the history.
+ */
+export async function readEodFlowText(): Promise<string | null> {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") return null;
+  if (kind === "memory") return memoryBag().eodFlow;
+  if (kind === "blob") {
+    const token = blobToken();
+    if (!token) return null;
+    const read = await readBlobJson(SCHWAB_BLOB_EOD_FLOW_PATH, token);
+    if (read.state === "error") {
+      await recordStoreFailure("eod-flow", "read", read.error);
+      return null;
+    }
+    if (read.state !== "ok") return null;
+    return read.text;
+  }
+  try {
+    const raw = await kvCommand(["GET", EOD_FLOW_KEY]);
+    return typeof raw === "string" && raw.length > 0 ? raw : null;
+  } catch (err) {
+    await recordStoreFailure("eod-flow", "read", err);
+    return null;
+  }
+}
+
+export async function updateEodFlow(change: (current: string | null) => string | null): Promise<boolean> {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") {
+    await recordStoreFailure("eod-flow", "write", new Error("EOD flow storage is not configured"));
+    return false;
+  }
+  const guarded = (current: string | null): string | null => {
+    if (!hasJsonArray(current, "rows")) return null;
+    const next = change(current);
+    if (next == null) return null;
+    if (!hasJsonArray(next, "rows")) return null;
+    return next;
+  };
+  if (kind === "memory") {
+    const bag = memoryBag();
+    const next = guarded(bag.eodFlow);
+    if (next == null) {
+      await recordStoreFailure("eod-flow", "write", new Error("Refusing to overwrite an unreadable EOD flow history"));
+      return false;
+    }
+    bag.eodFlow = next;
+    await clearStoreFailure("eod-flow");
+    return true;
+  }
+  if (kind === "blob") return writeBlobJson(SCHWAB_BLOB_EOD_FLOW_PATH, "eod-flow", "EOD flow", guarded);
+  let current: string | null;
+  try {
+    const raw = await kvCommand(["GET", EOD_FLOW_KEY]);
+    current = typeof raw === "string" && raw.length > 0 ? raw : null;
+  } catch (err) {
+    await recordStoreFailure("eod-flow", "read", err);
+    return false;
+  }
+  const next = guarded(current);
+  if (next == null) {
+    await recordStoreFailure("eod-flow", "write", new Error("Refusing to overwrite an unreadable EOD flow history"));
+    return false;
+  }
+  try {
+    await kvCommand(["SET", EOD_FLOW_KEY, next]);
+    await clearStoreFailure("eod-flow");
+    return true;
+  } catch (err) {
+    await recordStoreFailure("eod-flow", "write", err);
+    return false;
+  }
+}
+
 async function updateBlobAlertBook(change: (current: string | null) => string | null): Promise<boolean> {
   return writeBlobJson(SCHWAB_BLOB_ALERT_BOOK_PATH, "alert-book", "Alert book", change);
 }
@@ -1631,7 +1711,7 @@ async function readBlobJson(pathname: string, token: string, bypassCache = false
   }
 }
 
-type JsonStoreTarget = "alert-book" | "flow-snapshots" | "trade-log" | "shadow-book" | "jg-vwap" | "avwap-paper" | "calls-paper" | "unusual-flow";
+type JsonStoreTarget = "alert-book" | "flow-snapshots" | "trade-log" | "shadow-book" | "jg-vwap" | "avwap-paper" | "calls-paper" | "unusual-flow" | "eod-flow";
 
 interface StoreFailureRecord {
   target: JsonStoreTarget;
@@ -2013,6 +2093,7 @@ function storeLabel(target: JsonStoreTarget): string {
   if (target === "avwap-paper") return "AVWAP paper log";
   if (target === "calls-paper") return "Calls paper log";
   if (target === "unusual-flow") return "Unusual flow";
+  if (target === "eod-flow") return "EOD flow";
   return "Flow snapshot store";
 }
 

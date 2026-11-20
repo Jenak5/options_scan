@@ -75,6 +75,12 @@ export const SCHWAB_BLOB_CALLS_PAPER_PATH = "schwab/calls-paper-book.json";
 export const SCHWAB_BLOB_UNUSUAL_PATH = "schwab/unusual-flow.json";
 
 /**
+ * Private blob for the daily QQQ and NDX end-of-day option flow.
+ * Same store as the trade log and the alert scorecard. Not a token.
+ */
+export const SCHWAB_BLOB_EOD_FLOW_PATH = "schwab/eod-flow.json";
+
+/**
  * Small private blob for the last alert-book, flow, or trade-log failure.
  * Written without ifMatch so a status line can be saved even when a
  * conditional overwrite of the alert book is rejected.

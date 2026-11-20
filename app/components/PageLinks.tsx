@@ -4,6 +4,7 @@ const LINKS = [
   { id: "gate", href: "/gate", label: "Gate" },
   { id: "trades", href: "/trades", label: "Trade log" },
   { id: "scorecard", href: "/scorecard", label: "Alert scorecard" },
+  { id: "eod", href: "/eod", label: "EOD Flow" },
   { id: "avwap", href: "/avwap", label: "AVWAP Paper" },
   { id: "calls", href: "/calls", label: "Calls Paper" },
   { id: "unusual", href: "/unusual", label: "Unusual flow" },
@@ -11,7 +12,7 @@ const LINKS = [
   { id: "report", href: "/?tab=report", label: "Alert Report" },
 ] as const;
 
-export function PageLinks({ current }: { current: "flow" | "gate" | "trades" | "report" | "scorecard" | "grade" | "learn" | "avwap" | "calls" | "unusual" }) {
+export function PageLinks({ current }: { current: "flow" | "gate" | "trades" | "report" | "scorecard" | "grade" | "learn" | "avwap" | "calls" | "unusual" | "eod" }) {
   const links = LINKS.filter((link) => link.id !== current);
   return (
     <nav aria-label="Pages" style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>

@@ -22,7 +22,16 @@ const WEEKDAYS = new Set(["Mon", "Tue", "Wed", "Thu", "Fri"]);
  *
  * January 1, 2028 falls on Saturday. NYSE does not observe a New Year's holiday for it,
  * so Friday, December 31, 2027 is a normal session.
+ *
+ * Early closes (1:00 p.m. Eastern), not full-day holidays. The cash session
+ * still runs, and the end-of-day flow job still runs after that close.
  */
+const NYSE_EARLY_CLOSES: ReadonlySet<string> = new Set([
+  "2026-11-27", // day after Thanksgiving
+  "2026-12-24", // Christmas Eve
+  "2027-11-26", // day after Thanksgiving
+]);
+
 const NYSE_HOLIDAYS: ReadonlySet<string> = new Set([
   // 2026
   "2026-01-01", // New Year's Day
@@ -135,6 +144,25 @@ export function isNyseHoliday(date: Date = new Date()): boolean {
   const clock = newYorkClock(date);
   if (!clock) return false;
   return NYSE_HOLIDAYS.has(clock.date);
+}
+
+/** True when the New York calendar date is an NYSE early close (1:00 p.m. Eastern). */
+export function isNyseEarlyClose(date: Date = new Date()): boolean {
+  const clock = newYorkClock(date);
+  if (!clock) return false;
+  return NYSE_EARLY_CLOSES.has(clock.date);
+}
+
+/** True when this YYYY-MM-DD New York date is an NYSE early close. */
+export function isNyseEarlyCloseYmd(ymd: string): boolean {
+  return NYSE_EARLY_CLOSES.has(ymd);
+}
+
+/** Weekday window in America/New_York, start inclusive and end exclusive. */
+export function isNewYorkMinuteWindow(now: Date, startMinute: number, endMinute: number): boolean {
+  const clock = newYorkClock(now);
+  if (!clock || !clock.weekdaySession) return false;
+  return clock.minutes >= startMinute && clock.minutes < endMinute;
 }
 
 /**
@@ -286,6 +314,8 @@ function isTradingDayYmd(ymd: string): boolean {
 
 interface NewYorkClock {
   weekday: string;
+  /** Minutes from midnight in America/New_York. */
+  minutes: number;
   /** YYYY-MM-DD in America/New_York. */
   date: string;
   weekdaySession: boolean;
@@ -297,6 +327,9 @@ const newYorkClockFormatter = new Intl.DateTimeFormat("en-US", {
   year: "numeric",
   month: "2-digit",
   day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
 });
 
 function newYorkClock(now: Date): NewYorkClock | null {
@@ -306,9 +339,13 @@ function newYorkClock(now: Date): NewYorkClock | null {
   const year = parts.find((part) => part.type === "year")?.value ?? "";
   const month = parts.find((part) => part.type === "month")?.value ?? "";
   const day = parts.find((part) => part.type === "day")?.value ?? "";
-  if (!year || !month || !day || !weekday) return null;
+  let hour = Number(parts.find((part) => part.type === "hour")?.value);
+  const minute = Number(parts.find((part) => part.type === "minute")?.value);
+  if (!year || !month || !day || !weekday || !Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  if (hour === 24) hour = 0;
   return {
     weekday,
+    minutes: hour * 60 + minute,
     date: `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`,
     weekdaySession: WEEKDAYS.has(weekday),
   };
