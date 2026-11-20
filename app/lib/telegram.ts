@@ -23,6 +23,94 @@ export function telegramRetryWaitMs(body: string, retryAfterHeader: string | nul
   return Math.min(TELEGRAM_RETRY_CAP_MS, Math.round(seconds * 1000));
 }
 
+export interface TelegramSendResult {
+  ok: boolean;
+  messageId: number | null;
+}
+
+/**
+ * Same send as sendTelegramAlert, plus one inline Got it button.
+ * Returns the Telegram message id when the send is accepted.
+ * Does not change sendTelegramAlert.
+ */
+export async function sendTelegramAlertWithButton(message: string, callbackData: string): Promise<TelegramSendResult> {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!telegramConfigured() || !token || !chatId) {
+    console.warn("Telegram not configured, skipping alert");
+    return { ok: false, messageId: null };
+  }
+  if (!/^ack:[A-Za-z0-9]{4,40}$/.test(callbackData)) return { ok: false, messageId: null };
+  const body = JSON.stringify({
+    chat_id: chatId,
+    text: message,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: [[{ text: "Got it", callback_data: callbackData }]] },
+  });
+  return postTelegramJson(token, "sendMessage", body);
+}
+
+export async function editTelegramMessage(messageId: number, text: string): Promise<boolean> {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!telegramConfigured() || !token || !chatId || !Number.isInteger(messageId)) return false;
+  const body = JSON.stringify({
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: [] },
+  });
+  const sent = await postTelegramJson(token, "editMessageText", body);
+  return sent.ok;
+}
+
+export async function answerTelegramCallback(callbackId: string): Promise<boolean> {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token || callbackId.trim() === "") return false;
+  const body = JSON.stringify({ callback_query_id: callbackId });
+  const sent = await postTelegramJson(token, "answerCallbackQuery", body);
+  return sent.ok;
+}
+
+export async function setTelegramWebhook(url: string, secret: string): Promise<{ ok: boolean; description: string | null }> {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token || !url || !secret) return { ok: false, description: "Telegram webhook is not configured" };
+  const body = JSON.stringify({
+    url,
+    secret_token: secret,
+    allowed_updates: ["callback_query", "message"],
+  });
+  try {
+    const res = await fetch(`${TG_API}${token}/setWebhook`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+    const text = await res.text();
+    const safe = redactTelegram(redactTelegram(text, token), secret);
+    let description: string | null = null;
+    let ok = res.ok;
+    try {
+      const parsed = JSON.parse(text) as { ok?: boolean; description?: unknown };
+      ok = parsed.ok === true && res.ok;
+      description = typeof parsed.description === "string" ? redactTelegram(redactTelegram(parsed.description, token), secret) : null;
+    } catch {
+      description = safe.slice(0, 180);
+    }
+    return { ok, description };
+  } catch (err) {
+    const messageText = err instanceof Error ? err.message : "unknown";
+    return { ok: false, description: redactTelegram(redactTelegram(messageText, token), secret).slice(0, 180) };
+  }
+}
+
+export function publicAppOrigin(): string {
+  return appOrigin();
+}
+
 export async function sendTelegramAlert(message: string): Promise<boolean> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -67,6 +155,46 @@ function postTelegram(token: string, body: string): Promise<Response> {
     headers: { "Content-Type": "application/json" },
     body,
   });
+}
+
+async function postTelegramJson(token: string, method: string, body: string): Promise<TelegramSendResult> {
+  try {
+    let res = await fetch(`${TG_API}${token}/${method}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+    if (res.status === 429) {
+      const text = await res.text();
+      const waitMs = telegramRetryWaitMs(text, res.headers.get("retry-after"));
+      console.info(`Telegram rate limited, retrying once after ${waitMs}ms`);
+      await sleep(waitMs);
+      res = await fetch(`${TG_API}${token}/${method}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      });
+    }
+    const text = await res.text();
+    if (!res.ok) {
+      console.error(`Telegram send failed (${res.status}): ${redactTelegram(text, token)}`);
+      return { ok: false, messageId: null };
+    }
+    let messageId: number | null = null;
+    try {
+      const parsed = JSON.parse(text) as { ok?: boolean; result?: { message_id?: unknown } };
+      if (parsed.ok === false) return { ok: false, messageId: null };
+      const id = parsed.result?.message_id;
+      if (typeof id === "number" && Number.isInteger(id)) messageId = id;
+    } catch {
+      return { ok: true, messageId: null };
+    }
+    return { ok: true, messageId };
+  } catch (err) {
+    const messageText = err instanceof Error ? err.message : "unknown";
+    console.error(`Telegram send error: ${redactTelegram(messageText, token)}`);
+    return { ok: false, messageId: null };
+  }
 }
 
 function sleep(ms: number): Promise<void> {

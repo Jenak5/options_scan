@@ -3,7 +3,7 @@ import { isAuthorized } from "@/app/lib/auth";
 import { safeNextPath } from "@/app/lib/safeNext";
 import { isBearerPath } from "@/app/lib/bearerPaths";
 
-const PUBLIC_PATHS = new Set(["/login", "/api/auth/login", "/api/auth/logout"]);
+const PUBLIC_PATHS = new Set(["/login", "/api/auth/login", "/api/auth/logout", "/api/telegram/webhook"]);
 
 /**
  * These are full browser navigations, not fetch() calls.
