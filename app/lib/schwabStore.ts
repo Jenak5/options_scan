@@ -26,6 +26,7 @@ import {
   SCHWAB_BLOB_GEX_PATH,
   SCHWAB_BLOB_AVWAP_REPEAT_PATH,
   SCHWAB_BLOB_AVWAP_TRIAL_PATH,
+  SCHWAB_BLOB_SCAN_PAUSE_PATH,
   SCHWAB_BLOB_TELEGRAM_MUTE_PATH,
   SCHWAB_BLOB_SHADOW_BOOK_PATH,
   SCHWAB_BLOB_TRADE_LOG_PATH,
@@ -99,6 +100,7 @@ const EOD_FLOW_KEY = "oes:eod:flow";
 const GEX_KEY = "oes:gex:levels";
 const AVWAP_REPEAT_KEY = "oes:avwap:repeat";
 const AVWAP_TRIAL_KEY = "oes:avwap:trial";
+const SCAN_PAUSE_KEY = "oes:scan:pause";
 const TELEGRAM_MUTE_KEY = "oes:telegram:mute";
 const BLOB_WRITE_ATTEMPTS = 4;
 const JSON_CONDITIONAL_ATTEMPTS = 3;
@@ -157,6 +159,7 @@ interface MemoryBag {
   avwapRepeat: string | null;
   telegramMute: string | null;
   avwapTrial: string | null;
+  scanPause: string | null;
 }
 
 interface TokenEnvelope {
@@ -278,7 +281,7 @@ export function setSchwabBlobClientForTests(next: SchwabBlobClient | null): void
 function memoryBag(): MemoryBag {
   const g = globalThis as typeof globalThis & { __oesSchwabMemory?: MemoryBag };
   if (!g.__oesSchwabMemory) {
-    g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null, avwapPaperBook: null, callsPaperBook: null, unusualBook: null, eodFlow: null, gexBook: null, avwapRepeat: null, telegramMute: null, avwapTrial: null };
+    g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null, avwapPaperBook: null, callsPaperBook: null, unusualBook: null, eodFlow: null, gexBook: null, avwapRepeat: null, telegramMute: null, avwapTrial: null, scanPause: null };
   } else if (!g.__oesSchwabMemory.flowSnapshots) {
     g.__oesSchwabMemory.flowSnapshots = {};
   }
@@ -294,12 +297,13 @@ function memoryBag(): MemoryBag {
   if (g.__oesSchwabMemory.avwapRepeat === undefined) g.__oesSchwabMemory.avwapRepeat = null;
   if (g.__oesSchwabMemory.telegramMute === undefined) g.__oesSchwabMemory.telegramMute = null;
   if (g.__oesSchwabMemory.avwapTrial === undefined) g.__oesSchwabMemory.avwapTrial = null;
+  if (g.__oesSchwabMemory.scanPause === undefined) g.__oesSchwabMemory.scanPause = null;
   return g.__oesSchwabMemory;
 }
 
 export function clearMemoryStoreForTests(): void {
   const g = globalThis as typeof globalThis & { __oesSchwabMemory?: MemoryBag };
-  g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null, avwapPaperBook: null, callsPaperBook: null, unusualBook: null, eodFlow: null, gexBook: null, avwapRepeat: null, telegramMute: null, avwapTrial: null };
+  g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null, avwapPaperBook: null, callsPaperBook: null, unusualBook: null, eodFlow: null, gexBook: null, avwapRepeat: null, telegramMute: null, avwapTrial: null, scanPause: null };
   memoryStoreStatus = null;
   tokenCache = null;
   tokenBlobBlockedUntil = 0;
@@ -1483,6 +1487,78 @@ export async function updateAvwapTrial(change: (current: string | null) => strin
   }
 }
 
+export async function readScanPauseText(): Promise<string | null> {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") return null;
+  if (kind === "memory") return memoryBag().scanPause;
+  if (kind === "blob") {
+    const token = blobToken();
+    if (!token) return null;
+    const read = await readBlobJson(SCHWAB_BLOB_SCAN_PAUSE_PATH, token);
+    if (read.state !== "ok") return null;
+    return read.text;
+  }
+  try {
+    const raw = await kvCommand(["GET", SCAN_PAUSE_KEY]);
+    return typeof raw === "string" && raw.length > 0 ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function readScanPauseState(): Promise<"ok" | "unreadable"> {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") return "unreadable";
+  if (kind === "memory") return "ok";
+  if (kind === "blob") {
+    const token = blobToken();
+    if (!token) return "unreadable";
+    const read = await readBlobJson(SCHWAB_BLOB_SCAN_PAUSE_PATH, token);
+    if (read.state === "error") return "unreadable";
+    return "ok";
+  }
+  try {
+    await kvCommand(["GET", SCAN_PAUSE_KEY]);
+    return "ok";
+  } catch {
+    return "unreadable";
+  }
+}
+
+export async function updateScanPause(change: (current: string | null) => string | null): Promise<boolean> {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") return false;
+  const guarded = (current: string | null): string | null => {
+    if (current != null && current.trim() !== "" && !isJsonObject(current)) return null;
+    const next = change(current);
+    if (next == null || !isJsonObject(next)) return null;
+    return next;
+  };
+  if (kind === "memory") {
+    const bag = memoryBag();
+    const next = guarded(bag.scanPause);
+    if (next == null) return false;
+    bag.scanPause = next;
+    return true;
+  }
+  if (kind === "blob") return writeBlobJson(SCHWAB_BLOB_SCAN_PAUSE_PATH, "scan-pause", "Scan pause", guarded);
+  let current: string | null;
+  try {
+    const raw = await kvCommand(["GET", SCAN_PAUSE_KEY]);
+    current = typeof raw === "string" && raw.length > 0 ? raw : null;
+  } catch {
+    return false;
+  }
+  const next = guarded(current);
+  if (next == null) return false;
+  try {
+    await kvCommand(["SET", SCAN_PAUSE_KEY, next]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function updateBlobAlertBook(change: (current: string | null) => string | null): Promise<boolean> {
   return writeBlobJson(SCHWAB_BLOB_ALERT_BOOK_PATH, "alert-book", "Alert book", change);
 }
@@ -1987,7 +2063,7 @@ async function readBlobJson(pathname: string, token: string, bypassCache = false
   }
 }
 
-type JsonStoreTarget = "alert-book" | "flow-snapshots" | "trade-log" | "shadow-book" | "jg-vwap" | "avwap-paper" | "calls-paper" | "unusual-flow" | "eod-flow" | "gex" | "avwap-repeat" | "telegram-mute" | "avwap-trial";
+type JsonStoreTarget = "alert-book" | "flow-snapshots" | "trade-log" | "shadow-book" | "jg-vwap" | "avwap-paper" | "calls-paper" | "unusual-flow" | "eod-flow" | "gex" | "avwap-repeat" | "telegram-mute" | "avwap-trial" | "scan-pause";
 
 interface StoreFailureRecord {
   target: JsonStoreTarget;
@@ -2374,6 +2450,7 @@ function storeLabel(target: JsonStoreTarget): string {
   if (target === "avwap-repeat") return "AVWAP repeat";
   if (target === "telegram-mute") return "Telegram mute";
   if (target === "avwap-trial") return "AVWAP trial";
+  if (target === "scan-pause") return "Scan pause";
   return "Flow snapshot store";
 }
 

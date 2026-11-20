@@ -46,6 +46,7 @@ const ENV_KEYS = [
   "TELEGRAM_BOT_TOKEN",
   "TELEGRAM_CHAT_ID",
   "XAI_API_KEY",
+  "SCAN_PAUSE_NON_AVWAP",
 ] as const;
 
 const saved: Record<string, string | undefined> = {};
@@ -88,6 +89,7 @@ describe("Schwab backup while tastytrade is preferred", () => {
     process.env.SCHWAB_REDIRECT_URI = "https://example.com/schwab";
     process.env.CRON_SECRET = "cron-token";
     process.env.FLOW_WATCHLIST = "TLT,GLD,XLF";
+    process.env.SCAN_PAUSE_NON_AVWAP = "0";
     clearMemoryStoreForTests();
     clearFlowScanCacheForTests();
     clearLevelCacheForTests();

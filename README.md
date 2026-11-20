@@ -123,6 +123,7 @@ Set every secret in Vercel as a **Sensitive** variable. Do not leave them readab
 | `TELEGRAM_CHAT_ID` | Yes | Chat that receives alerts |
 | `TELEGRAM_WEBHOOK_SECRET` | Yes | Secret Telegram sends on AVWAP acknowledgement callbacks. If unset, AVWAP open alerts send once and do not repeat |
 | `TELEGRAM_MUTE_OTHER` | No | Set to `0` to force A/B, paper, and Schwab notices back onto Telegram. Any other value, or leaving it unset, keeps the stored mute setting. The default setting is muted |
+| `SCAN_PAUSE_NON_AVWAP` | No | Set to `0` to force the full 5-minute scan on. Any other value, or leaving it unset, keeps the stored pause. The default is paused, so the scan runs AVWAP only |
 | `XAI_API_KEY` | Yes | Grok API key for screening and research |
 | `SCHWAB_CLIENT_ID` | Yes | Schwab Market Data app key |
 | `SCHWAB_CLIENT_SECRET` | Yes | Schwab Market Data app secret |
@@ -328,6 +329,8 @@ The checks are pure functions. `npm test` runs them against fixture chains and d
 8. Non-AVWAP Telegram alerts are muted by default. AVWAP trade-open alerts, including the AMD, MSFT, and AMZN paper trial opens, and a scanner-failure warning still send. Sign in and POST `/api/telegram/mute` with `{"muted": false}` to turn the other alerts back on, or `{"muted": true}` to mute them again. The Alerts tab shows the same switch. No redeploy is required.
 
 The AMD, MSFT, and AMZN trial is a separate paper book on the AVWAP page and at `GET /api/avwap-trial`. It does not change the seven-name AVWAP book. It runs in the existing 5-minute scan after that book is saved. No extra cron. Trial exits are not sent to Telegram.
+
+The 5-minute scan can be limited to AVWAP. The default is paused. GET and POST `/api/scan/pause` with `{"paused": true}` or `{"paused": false}` while signed in or with the cron bearer. The Flow, Alerts, Trade Log, Scorecard, and EOD Flow pages show the banner. EOD flow, GEX, candles, the daily note, and the AVWAP repeat cron are separate and are not paused by this switch. `SCAN_PAUSE_NON_AVWAP=0` forces the full scan on.
 
 ## Deploy notes
 

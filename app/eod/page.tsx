@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { PageLinks } from "@/app/components/PageLinks";
+import { ScanPauseBanner } from "@/app/components/ScanPauseBanner";
 import { EodRowNote } from "@/app/eod/EodRowNote";
 import {
   eodOverallRows,
@@ -83,6 +84,7 @@ export default function EodFlowPage() {
         <PageLinks current="eod" />
       </div>
       <div style={{ padding: "16px 16px 40px" }}>
+        <ScanPauseBanner />
         {error && <p style={{ color: "#fca5a5" }}>{error}</p>}
         {page && !page.stored && (
           <p style={{ color: "#fbbf24", marginBottom: 12 }}>

@@ -22,6 +22,7 @@ const ENV_KEYS = [
   "TELEGRAM_CHAT_ID",
   "XAI_API_KEY",
   "FLOW_WATCHLIST",
+  "SCAN_PAUSE_NON_AVWAP",
 ] as const;
 
 const saved: Record<string, string | undefined> = {};
@@ -49,6 +50,7 @@ beforeEach(() => {
     delete process.env[key];
   }
   process.env.CRON_SECRET = "cron-token";
+  process.env.SCAN_PAUSE_NON_AVWAP = "0";
   clearMemoryStoreForTests();
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.spyOn(flowScan, "scanEstimatedFlow").mockResolvedValue(emptyScan());

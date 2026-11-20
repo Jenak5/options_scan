@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { FlowTab } from "@/app/components/FlowTab";
 import { PaperTradeButton } from "@/app/components/PaperTradeButton";
 import { StoreStatusLine } from "@/app/components/StoreStatusLine";
+import { ScanPauseBanner } from "@/app/components/ScanPauseBanner";
 import { TelegramMuteLine } from "@/app/components/TelegramMuteLine";
 import { formatContractPriceLine, formatFlowPremium } from "@/app/lib/alertConfig";
 import type { AlertSummary, StoredAlert } from "@/app/lib/alertBook";
@@ -823,6 +824,7 @@ export default function OptionsEdgeScanner() {
 
       {/* Content */}
       <div style={{ padding: 24 }}>
+        <ScanPauseBanner />
         {tab === "flow"     && <FlowTab     />}
         {tab === "research" && <ResearchTab />}
         {tab === "alerts"   && <AlertsTab   />}
