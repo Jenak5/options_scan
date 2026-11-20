@@ -7,6 +7,7 @@ import {
   EOD_DXLINK_CHUNK,
   eodContractsFromNested,
   eodCronDecision,
+  eodOverallRows,
   eodRatioSeries,
   eodSession,
   formatEodCount,
@@ -20,6 +21,7 @@ import {
   type EodReading,
   type EodSession,
 } from "@/app/lib/eodFlow";
+import { addCalendarDays } from "@/app/lib/flow";
 import { parseEodFeedData } from "@/app/lib/tastytradeMarketParse";
 import type { NestedExpiration } from "@/app/lib/tastytradeMarketParse";
 
@@ -179,6 +181,9 @@ describe("end-of-day flow aggregation", () => {
         strikes: [
           { strike: 20000, call: "NDX   260717C20000000", put: "NDX   260717P20000000" },
           { strike: 20000, call: "NDXP  260717C20000000", put: "NDXP  260717P20000000" },
+          { strike: 20, call: "VIX   260717C00020000", put: "VIX   260717P00020000" },
+          { strike: 20, call: "VIXW  260717C00020000", put: "VIXW  260717P00020000" },
+          { strike: 500, call: "SPY   260717C00500000", put: "SPY   260717P00500000" },
         ],
       },
     ];
@@ -187,6 +192,10 @@ describe("end-of-day flow aggregation", () => {
     const ndx = eodContractsFromNested(chain, "2026-07-16", ["NDX", "NDXP"]);
     expect(ndx.map((item) => item.root).sort()).toEqual(["NDX", "NDX", "NDXP", "NDXP"]);
     expect(ndx.every((item) => item.dte === 1)).toBe(true);
+    const vix = eodContractsFromNested(chain, "2026-07-16", ["VIX", "VIXW"]);
+    expect(vix.map((item) => item.root).sort()).toEqual(["VIX", "VIX", "VIXW", "VIXW"]);
+    const spy = eodContractsFromNested(chain, "2026-07-16", ["SPY"]);
+    expect(spy.map((item) => item.root)).toEqual(["SPY", "SPY"]);
   });
 
   it("skips weekends and full-day holidays, and still runs after an early close", () => {
@@ -199,6 +208,12 @@ describe("end-of-day flow aggregation", () => {
     const winter = new Date("2026-11-20T21:20:00Z");
     const winterOther = new Date("2026-11-20T20:20:00Z");
     const continueSummer = new Date("2026-07-16T20:30:00Z");
+    const continueLater = new Date("2026-07-16T20:40:00Z");
+    const continueLast = new Date("2026-07-16T20:50:00Z");
+    const between = new Date("2026-07-16T20:35:00Z");
+    const winterLater = new Date("2026-11-20T21:40:00Z");
+    const winterLast = new Date("2026-11-20T21:50:00Z");
+    const afterLast = new Date("2026-07-16T20:55:00Z");
 
     expect(eodCronDecision(thanksgiving, true)).toEqual({ run: false, reason: "market holiday" });
     expect(eodCronDecision(saturday, false)).toEqual({ run: false, reason: "market holiday" });
@@ -211,6 +226,12 @@ describe("end-of-day flow aggregation", () => {
     expect(eodCronDecision(winter, false).run).toBe(true);
     expect(eodCronDecision(winterOther, false).run).toBe(false);
     expect(eodCronDecision(continueSummer, false).run).toBe(true);
+    expect(eodCronDecision(continueLater, false).run).toBe(true);
+    expect(eodCronDecision(continueLast, false).run).toBe(true);
+    expect(eodCronDecision(between, false).run).toBe(false);
+    expect(eodCronDecision(winterLater, false).run).toBe(true);
+    expect(eodCronDecision(winterLast, false).run).toBe(true);
+    expect(eodCronDecision(afterLast, false).run).toBe(false);
     expect(eodCronDecision(summer, true).run).toBe(true);
   });
 
@@ -230,10 +251,103 @@ describe("end-of-day flow aggregation", () => {
     expect(parsed?.rows[1].putVolume).toBe(8);
     expect(parsed?.rows).toHaveLength(3);
     expect(eodRatioSeries(next)).toEqual([
-      { date: "2026-07-15", qqq: 0.5, ndx: null },
-      { date: "2026-07-16", qqq: 4, ndx: 3 },
+      { date: "2026-07-15", overall: null, lean: null, spy: null, qqq: 0.5, ndx: null, vix: null },
+      { date: "2026-07-16", overall: null, lean: null, spy: null, qqq: 4, ndx: 3, vix: null },
     ]);
     expect(formatEodCount(null)).toBe("n/a");
+  });
+
+  it("builds the overall read from SPY, QQQ, and NDX, and leaves it blank when one is missing", () => {
+    const day = "2026-07-16";
+    const names = ["SPY", "QQQ", "NDX"] as const;
+    const puts = [10, 20, 30];
+    const calls = [5, 10, 15];
+    const rows = names.map((underlying, index) => row({
+      date: day,
+      underlying,
+      putVolume: puts[index],
+      callVolume: calls[index],
+      putOpenInterest: puts[index] * 2,
+      callOpenInterest: calls[index] * 2,
+      putVolume0to7: puts[index] - 4,
+      callVolume0to7: calls[index] - 2,
+      putVolume8to45: 4,
+      callVolume8to45: 2,
+      volumeCoverage: index === 0 ? 50 : index === 1 ? 100 : 50,
+      oiCoverage: 80,
+      contractCount: index === 2 ? 20 : 10,
+    }));
+    rows.push(row({
+      date: day,
+      underlying: "VIX",
+      putVolume: 2,
+      callVolume: 8,
+      volumeCoverage: 100,
+      contractCount: 4,
+    }));
+    const full = eodOverallRows(rows)[0];
+    expect(full.equityPutCallVolume).toBe(2);
+    expect(full.equityPutCallVolume0to7).toBeCloseTo((6 + 16 + 26) / (3 + 8 + 13));
+    expect(full.equityPutCallVolume8to45).toBe(2);
+    expect(full.equityPutCallOi).toBe(2);
+    expect(full.vixCallPutVolume).toBe(4);
+    expect(full.volumeCoverage).toBeCloseTo((5 + 10 + 10) / 40 * 100);
+    expect(full.lean).toBeNull();
+
+    const missingSpy = eodOverallRows(rows.filter((item) => item.underlying !== "SPY"))[0];
+    expect(missingSpy.equityPutCallVolume).toBeNull();
+    expect(missingSpy.equityPutCallVolume0to7).toBeNull();
+    expect(missingSpy.equityPutCallVolume8to45).toBeNull();
+    expect(missingSpy.equityPutCallOi).toBeNull();
+    expect(missingSpy.vixCallPutVolume).toBeNull();
+    expect(missingSpy.volumeCoverage).toBeCloseTo((10 + 10) / 30 * 100);
+
+    const missingVix = eodOverallRows(rows.filter((item) => item.underlying !== "VIX"))[0];
+    expect(missingVix.equityPutCallVolume).toBe(2);
+    expect(missingVix.vixCallPutVolume).toBeNull();
+
+    const blankSide = rows.map((item) => item.underlying === "QQQ" ? { ...item, putVolume: null } : item);
+    expect(eodOverallRows(blankSide)[0].equityPutCallVolume).toBeNull();
+
+    const zeroPuts = rows.map((item) => item.underlying === "SPY" ? { ...item, putVolume: 0 } : item);
+    expect(eodOverallRows(zeroPuts)[0].equityPutCallVolume).toBeCloseTo(50 / 30);
+  });
+
+  it("draws a lean triangle only after five prior days, and only outside 5% of that average", () => {
+    const history = (todayRatio: number, priorCount: number) => {
+      const today = addCalendarDays("2026-06-01", priorCount);
+      const rows = [];
+      for (let i = 0; i <= priorCount; i++) {
+        const date = addCalendarDays("2026-06-01", i);
+        const age = priorCount - i;
+        const ratio = age === 0 ? todayRatio : age > 20 ? 100 : 1;
+        for (const underlying of ["SPY", "QQQ", "NDX"] as const) {
+          const put = underlying === "SPY" ? ratio : 0;
+          rows.push(row({
+            date,
+            underlying,
+            putVolume: put,
+            callVolume: underlying === "SPY" ? 1 : 0,
+            putOpenInterest: 1,
+            callOpenInterest: 1,
+            putVolume0to7: put,
+            callVolume0to7: underlying === "SPY" ? 1 : 0,
+            putVolume8to45: 0,
+            callVolume8to45: 0,
+            volumeCoverage: 100,
+            contractCount: 1,
+          }));
+        }
+      }
+      return eodOverallRows(rows).find((item) => item.date === today);
+    };
+    expect(history(2, 4)?.lean).toBeNull();
+    expect(history(2, 4)?.equityPutCallVolume).toBe(2);
+    expect(history(1.2, 5)?.lean).toBe("down");
+    expect(history(1.04, 5)?.lean).toBeNull();
+    expect(history(0.8, 5)?.lean).toBe("up");
+    expect(history(1.2, 25)?.lean).toBe("down");
+    expect(history(1.2, 25)?.equityPutCallVolume).toBe(1.2);
   });
 
   it("lets the cron bearer through and keeps the page behind login", () => {

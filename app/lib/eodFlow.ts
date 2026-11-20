@@ -9,17 +9,26 @@ import {
 } from "@/app/lib/tastytradeMarketParse";
 
 /**
- * End-of-day put/call volume and open interest for QQQ and NDX.
+ * End-of-day put/call volume and open interest for SPY, QQQ, NDX, and VIX.
  * Pure math: no network and no store. A missing reading stays null.
  */
 
-export const EOD_UNDERLYINGS = ["QQQ", "NDX"] as const;
+export const EOD_UNDERLYINGS = ["SPY", "QQQ", "NDX", "VIX"] as const;
 export type EodUnderlying = (typeof EOD_UNDERLYINGS)[number];
 
-/** NDX history includes the NDX and NDXP option roots. QQQ is one root. */
+/** Equity names that make the combined sentiment row. VIX is separate. */
+export const EOD_EQUITY_UNDERLYINGS = ["SPY", "QQQ", "NDX"] as const;
+
+/**
+ * NDX history includes the NDX and NDXP roots.
+ * VIX history includes the VIX and VIXW roots.
+ * SPY and QQQ are one root each.
+ */
 export const EOD_ROOTS: Record<EodUnderlying, readonly string[]> = {
+  SPY: ["SPY"],
   QQQ: ["QQQ"],
   NDX: ["NDX", "NDXP"],
+  VIX: ["VIX", "VIXW"],
 };
 
 export const EOD_MIN_DTE = 0;
@@ -34,14 +43,26 @@ export const EOD_NEAR_DTE = 7;
 export const EOD_DXLINK_CAP = 5_000;
 export const EOD_DXLINK_CHUNK = 4_500;
 
-/** 4:20pm America/New_York, plus a few minutes for a late cron fire. */
-export const EOD_CRON_START_MINUTE = 16 * 60 + 20;
-export const EOD_CRON_END_MINUTE = 16 * 60 + 25;
-/** Second fire, used only when the first pass still has contracts left. */
-export const EOD_CONTINUE_START_MINUTE = 16 * 60 + 30;
-export const EOD_CONTINUE_END_MINUTE = 16 * 60 + 35;
+/**
+ * 4:20pm America/New_York, then 4:30, 4:40, and 4:50.
+ * Each fire is a few minutes wide. Later fires only continue a day that
+ * is not finished. Four passes stay inside the 240 second budget per call.
+ */
+export const EOD_COLLECT_WINDOWS: ReadonlyArray<readonly [number, number]> = [
+  [16 * 60 + 20, 16 * 60 + 25],
+  [16 * 60 + 30, 16 * 60 + 35],
+  [16 * 60 + 40, 16 * 60 + 45],
+  [16 * 60 + 50, 16 * 60 + 55],
+];
 
-const ROW_CAP = 800;
+/** How far today's equity put/call can sit from its own trailing average before a triangle is drawn. */
+export const EOD_LEAN_BAND = 0.05;
+/** Prior trading days with a combined ratio required before a triangle can appear. */
+export const EOD_LEAN_MIN_DAYS = 5;
+/** Trailing trading days used for that average. Today is not one of them. */
+export const EOD_LEAN_LOOKBACK = 20;
+
+const ROW_CAP = 2_000;
 
 export interface EodContract {
   /** Streamer symbol, or a synthetic id when the backup chain had no OCC symbol. */
@@ -122,8 +143,10 @@ export interface EodSession {
 export function eodCronDecision(now: Date, manual: boolean): { run: boolean; reason: string | null } {
   if (!isMarketDay(now)) return { run: false, reason: "market holiday" };
   if (manual) return { run: true, reason: null };
-  if (isNewYorkMinuteWindow(now, EOD_CRON_START_MINUTE, EOD_CRON_END_MINUTE)) return { run: true, reason: null };
-  if (isNewYorkMinuteWindow(now, EOD_CONTINUE_START_MINUTE, EOD_CONTINUE_END_MINUTE)) return { run: true, reason: null };
+  for (let i = 0; i < EOD_COLLECT_WINDOWS.length; i++) {
+    const window = EOD_COLLECT_WINDOWS[i];
+    if (isNewYorkMinuteWindow(now, window[0], window[1])) return { run: true, reason: null };
+  }
   return { run: false, reason: "Outside the 4:20pm America/New_York end-of-day window" };
 }
 
@@ -137,10 +160,11 @@ export function eodSession(now: Date): EodSession | null {
   };
 }
 
-/** Roots accepted from one chain request. The NDX chain may already list NDXP. */
+/** Roots accepted from one chain request. NDX may already list NDXP, and VIX may already list VIXW. */
 export function eodAcceptedRoots(root: string): string[] {
   const name = root.trim().toUpperCase();
   if (name === "NDX" || name === "NDXP") return ["NDX", "NDXP"];
+  if (name === "VIX" || name === "VIXW") return ["VIX", "VIXW"];
   return [name];
 }
 
@@ -343,6 +367,85 @@ export function underlyingsComplete(rows: readonly EodFlowRow[], date: string): 
   return true;
 }
 
+export type EodLean = "up" | "down";
+
+/**
+ * One day's combined read. Ratios stay null when SPY, QQQ, or NDX is missing,
+ * or when any of those rows is missing the number being summed.
+ * `lean` is null when there is no triangle: not enough history, no ratio, or inside the band.
+ */
+export interface EodOverallRow {
+  date: string;
+  equityPutCallVolume: number | null;
+  equityPutCallVolume0to7: number | null;
+  equityPutCallVolume8to45: number | null;
+  equityPutCallOi: number | null;
+  /** VIX calls divided by VIX puts. Null when VIX is missing or either side is missing. */
+  vixCallPutVolume: number | null;
+  lean: EodLean | null;
+  /** Contracts with a volume reading across the equity rows that exist, as a percent. */
+  volumeCoverage: number | null;
+  oiCoverage: number | null;
+}
+
+/** Newest date first. The lean uses earlier days of this same result, not today. */
+export function eodOverallRows(rows: readonly EodFlowRow[]): EodOverallRow[] {
+  const dates = Array.from(new Set(rows.map((row) => row.date))).sort();
+  const built: EodOverallRow[] = [];
+  for (let i = 0; i < dates.length; i++) {
+    built.push(overallForDate(rows, dates[i], built));
+  }
+  return built.sort((a, b) => b.date.localeCompare(a.date));
+}
+
+function overallForDate(rows: readonly EodFlowRow[], date: string, prior: readonly EodOverallRow[]): EodOverallRow {
+  const equity: Array<EodFlowRow | null> = EOD_EQUITY_UNDERLYINGS.map((name) => findRow(rows, date, name));
+  const complete = equity.every((row) => row != null);
+  const vix = findRow(rows, date, "VIX");
+  const equityRatio = complete ? putCallRatio(sumFields(equity, "putVolume"), sumFields(equity, "callVolume")) : null;
+  return {
+    date,
+    equityPutCallVolume: equityRatio,
+    equityPutCallVolume0to7: complete
+      ? putCallRatio(sumFields(equity, "putVolume0to7"), sumFields(equity, "callVolume0to7"))
+      : null,
+    equityPutCallVolume8to45: complete
+      ? putCallRatio(sumFields(equity, "putVolume8to45"), sumFields(equity, "callVolume8to45"))
+      : null,
+    equityPutCallOi: complete
+      ? putCallRatio(sumFields(equity, "putOpenInterest"), sumFields(equity, "callOpenInterest"))
+      : null,
+    vixCallPutVolume: complete && vix
+      ? putCallRatio(vix.callVolume, vix.putVolume)
+      : null,
+    lean: leanFor(equityRatio, prior),
+    volumeCoverage: combinedCoverage(equity, "volumeCoverage"),
+    oiCoverage: combinedCoverage(equity, "oiCoverage"),
+  };
+}
+
+/**
+ * Down when today is more than 5% above the trailing average (more puts than usual).
+ * Up when today is more than 5% below it. Null otherwise, including fewer than 5 prior days.
+ */
+export function leanFor(today: number | null, prior: readonly EodOverallRow[]): EodLean | null {
+  if (today == null || !Number.isFinite(today)) return null;
+  const ratios: number[] = [];
+  const ordered = prior.filter((row) => row.equityPutCallVolume != null).slice().sort((a, b) => b.date.localeCompare(a.date));
+  for (let i = 0; i < ordered.length && ratios.length < EOD_LEAN_LOOKBACK; i++) {
+    const ratio = ordered[i].equityPutCallVolume;
+    if (ratio != null) ratios.push(ratio);
+  }
+  if (ratios.length < EOD_LEAN_MIN_DAYS) return null;
+  let sum = 0;
+  for (let i = 0; i < ratios.length; i++) sum += ratios[i];
+  const average = sum / ratios.length;
+  if (!(average > 0)) return null;
+  if (today > average * (1 + EOD_LEAN_BAND)) return "down";
+  if (today < average * (1 - EOD_LEAN_BAND)) return "up";
+  return null;
+}
+
 export function emptyEodBook(): EodBook {
   return { version: 1, rows: [], work: null, lockUntil: null };
 }
@@ -395,26 +498,77 @@ export function formatTopStrikes(strikes: readonly EodTopStrike[]): string {
 
 export interface EodChartPoint {
   date: string;
+  overall: number | null;
+  lean: EodLean | null;
+  spy: number | null;
   qqq: number | null;
   ndx: number | null;
+  vix: number | null;
 }
 
-/** One point per date, oldest first. A missing ratio stays null. */
+/** One point per date, oldest first. A missing ratio stays null. Overall is the combined equity put/call. */
 export function eodRatioSeries(rows: readonly EodFlowRow[]): EodChartPoint[] {
-  const dates = Array.from(new Set(rows.map((row) => row.date))).sort();
-  return dates.map((date) => ({
-    date,
-    qqq: ratioFor(rows, date, "QQQ"),
-    ndx: ratioFor(rows, date, "NDX"),
-  }));
+  const overall = eodOverallRows(rows);
+  const byDate = new Map<string, EodOverallRow>();
+  for (let i = 0; i < overall.length; i++) byDate.set(overall[i].date, overall[i]);
+  const dates = Array.from(byDate.keys()).sort();
+  return dates.map((date) => {
+    const day = byDate.get(date);
+    return {
+      date,
+      overall: day?.equityPutCallVolume ?? null,
+      lean: day?.lean ?? null,
+      spy: ratioFor(rows, date, "SPY"),
+      qqq: ratioFor(rows, date, "QQQ"),
+      ndx: ratioFor(rows, date, "NDX"),
+      vix: ratioFor(rows, date, "VIX"),
+    };
+  });
 }
 
 function ratioFor(rows: readonly EodFlowRow[], date: string, underlying: EodUnderlying): number | null {
+  return findRow(rows, date, underlying)?.putCallVolumeRatio ?? null;
+}
+
+function findRow(rows: readonly EodFlowRow[], date: string, underlying: EodUnderlying): EodFlowRow | null {
   for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    if (row.date === date && row.underlying === underlying) return row.putCallVolumeRatio;
+    if (rows[i].date === date && rows[i].underlying === underlying) return rows[i];
   }
   return null;
+}
+
+function sumFields(rows: readonly (EodFlowRow | null)[], key: keyof EodFlowRow): number | null {
+  let sum = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row) return null;
+    const value = finiteNonNegative(row[key]);
+    if (value == null) return null;
+    sum += value;
+  }
+  return sum;
+}
+
+function combinedCoverage(rows: readonly (EodFlowRow | null)[], key: "volumeCoverage" | "oiCoverage"): number | null {
+  let known = 0;
+  let total = 0;
+  let any = false;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row) continue;
+    any = true;
+    const count = finiteNonNegative(row.contractCount);
+    const coverage = finiteNonNegative(row[key]);
+    if (count == null || !(count > 0) || coverage == null) continue;
+    total += count;
+    known += (coverage / 100) * count;
+  }
+  if (!any) return null;
+  return coveragePercent(known, total);
+}
+
+function isEodUnderlying(value: unknown): value is EodUnderlying {
+  return EOD_UNDERLYINGS.indexOf(value as EodUnderlying) !== -1;
 }
 
 function formatStrike(strike: number): string {
@@ -442,7 +596,7 @@ function parseRow(value: unknown): EodFlowRow | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
   if (typeof row.date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(row.date)) return null;
-  if (row.underlying !== "QQQ" && row.underlying !== "NDX") return null;
+  if (!isEodUnderlying(row.underlying)) return null;
   const top = Array.isArray(row.topStrikes) ? row.topStrikes : [];
   const topStrikes: EodTopStrike[] = [];
   for (let i = 0; i < top.length && topStrikes.length < 5; i++) {
@@ -482,7 +636,7 @@ function parseWork(value: unknown): EodWork | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const work = value as Record<string, unknown>;
   if (typeof work.date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(work.date)) return null;
-  if (work.underlying !== "QQQ" && work.underlying !== "NDX") return null;
+  if (!isEodUnderlying(work.underlying)) return null;
   if (!Array.isArray(work.contracts) || !Array.isArray(work.pendingRoots)) return null;
   const contracts: EodContract[] = [];
   for (let i = 0; i < work.contracts.length; i++) {
