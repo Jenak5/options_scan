@@ -92,15 +92,15 @@ describe("end-of-day flow job", () => {
       },
     });
     const first = await runEodFlowJob(options(100_000));
-    expect(first.saved).toEqual([]);
+    expect(first.saved).toEqual(["SPY"]);
     expect(first.pending).toBe("QQQ");
     expect(first.remainingChunks).toBe(1);
     expect(calls).toEqual([["put"]]);
-    expect(parseEodBook(await readEodFlowText())?.rows).toEqual([]);
+    expect(parseEodBook(await readEodFlowText())?.rows.map((row) => row.underlying)).toEqual(["SPY"]);
 
     const second = await runEodFlowJob(options(200_000));
     expect(second.ok).toBe(true);
-    expect(second.saved).toEqual(["QQQ", "NDX"]);
+    expect(second.saved).toEqual(["QQQ", "NDX", "VIX"]);
     expect(second.pending).toBeNull();
     const book = parseEodBook(await readEodFlowText());
     const qqq = book?.rows.find((row) => row.underlying === "QQQ");
@@ -137,7 +137,7 @@ describe("end-of-day flow job", () => {
     });
     const early = await run(new Date("2026-11-27T21:20:00Z"));
     expect(early.ok).toBe(true);
-    expect(early.saved).toEqual(["QQQ", "NDX"]);
+    expect(early.saved).toEqual(["SPY", "QQQ", "NDX", "VIX"]);
     volume = 11;
     const again = await run(new Date("2026-11-27T21:22:00Z"), true);
     expect(again.ok).toBe(true);

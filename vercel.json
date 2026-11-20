@@ -69,6 +69,22 @@
     {
       "path": "/api/cron/eod-flow",
       "schedule": "30 21 * * 1-5"
+    },
+    {
+      "path": "/api/cron/eod-flow",
+      "schedule": "40 20 * * 1-5"
+    },
+    {
+      "path": "/api/cron/eod-flow",
+      "schedule": "50 20 * * 1-5"
+    },
+    {
+      "path": "/api/cron/eod-flow",
+      "schedule": "40 21 * * 1-5"
+    },
+    {
+      "path": "/api/cron/eod-flow",
+      "schedule": "50 21 * * 1-5"
     }
   ]
 }

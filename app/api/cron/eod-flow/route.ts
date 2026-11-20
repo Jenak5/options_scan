@@ -7,12 +7,12 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 /**
- * End-of-day QQQ and NDX option flow.
- * Vercel calls this at 20:20 and 20:30 UTC, and again at 21:20 and 21:30 UTC,
- * on weekdays. Only the pair that is 4:20pm and 4:30pm America/New_York runs.
- * The 4:30 fire continues a pass that hit the time budget. A finished day
- * does not collect again. Weekends are not scheduled. A full-day NYSE holiday
- * returns before any fetch. An early close still runs and is flagged.
+ * End-of-day SPY, QQQ, NDX, and VIX option flow.
+ * Vercel calls this at 20:20, 20:30, 20:40, and 20:50 UTC, and again an hour
+ * later, on weekdays. Only the times that are 4:20, 4:30, 4:40, and 4:50pm
+ * America/New_York run. Later fires continue a pass that hit the time budget.
+ * A finished day does not collect again. Weekends are not scheduled. A full-day
+ * NYSE holiday returns before any fetch. An early close still runs and is flagged.
  * ?manual=true skips the clock check and still requires the bearer token.
  * It does not run on a holiday.
  */
