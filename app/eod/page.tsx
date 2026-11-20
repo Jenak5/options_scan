@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { PageLinks } from "@/app/components/PageLinks";
+import { EodRowNote } from "@/app/eod/EodRowNote";
 import {
   eodOverallRows,
   eodRatioSeries,
@@ -173,7 +174,10 @@ export default function EodFlowPage() {
               {detail.map((row) => (
                 <tr key={`${row.date}:${row.underlying}`}>
                   <td>{row.date}</td>
-                  <td>{row.underlying}</td>
+                  <td>
+                    {row.underlying}
+                    <EodRowNote note={row.note} />
+                  </td>
                   <td>{formatEodCount(row.putVolume)}</td>
                   <td>{formatEodCount(row.callVolume)}</td>
                   <td>{formatEodRatio(row.putCallVolumeRatio)}</td>

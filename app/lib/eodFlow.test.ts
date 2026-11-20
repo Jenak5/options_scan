@@ -55,6 +55,7 @@ function row(over: Partial<EodFlowRow> & Pick<EodFlowRow, "date" | "underlying">
     oiCoverage: null,
     contractCount: 0,
     collectedAt: 1,
+    note: null,
     ...over,
   };
 }

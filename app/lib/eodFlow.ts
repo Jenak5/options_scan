@@ -114,6 +114,8 @@ export interface EodFlowRow {
   oiCoverage: number | null;
   contractCount: number;
   collectedAt: number | null;
+  /** Set on a row filled from the checked-in seed. Blank on a normal collection. */
+  note: string | null;
 }
 
 export interface EodWork {
@@ -348,6 +350,7 @@ export function aggregateEod(input: {
     oiCoverage: coveragePercent(oiKnown, contracts.length),
     contractCount: contracts.length,
     collectedAt: Number.isFinite(input.collectedAt) ? input.collectedAt : null,
+    note: null,
   };
 }
 
@@ -357,6 +360,21 @@ export function upsertEodRow(rows: readonly EodFlowRow[], next: EodFlowRow): Eod
   kept.push(next);
   kept.sort((a, b) => b.date.localeCompare(a.date) || a.underlying.localeCompare(b.underlying));
   return kept.slice(0, ROW_CAP);
+}
+
+/**
+ * Add a seed row only when that date and underlying are not already stored.
+ * A stored row always wins, including one that was collected later for the same day.
+ */
+export function mergeEodSeed(stored: readonly EodFlowRow[], seed: readonly EodFlowRow[]): EodFlowRow[] {
+  const out = stored.slice();
+  for (let i = 0; i < seed.length; i++) {
+    const row = seed[i];
+    if (out.some((item) => item.date === row.date && item.underlying === row.underlying)) continue;
+    out.push(row);
+  }
+  out.sort((a, b) => b.date.localeCompare(a.date) || a.underlying.localeCompare(b.underlying));
+  return out;
 }
 
 export function underlyingsComplete(rows: readonly EodFlowRow[], date: string): boolean {
@@ -629,6 +647,7 @@ function parseRow(value: unknown): EodFlowRow | null {
     oiCoverage: finiteNonNegative(row.oiCoverage),
     contractCount: finiteNonNegative(row.contractCount) ?? 0,
     collectedAt: typeof row.collectedAt === "number" && Number.isFinite(row.collectedAt) ? row.collectedAt : null,
+    note: typeof row.note === "string" && row.note.trim() !== "" ? row.note.trim() : null,
   };
 }
 

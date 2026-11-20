@@ -1,3 +1,4 @@
+import seedRows from "../../data/eod-flow-seed.json";
 import { addCalendarDays } from "@/app/lib/flow";
 import {
   aggregateEod,
@@ -13,6 +14,7 @@ import {
   eodReadingKey,
   eodSession,
   emptyEodBook,
+  mergeEodSeed,
   parseEodBook,
   underlyingsComplete,
   upsertEodRow,
@@ -30,7 +32,7 @@ import { readEodFlowText, resolveStoreKind, updateEodFlow } from "@/app/lib/schw
 import { ttEodStream, ttOptionExpirations } from "@/app/lib/tastytradeMarket";
 
 /**
- * Collects one trading day's QQQ and NDX option volume after the close.
+ * Collects one trading day's SPY, QQQ, NDX, and VIX option volume after the close.
  * Tastytrade nested chains and DXLink Trade/Summary are primary.
  * Schwab's chain is used only when that call fails.
  * A run stops inside the scanner's time budget and leaves the rest for the next fire.
@@ -68,14 +70,25 @@ export interface EodPage {
   pending: { date: string; underlying: EodUnderlying } | null;
 }
 
+/** Checked-in history. A row that does not parse is dropped, not guessed. */
+export function eodSeedRows(): EodFlowRow[] {
+  const book = parseEodBook(JSON.stringify({ version: 1, rows: seedRows, work: null, lockUntil: null }));
+  return book?.rows ?? [];
+}
+
+function withSeed(rows: EodFlowRow[]): EodFlowRow[] {
+  return mergeEodSeed(rows, eodSeedRows());
+}
+
 export async function loadEodPage(): Promise<EodPage> {
-  if (resolveStoreKind() === "unconfigured") return { stored: false, rows: [], pending: null };
+  if (resolveStoreKind() === "unconfigured") {
+    return { stored: false, rows: withSeed([]), pending: null };
+  }
   const book = parseEodBook(await readEodFlowText());
   if (!book) return { stored: true, rows: [], pending: null };
-  const rows = book.rows.slice().sort((a, b) => b.date.localeCompare(a.date) || a.underlying.localeCompare(b.underlying));
   return {
     stored: true,
-    rows,
+    rows: withSeed(book.rows),
     pending: book.work ? { date: book.work.date, underlying: book.work.underlying } : null,
   };
 }
@@ -96,11 +109,12 @@ export async function runEodFlowJob(options: EodJobOptions = {}): Promise<EodJob
   const deadline = started + budgetMs;
   const held: { status: "ok" | "busy" | "skip" | "unreadable"; book: EodBook | null } = { status: "ok", book: null };
   const locked = await updateEodFlow((current) => {
-    const book = parseEodBook(current);
-    if (!book) {
+    const parsed = parseEodBook(current);
+    if (!parsed) {
       held.status = "unreadable";
       return null;
     }
+    const book = { ...parsed, rows: withSeed(parsed.rows) };
     if (book.work && book.work.date !== session.date) book.work = null;
     if (!manual && book.work == null && underlyingsComplete(book.rows, session.date)) {
       held.status = "skip";

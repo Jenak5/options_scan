@@ -96,14 +96,16 @@ describe("end-of-day flow job", () => {
     expect(first.pending).toBe("QQQ");
     expect(first.remainingChunks).toBe(1);
     expect(calls).toEqual([["put"]]);
-    expect(parseEodBook(await readEodFlowText())?.rows.map((row) => row.underlying)).toEqual(["SPY"]);
+    const firstBook = parseEodBook(await readEodFlowText());
+    expect(firstBook?.rows.find((row) => row.date === "2026-07-16")?.underlying).toBe("SPY");
+    expect(firstBook?.rows.find((row) => row.date === "2026-11-19" && row.underlying === "QQQ")?.note).toBe("late pull 11:20 PM CT");
 
     const second = await runEodFlowJob(options(200_000));
     expect(second.ok).toBe(true);
     expect(second.saved).toEqual(["QQQ", "NDX", "VIX"]);
     expect(second.pending).toBeNull();
     const book = parseEodBook(await readEodFlowText());
-    const qqq = book?.rows.find((row) => row.underlying === "QQQ");
+    const qqq = book?.rows.find((row) => row.date === "2026-07-16" && row.underlying === "QQQ");
     expect(qqq).toMatchObject({
       date: "2026-07-16",
       putVolume: 30,
@@ -113,7 +115,7 @@ describe("end-of-day flow job", () => {
       earlyClose: false,
       volumeCoverage: 100,
     });
-    const ndx = book?.rows.find((row) => row.underlying === "NDX");
+    const ndx = book?.rows.find((row) => row.date === "2026-07-16" && row.underlying === "NDX");
     expect(ndx?.putVolume).toBeNull();
     expect(ndx?.contractCount).toBe(0);
     expect(ndx?.volumeCoverage).toBeNull();
@@ -142,9 +144,9 @@ describe("end-of-day flow job", () => {
     const again = await run(new Date("2026-11-27T21:22:00Z"), true);
     expect(again.ok).toBe(true);
     const book = parseEodBook(await readEodFlowText());
-    const rows = book?.rows.filter((row) => row.underlying === "QQQ") ?? [];
+    const rows = book?.rows.filter((row) => row.date === "2026-11-27" && row.underlying === "QQQ") ?? [];
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ putVolume: 11, friday: true, earlyClose: true, volumeCoverage: 100 });
+    expect(rows[0]).toMatchObject({ putVolume: 11, friday: true, earlyClose: true, volumeCoverage: 100, note: null });
   });
 
   it("does not collect again when today's rows are already stored", async () => {

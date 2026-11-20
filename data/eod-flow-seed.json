@@ -1,0 +1,58 @@
+[
+  {
+    "date": "2026-11-19",
+    "underlying": "QQQ",
+    "putVolume": 5378584,
+    "callVolume": 5345015,
+    "putCallVolumeRatio": 1.0063,
+    "putOpenInterest": 3907289,
+    "callOpenInterest": 4179547,
+    "putCallOiRatio": 0.934859,
+    "putVolume0to7": 4894034,
+    "callVolume0to7": 4780093,
+    "putVolume8to45": 484550,
+    "callVolume8to45": 564922,
+    "topStrikes": [
+      { "strike": 650, "putCall": "put", "volume": 289667 },
+      { "strike": 645, "putCall": "put", "volume": 228611 },
+      { "strike": 660, "putCall": "call", "volume": 180288 },
+      { "strike": 665, "putCall": "call", "volume": 169783 },
+      { "strike": 670, "putCall": "call", "volume": 161278 }
+    ],
+    "friday": false,
+    "earlyClose": false,
+    "volumeCoverage": 64.8,
+    "oiCoverage": 100.0,
+    "contractCount": 5748,
+    "collectedAt": 1795152000000,
+    "note": "late pull 11:20 PM CT"
+  },
+  {
+    "date": "2026-11-19",
+    "underlying": "NDX",
+    "putVolume": 44084,
+    "callVolume": 42664,
+    "putCallVolumeRatio": 1.0333,
+    "putOpenInterest": 85226,
+    "callOpenInterest": 68251,
+    "putCallOiRatio": 1.248714,
+    "putVolume0to7": 39051,
+    "callVolume0to7": 37506,
+    "putVolume8to45": 5033,
+    "callVolume8to45": 5158,
+    "topStrikes": [
+      { "strike": 27000, "putCall": "call", "volume": 2545 },
+      { "strike": 27010, "putCall": "call", "volume": 1676 },
+      { "strike": 26500, "putCall": "put", "volume": 1612 },
+      { "strike": 26400, "putCall": "put", "volume": 1410 },
+      { "strike": 27700, "putCall": "call", "volume": 1015 }
+    ],
+    "friday": false,
+    "earlyClose": false,
+    "volumeCoverage": 21.6,
+    "oiCoverage": 100.0,
+    "contractCount": 13114,
+    "collectedAt": 1795152000000,
+    "note": "late pull 11:20 PM CT"
+  }
+]
