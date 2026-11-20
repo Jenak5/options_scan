@@ -20,6 +20,7 @@ import { getPriceHistory, getQuoteEntries } from "@/app/lib/marketData";
 import type { PriceCandle } from "@/app/lib/schwabParse";
 import { normalizeOptionSymbol } from "@/app/lib/optionSymbol";
 import { readAvwapPaperBookText, resolveStoreKind, updateAvwapPaperBook } from "@/app/lib/schwabStore";
+import { avwapRepeatsEnabled, deliverAvwapOpenAlert } from "@/app/lib/avwapRepeatJob";
 import { sendTelegramAlert } from "@/app/lib/telegram";
 import { preferredDataSource as avwapPreferredSource } from "@/app/lib/marketData";
 import { getPriceHistory as schwabPriceHistory, schwabBackupAvailable as schwabHistoryBackup } from "@/app/lib/schwab";
@@ -122,7 +123,9 @@ export async function runAvwapPaper(now: Date, deps: AvwapPaperDeps = defaultDep
   const stored = parseAvwapPaperBook(await deps.readBook());
   const opened = stored.trades.filter((trade) => openedIds.includes(trade.id));
   for (let i = 0; i < opened.length; i++) {
-    await deps.send(formatAvwapPaperAlert(opened[i]));
+    const text = formatAvwapPaperAlert(opened[i]);
+    if (avwapRepeatsEnabled()) await deliverAvwapOpenAlert(text, opened[i].id);
+    else await deps.send(text);
   }
   const notes = AVWAP_SYMBOLS.map((symbol) => `${symbol}: ${stored.notes[symbol] ?? "no note"}`).join("; ");
   const flag = stored.trades.length > 0 && avwapPaperSection(stored, now, true).health.drawdownFlag ? " Drawdown flag over $1,500." : "";

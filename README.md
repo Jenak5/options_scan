@@ -121,6 +121,7 @@ Set every secret in Vercel as a **Sensitive** variable. Do not leave them readab
 | `TT_TRADE_WINDOW_MS` | No | How long one chain listens for TimeAndSale prints. Default 3000. Capped at 8000. `0` skips the print window |
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | Yes | Chat that receives alerts |
+| `TELEGRAM_WEBHOOK_SECRET` | Yes | Secret Telegram sends on AVWAP acknowledgement callbacks. If unset, AVWAP open alerts send once and do not repeat |
 | `XAI_API_KEY` | Yes | Grok API key for screening and research |
 | `SCHWAB_CLIENT_ID` | Yes | Schwab Market Data app key |
 | `SCHWAB_CLIENT_SECRET` | Yes | Schwab Market Data app secret |
@@ -321,6 +322,8 @@ The checks are pure functions. `npm test` runs them against fixture chains and d
 3. Open `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` once and copy `chat_id`. That URL contains the bot token, so do not share it or commit it.
 4. Store `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` as Sensitive variables.
 5. After you are signed in, use **Send test Telegram alert** on the Alerts tab.
+6. To repeat AVWAP trade-open alerts until they are acknowledged, also store `TELEGRAM_WEBHOOK_SECRET` as a Sensitive variable. Pick any long random string and do not commit it. If that variable is unset, an AVWAP open alert is sent once and is not repeated.
+7. After the secret is saved, sign in and POST `/api/telegram/setup` once. That registers the Telegram webhook for the Got it button and for replies. POST `/api/telegram/avwap-test` sends a labeled test alert through the same path. It does not open a paper trade.
 
 ## Deploy notes
 
