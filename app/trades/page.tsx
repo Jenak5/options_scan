@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { PageLinks } from "@/app/components/PageLinks";
+import { ScanPauseBanner } from "@/app/components/ScanPauseBanner";
 import { StoreStatusLine } from "@/app/components/StoreStatusLine";
 import { formatContractCost, formatFlowPremium } from "@/app/lib/alertConfig";
 import { openFlatTimeStopText } from "@/app/lib/exits";
@@ -186,6 +187,7 @@ export default function TradesPage() {
         @media (max-width: 560px) { .grade-grid { grid-template-columns: 1fr !important; } }
       ` }} />
       <div style={{ padding: "16px 16px 40px", maxWidth: 760, margin: "0 auto" }}>
+        <ScanPauseBanner />
         <StoreStatusLine />
         {page && !page.stored && (
           <Banner color="#fbbf24">

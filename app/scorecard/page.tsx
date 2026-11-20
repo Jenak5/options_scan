@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { PageLinks } from "@/app/components/PageLinks";
+import { ScanPauseBanner } from "@/app/components/ScanPauseBanner";
 
 interface Bucket {
   key: string;
@@ -223,6 +224,7 @@ export default function ScorecardPage() {
       </div>
 
       <div style={{ padding: "16px 16px 40px", maxWidth: 880, margin: "0 auto" }}>
+        <ScanPauseBanner />
         {error && <Note color="#fca5a5">{error}</Note>}
         {page && !page.stored && (
           <Note color="#fbbf24">The private store is not configured, so shadow alerts cannot be saved. It uses the same store as the alert book.</Note>

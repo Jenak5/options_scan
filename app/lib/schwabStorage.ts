@@ -89,6 +89,9 @@ export const SCHWAB_BLOB_AVWAP_REPEAT_PATH = "schwab/avwap-repeat.json";
 /** Private blob for the AMD, MSFT, and AMZN paper trial. Separate from the live AVWAP book. Not a token. */
 export const SCHWAB_BLOB_AVWAP_TRIAL_PATH = "schwab/avwap-trial.json";
 
+/** Private blob for the reversible pause of non-AVWAP scan work. Not a token. */
+export const SCHWAB_BLOB_SCAN_PAUSE_PATH = "schwab/scan-pause.json";
+
 /** Private blob for the non-AVWAP mute setting, the muted log, and warning times. Not a token. */
 export const SCHWAB_BLOB_TELEGRAM_MUTE_PATH = "schwab/telegram-mute.json";
 

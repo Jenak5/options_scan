@@ -18,6 +18,7 @@ import type { ResearchCandidate } from "@/app/lib/researchTrack";
 import { earningsDateMapForRows, windowEarningsDateForContract } from "@/app/lib/earningsWindow";
 import { formatAvwapPaperLog, runAvwapPaper } from "@/app/lib/avwapPaperRun";
 import { formatAvwapTrialLog, runAvwapTrial } from "@/app/lib/avwapTrialRun";
+import { nonAvwapScanPaused } from "@/app/lib/scanPause";
 import { runCallsPaper } from "@/app/lib/callsPaperRun";
 import { runJgVwapPaper } from "@/app/lib/jgVwapRun";
 import { openMissingShadows, openScanTickers, recordEarningsWindowShadows, recordExperimentalShadows, recordVwapRejectionPuts, runShadowPass } from "@/app/lib/shadowStore";
@@ -281,6 +282,22 @@ async function handleCron(request: NextRequest) {
         console.info(line);
         log.push(line);
       }
+    }
+    if (await nonAvwapScanPaused()) {
+      log.push("Scan paused: AVWAP only. Flow, alerts, shadows, calls paper, JG-VWAP, unusual flow, and the other paper books were not scored.");
+      summary.outcome = "success";
+      summary.reason = "paused: AVWAP only";
+      await rememberScan("success", now, "paused: AVWAP only", shadowAt, [], { avwapFailed, storeUnsaved, rowsScanned: 0 });
+      await noteCronScan({
+        now,
+        outcome: "success",
+        reason: "paused: AVWAP only",
+        before: countsBefore,
+        qualifiedKeys: [],
+        alertsSent: 0,
+      });
+      console.info(formatScanRunLine(summary));
+      return NextResponse.json({ paused: true, alertsSent: 0, log, reason: summary.reason });
     }
     let followUps = { updated: 0, quoted: 0 };
     try {
