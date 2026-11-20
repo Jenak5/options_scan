@@ -80,6 +80,9 @@ export const SCHWAB_BLOB_UNUSUAL_PATH = "schwab/unusual-flow.json";
  */
 export const SCHWAB_BLOB_EOD_FLOW_PATH = "schwab/eod-flow.json";
 
+/** Private blob for daily QQQ and SPY gamma levels. Same store as the trade log. Not a token. */
+export const SCHWAB_BLOB_GEX_PATH = "schwab/gex.json";
+
 /**
  * Small private blob for the last alert-book, flow, or trade-log failure.
  * Written without ifMatch so a status line can be saved even when a

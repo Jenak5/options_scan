@@ -85,6 +85,22 @@
     {
       "path": "/api/cron/eod-flow",
       "schedule": "50 21 * * 1-5"
+    },
+    {
+      "path": "/api/cron/gex",
+      "schedule": "5 13 * * 1-5"
+    },
+    {
+      "path": "/api/cron/gex",
+      "schedule": "15 13 * * 1-5"
+    },
+    {
+      "path": "/api/cron/gex",
+      "schedule": "5 14 * * 1-5"
+    },
+    {
+      "path": "/api/cron/gex",
+      "schedule": "15 14 * * 1-5"
     }
   ]
 }

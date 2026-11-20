@@ -26,8 +26,10 @@ import {
   type EodUnderlying,
   type EodWork,
 } from "@/app/lib/eodFlow";
+import type { GexRow } from "@/app/lib/gex";
 import { SCAN_TIME_BUDGET_MS } from "@/app/lib/scanHealth";
 import * as schwab from "@/app/lib/schwab";
+import { loadGexRows } from "@/app/lib/gexJob";
 import { readEodFlowText, resolveStoreKind, updateEodFlow } from "@/app/lib/schwabStore";
 import { ttEodStream, ttOptionExpirations } from "@/app/lib/tastytradeMarket";
 
@@ -67,6 +69,7 @@ export interface EodJobResult {
 export interface EodPage {
   stored: boolean;
   rows: EodFlowRow[];
+  gex: GexRow[];
   pending: { date: string; underlying: EodUnderlying } | null;
 }
 
@@ -81,14 +84,16 @@ function withSeed(rows: EodFlowRow[]): EodFlowRow[] {
 }
 
 export async function loadEodPage(): Promise<EodPage> {
+  const gex = await loadGexRows().catch(() => [] as GexRow[]);
   if (resolveStoreKind() === "unconfigured") {
-    return { stored: false, rows: withSeed([]), pending: null };
+    return { stored: false, rows: withSeed([]), gex, pending: null };
   }
   const book = parseEodBook(await readEodFlowText());
-  if (!book) return { stored: true, rows: [], pending: null };
+  if (!book) return { stored: true, rows: [], gex, pending: null };
   return {
     stored: true,
     rows: withSeed(book.rows),
+    gex,
     pending: book.work ? { date: book.work.date, underlying: book.work.underlying } : null,
   };
 }

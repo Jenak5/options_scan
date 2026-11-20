@@ -23,6 +23,7 @@ import {
   SCHWAB_BLOB_CALLS_PAPER_PATH,
   SCHWAB_BLOB_UNUSUAL_PATH,
   SCHWAB_BLOB_EOD_FLOW_PATH,
+  SCHWAB_BLOB_GEX_PATH,
   SCHWAB_BLOB_SHADOW_BOOK_PATH,
   SCHWAB_BLOB_TRADE_LOG_PATH,
   SCHWAB_BLOB_TOKEN_ENV,
@@ -92,6 +93,7 @@ const AVWAP_PAPER_BOOK_KEY = "oes:paper:avwap";
 const CALLS_PAPER_BOOK_KEY = "oes:paper:calls";
 const UNUSUAL_BOOK_KEY = "oes:flow:unusual";
 const EOD_FLOW_KEY = "oes:eod:flow";
+const GEX_KEY = "oes:gex:levels";
 const BLOB_WRITE_ATTEMPTS = 4;
 const JSON_CONDITIONAL_ATTEMPTS = 3;
 /** Re-read the token store only inside this window before access-token expiry. */
@@ -145,6 +147,7 @@ interface MemoryBag {
   callsPaperBook: string | null;
   unusualBook: string | null;
   eodFlow: string | null;
+  gexBook: string | null;
 }
 
 interface TokenEnvelope {
@@ -266,7 +269,7 @@ export function setSchwabBlobClientForTests(next: SchwabBlobClient | null): void
 function memoryBag(): MemoryBag {
   const g = globalThis as typeof globalThis & { __oesSchwabMemory?: MemoryBag };
   if (!g.__oesSchwabMemory) {
-    g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null, avwapPaperBook: null, callsPaperBook: null, unusualBook: null, eodFlow: null };
+    g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null, avwapPaperBook: null, callsPaperBook: null, unusualBook: null, eodFlow: null, gexBook: null };
   } else if (!g.__oesSchwabMemory.flowSnapshots) {
     g.__oesSchwabMemory.flowSnapshots = {};
   }
@@ -278,12 +281,13 @@ function memoryBag(): MemoryBag {
   if (g.__oesSchwabMemory.callsPaperBook === undefined) g.__oesSchwabMemory.callsPaperBook = null;
   if (g.__oesSchwabMemory.unusualBook === undefined) g.__oesSchwabMemory.unusualBook = null;
   if (g.__oesSchwabMemory.eodFlow === undefined) g.__oesSchwabMemory.eodFlow = null;
+  if (g.__oesSchwabMemory.gexBook === undefined) g.__oesSchwabMemory.gexBook = null;
   return g.__oesSchwabMemory;
 }
 
 export function clearMemoryStoreForTests(): void {
   const g = globalThis as typeof globalThis & { __oesSchwabMemory?: MemoryBag };
-  g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null, avwapPaperBook: null, callsPaperBook: null, unusualBook: null, eodFlow: null };
+  g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null, avwapPaperBook: null, callsPaperBook: null, unusualBook: null, eodFlow: null, gexBook: null };
   memoryStoreStatus = null;
   tokenCache = null;
   tokenBlobBlockedUntil = 0;
@@ -1207,6 +1211,79 @@ export async function updateEodFlow(change: (current: string | null) => string |
   }
 }
 
+/** Daily QQQ and SPY gamma levels. Same store as the trade log. A failed read does not overwrite it. */
+export async function readGexText(): Promise<string | null> {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") return null;
+  if (kind === "memory") return memoryBag().gexBook;
+  if (kind === "blob") {
+    const token = blobToken();
+    if (!token) return null;
+    const read = await readBlobJson(SCHWAB_BLOB_GEX_PATH, token);
+    if (read.state === "error") {
+      await recordStoreFailure("gex", "read", read.error);
+      return null;
+    }
+    if (read.state !== "ok") return null;
+    return read.text;
+  }
+  try {
+    const raw = await kvCommand(["GET", GEX_KEY]);
+    return typeof raw === "string" && raw.length > 0 ? raw : null;
+  } catch (err) {
+    await recordStoreFailure("gex", "read", err);
+    return null;
+  }
+}
+
+export async function updateGexBook(change: (current: string | null) => string | null): Promise<boolean> {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") {
+    await recordStoreFailure("gex", "write", new Error("Gamma level storage is not configured"));
+    return false;
+  }
+  const guarded = (current: string | null): string | null => {
+    if (!hasJsonArray(current, "rows")) return null;
+    const next = change(current);
+    if (next == null) return null;
+    if (!hasJsonArray(next, "rows")) return null;
+    return next;
+  };
+  if (kind === "memory") {
+    const bag = memoryBag();
+    const next = guarded(bag.gexBook);
+    if (next == null) {
+      await recordStoreFailure("gex", "write", new Error("Refusing to overwrite an unreadable gamma book"));
+      return false;
+    }
+    bag.gexBook = next;
+    await clearStoreFailure("gex");
+    return true;
+  }
+  if (kind === "blob") return writeBlobJson(SCHWAB_BLOB_GEX_PATH, "gex", "Gamma levels", guarded);
+  let current: string | null;
+  try {
+    const raw = await kvCommand(["GET", GEX_KEY]);
+    current = typeof raw === "string" && raw.length > 0 ? raw : null;
+  } catch (err) {
+    await recordStoreFailure("gex", "read", err);
+    return false;
+  }
+  const next = guarded(current);
+  if (next == null) {
+    await recordStoreFailure("gex", "write", new Error("Refusing to overwrite an unreadable gamma book"));
+    return false;
+  }
+  try {
+    await kvCommand(["SET", GEX_KEY, next]);
+    await clearStoreFailure("gex");
+    return true;
+  } catch (err) {
+    await recordStoreFailure("gex", "write", err);
+    return false;
+  }
+}
+
 async function updateBlobAlertBook(change: (current: string | null) => string | null): Promise<boolean> {
   return writeBlobJson(SCHWAB_BLOB_ALERT_BOOK_PATH, "alert-book", "Alert book", change);
 }
@@ -1711,7 +1788,7 @@ async function readBlobJson(pathname: string, token: string, bypassCache = false
   }
 }
 
-type JsonStoreTarget = "alert-book" | "flow-snapshots" | "trade-log" | "shadow-book" | "jg-vwap" | "avwap-paper" | "calls-paper" | "unusual-flow" | "eod-flow";
+type JsonStoreTarget = "alert-book" | "flow-snapshots" | "trade-log" | "shadow-book" | "jg-vwap" | "avwap-paper" | "calls-paper" | "unusual-flow" | "eod-flow" | "gex";
 
 interface StoreFailureRecord {
   target: JsonStoreTarget;
@@ -2094,6 +2171,7 @@ function storeLabel(target: JsonStoreTarget): string {
   if (target === "calls-paper") return "Calls paper log";
   if (target === "unusual-flow") return "Unusual flow";
   if (target === "eod-flow") return "EOD flow";
+  if (target === "gex") return "Gamma levels";
   return "Flow snapshot store";
 }
 

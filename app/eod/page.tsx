@@ -15,10 +15,20 @@ import {
   type EodLean,
   type EodUnderlying,
 } from "@/app/lib/eodFlow";
+import {
+  formatGex,
+  formatGexCoverage,
+  formatGexPrice,
+  gexChartSeries,
+  type GexChartPoint,
+  type GexRow,
+  type GexUnderlying,
+} from "@/app/lib/gex";
 
 interface EodPage {
   stored: boolean;
   rows: EodFlowRow[];
+  gex?: GexRow[];
   pending: { date: string; underlying: EodUnderlying } | null;
   error?: string;
 }
@@ -85,7 +95,9 @@ export default function EodFlowPage() {
           </p>
         )}
 
-        <h2 style={{ margin: "0 0 8px", fontSize: 16 }}>Overall</h2>
+        <GammaLevels rows={page?.gex ?? []} />
+
+        <h2 style={{ margin: "18px 0 8px", fontSize: 16 }}>Overall</h2>
         <p style={{ margin: "0 0 10px", color: "#94a3b8", fontSize: 14, lineHeight: 1.45, maxWidth: 760 }}>
           Equity put/call adds SPY, QQQ, and NDX. It stays blank until all three have a row, and until each row has a number for that field.
           VIX call/put is calls divided by puts. VIX calls are the hedge, so a higher number is more call buying.
@@ -338,4 +350,143 @@ function triangle(cx: number, cy: number, lean: EodLean): string {
   const h = 7;
   if (lean === "up") return `${cx},${cy - h - 6} ${cx - w},${cy - 4} ${cx + w},${cy - 4}`;
   return `${cx},${cy + h + 6} ${cx - w},${cy + 4} ${cx + w},${cy + 4}`;
+}
+
+const GEX_SERIES = [
+  { key: "spot" as const, label: "Spot", color: "#8d99a6" },
+  { key: "flip" as const, label: "Flip", color: "#e7dcc8" },
+  { key: "callWall1" as const, label: "Call wall 1", color: "#9caf88" },
+  { key: "putWall1" as const, label: "Put wall 1", color: "#c4898a" },
+];
+
+function GammaLevels({ rows }: { rows: GexRow[] }) {
+  const ordered = rows.slice().sort((a, b) => b.date.localeCompare(a.date) || a.underlying.localeCompare(b.underlying));
+  return (
+    <section>
+      <h2 style={{ margin: "0 0 8px", fontSize: 16 }}>Gamma levels</h2>
+      <p style={{ margin: "0 0 10px", color: "#94a3b8", fontSize: 14, lineHeight: 1.45, maxWidth: 760 }}>
+        QQQ and SPY gamma from the morning chain, expirations 0 to 45 days, strikes within 12% of spot.
+        Calls add and puts subtract. Open interest is the prior close. A blank or n/a was not in the feed.
+      </p>
+      <div style={{ overflowX: "auto" }}>
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Underlying</th>
+              <th>Spot</th>
+              <th>Flip</th>
+              <th>Flip fut</th>
+              <th>Call 1</th>
+              <th>Call 2</th>
+              <th>Call 3</th>
+              <th>Call fut</th>
+              <th>Put 1</th>
+              <th>Put 2</th>
+              <th>Put 3</th>
+              <th>Put fut</th>
+              <th>Total GEX</th>
+              <th>Near expiry</th>
+              <th>Near flip</th>
+              <th>Near flip fut</th>
+              <th>Coverage</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ordered.length === 0 && (
+              <tr>
+                <td colSpan={18} style={{ color: "#94a3b8" }}>No gamma rows yet.</td>
+              </tr>
+            )}
+            {ordered.map((row) => (
+              <tr key={`${row.date}:${row.underlying}`}>
+                <td>{row.date}</td>
+                <td>{row.underlying}</td>
+                <td>{formatGexPrice(row.spot)}</td>
+                <td>{formatGexPrice(row.flip)}</td>
+                <td>{formatGexPrice(row.flipFutures)}</td>
+                <td>{formatGexPrice(row.callWall1)}</td>
+                <td>{formatGexPrice(row.callWall2)}</td>
+                <td>{formatGexPrice(row.callWall3)}</td>
+                <td>{[row.callWall1Futures, row.callWall2Futures, row.callWall3Futures].map(formatGexPrice).join(", ")}</td>
+                <td>{formatGexPrice(row.putWall1)}</td>
+                <td>{formatGexPrice(row.putWall2)}</td>
+                <td>{formatGexPrice(row.putWall3)}</td>
+                <td>{[row.putWall1Futures, row.putWall2Futures, row.putWall3Futures].map(formatGexPrice).join(", ")}</td>
+                <td>{formatGex(row.totalGex)}</td>
+                <td>{row.nearExpiry ?? "n/a"}</td>
+                <td>{formatGexPrice(row.nearFlip)}</td>
+                <td>{formatGexPrice(row.nearFlipFutures)}</td>
+                <td>{formatGexCoverage(row.gammaCoverage)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <GammaChart rows={ordered} underlying="QQQ" />
+      <GammaChart rows={ordered} underlying="SPY" />
+    </section>
+  );
+}
+
+function GammaChart({ rows, underlying }: { rows: GexRow[]; underlying: GexUnderlying }) {
+  const series = gexChartSeries(rows, underlying);
+  const values: number[] = [];
+  for (let i = 0; i < series.length; i++) {
+    for (let j = 0; j < GEX_SERIES.length; j++) {
+      const value = series[i][GEX_SERIES[j].key];
+      if (value != null) values.push(value);
+    }
+  }
+  return (
+    <div style={{ marginTop: 16 }}>
+      <h3 style={{ margin: "0 0 8px", fontSize: 14, color: "#cbd5e1" }}>{underlying}</h3>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 12, color: "#94a3b8", fontSize: 13, marginBottom: 8 }}>
+        {GEX_SERIES.map((item) => (
+          <span key={item.key}><span style={{ color: item.color }}>●</span> {item.label}</span>
+        ))}
+      </div>
+      {values.length === 0 ? <p style={{ color: "#94a3b8", margin: 0 }}>n/a</p> : <GammaSvg series={series} values={values} />}
+    </div>
+  );
+}
+
+function GammaSvg({ series, values }: { series: GexChartPoint[]; values: number[] }) {
+  const width = 720;
+  const height = 220;
+  const pad = 36;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max === min ? 1 : max - min;
+  const x = (index: number) => pad + (series.length === 1 ? (width - pad * 2) / 2 : (index * (width - pad * 2)) / (series.length - 1));
+  const y = (value: number) => pad + (1 - (value - min) / span) * (height - pad * 2);
+  const labelAt = series.length <= 8 ? series.map((_, index) => index) : [0, Math.floor((series.length - 1) / 2), series.length - 1];
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Spot, flip, and first walls" style={{ width: "100%", maxWidth: 720, height: "auto", background: "rgba(255,255,255,0.02)", borderRadius: 8 }}>
+      <line x1={pad} y1={height - pad} x2={width - pad} y2={height - pad} stroke="rgba(255,255,255,0.12)" />
+      {GEX_SERIES.map((item) => {
+        const paths: string[] = [];
+        let current: string[] = [];
+        for (let i = 0; i < series.length; i++) {
+          const value = series[i][item.key];
+          if (value == null) {
+            if (current.length > 1) paths.push(current.join(" "));
+            current = [];
+            continue;
+          }
+          current.push(`${x(i)},${y(value)}`);
+        }
+        if (current.length > 1) paths.push(current.join(" "));
+        return paths.map((points) => <polyline key={`${item.key}-${points}`} fill="none" stroke={item.color} strokeWidth="2" points={points} />);
+      })}
+      {GEX_SERIES.map((item) => series.map((point, index) => {
+        const value = point[item.key];
+        if (value == null) return null;
+        return <circle key={`${item.key}-${point.date}`} cx={x(index)} cy={y(value)} r="3" fill={item.color} />;
+      }))}
+      {labelAt.map((index) => (
+        <text key={series[index].date} x={x(index)} y={height - 8} fill="#64748b" fontSize="11" textAnchor="middle">{series[index].date.slice(5)}</text>
+      ))}
+    </svg>
+  );
 }
