@@ -17,6 +17,7 @@ import { scanEstimatedFlow } from "@/app/lib/flowScan";
 import type { ResearchCandidate } from "@/app/lib/researchTrack";
 import { earningsDateMapForRows, windowEarningsDateForContract } from "@/app/lib/earningsWindow";
 import { formatAvwapPaperLog, runAvwapPaper } from "@/app/lib/avwapPaperRun";
+import { formatAvwapTrialLog, runAvwapTrial } from "@/app/lib/avwapTrialRun";
 import { runCallsPaper } from "@/app/lib/callsPaperRun";
 import { runJgVwapPaper } from "@/app/lib/jgVwapRun";
 import { openMissingShadows, openScanTickers, recordEarningsWindowShadows, recordExperimentalShadows, recordVwapRejectionPuts, runShadowPass } from "@/app/lib/shadowStore";
@@ -266,6 +267,17 @@ async function handleCron(request: NextRequest) {
         avwapFailed = true;
         const detail = err instanceof Error ? err.message.slice(0, 160) : "AVWAP paper update failed";
         const line = `AVWAP paper update failed: ${detail}`;
+        console.info(line);
+        log.push(line);
+      }
+      try {
+        const trial = await runAvwapTrial(now);
+        const line = formatAvwapTrialLog(trial);
+        console.info(line);
+        log.push(line);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message.slice(0, 160) : "AVWAP trial update failed";
+        const line = `AVWAP trial update failed: ${detail}`;
         console.info(line);
         log.push(line);
       }

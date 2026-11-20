@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
+import { AvwapTrialPanel } from "@/app/components/AvwapTrialPanel";
 import { PageLinks } from "@/app/components/PageLinks";
 
 interface WhatIf {
@@ -193,6 +194,7 @@ export default function AvwapPage() {
             <TradeTable rows={page.closed} empty="No closed AVWAP paper trade yet." showRunning />
           </>
         )}
+        <AvwapTrialPanel />
       </div>
     </main>
   );

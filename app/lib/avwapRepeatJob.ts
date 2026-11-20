@@ -24,8 +24,9 @@ import {
   type RepeatClaim,
 } from "@/app/lib/avwapRepeat";
 import { parseAvwapPaperBook } from "@/app/lib/avwapPaper";
+import { parseAvwapTrialBook } from "@/app/lib/avwapTrial";
 import { timingSafeEqual } from "@/app/lib/auth";
-import { readAvwapPaperBookText, readAvwapRepeatText, updateAvwapRepeat } from "@/app/lib/schwabStore";
+import { readAvwapPaperBookText, readAvwapRepeatText, readAvwapTrialText, updateAvwapRepeat } from "@/app/lib/schwabStore";
 import {
   answerTelegramCallback,
   editTelegramMessage,
@@ -234,11 +235,19 @@ function defaultIo(): AvwapRepeatIo {
   };
 }
 
-async function closedAvwapTradeIds(): Promise<ReadonlySet<string>> {
-  const book = parseAvwapPaperBook(await readAvwapPaperBookText());
+export async function closedAvwapTradeIds(): Promise<ReadonlySet<string>> {
   const ids = new Set<string>();
+  const book = parseAvwapPaperBook(await readAvwapPaperBookText());
   for (let i = 0; i < book.trades.length; i++) {
     if (book.trades[i].status === "closed") ids.add(book.trades[i].id);
+  }
+  try {
+    const trial = parseAvwapTrialBook(await readAvwapTrialText());
+    for (let i = 0; i < trial.trades.length; i++) {
+      if (trial.trades[i].status === "closed") ids.add(trial.trades[i].id);
+    }
+  } catch {
+    // A trial-book read must not stop repeats for the live AVWAP puts.
   }
   return ids;
 }
