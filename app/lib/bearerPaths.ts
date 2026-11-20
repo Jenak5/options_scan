@@ -7,6 +7,7 @@ export const BEARER_PATHS: ReadonlySet<string> = new Set([
   "/api/cron/candles",
   "/api/cron/daily-note",
   "/api/cron/eod-flow",
+  "/api/cron/gex",
   "/api/candles/backfill",
   "/api/candles/summaries",
   "/api/features/backfill",

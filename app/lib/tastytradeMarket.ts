@@ -592,6 +592,162 @@ export async function ttOptionExpirations(
   return parseNestedChain(nested);
 }
 
+/** Front-month future streamer symbol, such as /NQZ26:XCME. Null when Tastytrade has no active month. */
+export async function ttActiveFuture(product: "NQ" | "ES", fetchImpl: typeof fetch = fetch): Promise<string | null> {
+  const payload = await ttGet(`/instruments/futures?product-code[]=${encodeURIComponent(product)}`, fetchImpl);
+  const items = (payload as { data?: { items?: unknown[] } })?.data?.items;
+  if (!Array.isArray(items)) return null;
+  for (let i = 0; i < items.length; i++) {
+    const row = items[i];
+    if (!row || typeof row !== "object") continue;
+    const record = row as Record<string, unknown>;
+    if (record["active-month"] !== true) continue;
+    const symbol = record["streamer-symbol"];
+    if (typeof symbol === "string" && symbol.trim() !== "") return symbol.trim();
+  }
+  return null;
+}
+
+export interface GexFeedReading {
+  gamma: number | null;
+  iv: number | null;
+  openInterest: number | null;
+  price: number | null;
+}
+
+const GEX_FEED_CAP = 5_000;
+const GEX_SUB_BATCH = 100;
+
+/**
+ * Greeks gamma and volatility, Summary open interest, and optionally Trade price.
+ * One connection. The caller keeps the list at or under 4,500 symbols.
+ */
+export async function ttGexFeed(
+  symbols: readonly string[],
+  deps?: { fetchImpl?: typeof fetch; timeoutMs?: number; quietMs?: number; includeTrade?: boolean },
+): Promise<Map<string, GexFeedReading>> {
+  const unique: string[] = [];
+  const seenSymbols = new Set<string>();
+  for (let i = 0; i < symbols.length; i++) {
+    const symbol = symbols[i];
+    if (!symbol || seenSymbols.has(symbol)) continue;
+    seenSymbols.add(symbol);
+    unique.push(symbol);
+  }
+  const out = new Map<string, GexFeedReading>();
+  if (unique.length === 0) return out;
+  if (unique.length > GEX_FEED_CAP) throw new TastytradeDataError("DXLink chunk exceeds 5000 symbols");
+  const fetchImpl = deps?.fetchImpl ?? fetch;
+  const timeoutMs = deps?.timeoutMs ?? 60_000;
+  const quietMs = deps?.quietMs ?? 4_000;
+  const includeTrade = deps?.includeTrade === true;
+  await withFreshDxlink(fetchImpl, async (session) => {
+    const transport = await connector()(session.url);
+    const deadline = Date.now() + timeoutMs;
+    let streaming = false;
+    let lastDataAt = 0;
+    try {
+      const opening = dxlinkOpening(session.token);
+      for (let i = 0; i < opening.length; i++) transport.send(JSON.stringify(opening[i]));
+      while (Date.now() < deadline) {
+        if (lastDataAt > 0 && Date.now() - lastDataAt >= quietMs && out.size > 0) break;
+        const incoming = await transport.next(Math.max(1, Math.min(lastDataAt > 0 ? quietMs : 3000, deadline - Date.now())));
+        if (incoming === "timeout") continue;
+        if (incoming == null) break;
+        let msg: Record<string, unknown>;
+        try {
+          msg = JSON.parse(incoming) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        if (msg.type === "KEEPALIVE") {
+          transport.send(JSON.stringify({ type: "KEEPALIVE", channel: 0 }));
+        } else if (msg.type === "ERROR") {
+          throw dxlinkFailure(msg, [session.token]);
+        } else if (msg.type === "AUTH_STATE" && msg.state === "AUTHORIZED" && !streaming) {
+          streaming = true;
+          const fields: Record<string, string[]> = {
+            Greeks: ["eventSymbol", "gamma", "volatility"],
+            Summary: ["eventSymbol", "openInterest"],
+          };
+          if (includeTrade) fields.Trade = ["eventSymbol", "price"];
+          transport.send(JSON.stringify({ type: "CHANNEL_REQUEST", channel: 1, service: "FEED", parameters: { contract: "AUTO" } }));
+          transport.send(JSON.stringify({
+            type: "FEED_SETUP",
+            channel: 1,
+            acceptAggregationPeriod: 0.1,
+            acceptDataFormat: "COMPACT",
+            acceptEventFields: fields,
+          }));
+          for (let i = 0; i < unique.length; i += GEX_SUB_BATCH) {
+            const batch = unique.slice(i, i + GEX_SUB_BATCH);
+            const add: { type: string; symbol: string }[] = [];
+            for (let j = 0; j < batch.length; j++) {
+              add.push({ type: "Greeks", symbol: batch[j] }, { type: "Summary", symbol: batch[j] });
+              if (includeTrade) add.push({ type: "Trade", symbol: batch[j] });
+            }
+            transport.send(JSON.stringify({ type: "FEED_SUBSCRIPTION", channel: 1, add }));
+          }
+        } else if (msg.type === "FEED_DATA") {
+          const before = out.size;
+          readGexFeed(msg.data, out);
+          if (out.size > before || lastDataAt === 0) lastDataAt = Date.now();
+        }
+      }
+      if (!streaming) throw new TastytradeDataError(DXLINK_AUTH_TIMEOUT);
+    } finally {
+      transport.close();
+    }
+    return out;
+  });
+  return out;
+}
+
+function gexFeedRow(into: Map<string, GexFeedReading>, symbol: string): GexFeedReading {
+  const existing = into.get(symbol);
+  if (existing) return existing;
+  const created: GexFeedReading = { gamma: null, iv: null, openInterest: null, price: null };
+  into.set(symbol, created);
+  return created;
+}
+
+function readGexNumber(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string" && value.trim() !== "" && value.trim().toLowerCase() !== "nan") {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function readGexFeed(data: unknown, into: Map<string, GexFeedReading>): void {
+  if (!Array.isArray(data)) return;
+  for (let i = 0; i + 1 < data.length; i += 2) {
+    const kind = data[i];
+    const values = data[i + 1];
+    if (!Array.isArray(values)) continue;
+    const width = kind === "Greeks" ? 3 : kind === "Summary" || kind === "Trade" ? 2 : 0;
+    if (width === 0) continue;
+    for (let j = 0; j + width <= values.length; j += width) {
+      const symbol = typeof values[j] === "string" ? values[j].trim() : "";
+      if (!symbol) continue;
+      const row = gexFeedRow(into, symbol);
+      if (kind === "Greeks") {
+        const gamma = readGexNumber(values[j + 1]);
+        const iv = readGexNumber(values[j + 2]);
+        if (gamma != null) row.gamma = gamma;
+        if (iv != null && iv >= 0) row.iv = iv;
+      } else if (kind === "Summary") {
+        const oi = readGexNumber(values[j + 1]);
+        if (oi != null && oi >= 0) row.openInterest = oi;
+      } else if (kind === "Trade") {
+        const price = readGexNumber(values[j + 1]);
+        if (price != null && price > 0) row.price = price;
+      }
+    }
+  }
+}
+
 const EOD_STREAM_CAP = 5_000;
 const EOD_SUB_BATCH = 100;
 
