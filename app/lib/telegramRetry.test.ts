@@ -26,6 +26,7 @@ describe("sendTelegramAlert", () => {
     vi.useFakeTimers();
     vi.stubEnv("TELEGRAM_BOT_TOKEN", TOKEN);
     vi.stubEnv("TELEGRAM_CHAT_ID", "100");
+    vi.stubEnv("TELEGRAM_MUTE_OTHER", "0");
     const info = vi.spyOn(console, "info").mockImplementation(() => {});
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     let calls = 0;
@@ -54,6 +55,7 @@ describe("sendTelegramAlert", () => {
     vi.useFakeTimers();
     vi.stubEnv("TELEGRAM_BOT_TOKEN", TOKEN);
     vi.stubEnv("TELEGRAM_CHAT_ID", "100");
+    vi.stubEnv("TELEGRAM_MUTE_OTHER", "0");
     vi.spyOn(console, "info").mockImplementation(() => {});
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     let calls = 0;

@@ -10,21 +10,39 @@ export const AVWAP_REPEAT_GAP_MS = 110_000;
 export const AVWAP_REPEAT_MAX = 5;
 export const AVWAP_REPEAT_OPEN_MINUTE = 9 * 60 + 30;
 export const AVWAP_REPEAT_CLOSE_MINUTE = 16 * 60;
+/** Finished alerts stay in the book this long so a past ack can be checked. */
+export const AVWAP_STATUS_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type AvwapRepeatStop = "ack" | "repeats" | "closed" | "close";
+export type AvwapAckVia = "button" | "reply" | "ack";
 
 export interface AvwapPendingAlert {
   id: string;
   tradeId: string | null;
   text: string;
+  isTest: boolean;
   firstSentAt: number;
   repeatsSent: number;
   lastSentAt: number;
   acknowledged: boolean;
+  acknowledgedAt: number | null;
+  ackVia: AvwapAckVia | null;
   messageIds: number[];
   stop: AvwapRepeatStop | null;
   /** Set while this process owns the next send. A second run with a different token does not send. */
   claimToken: string | null;
+}
+
+export interface AvwapStatusRow {
+  id: string;
+  isTest: boolean;
+  firstSentAt: number;
+  repeatsSent: number;
+  lastSentAt: number;
+  acknowledged: boolean;
+  acknowledgedAt: number | null;
+  ackVia: AvwapAckVia | null;
+  stoppedReason: string | null;
 }
 
 export interface AvwapRepeatBook {
@@ -45,12 +63,43 @@ export function emptyAvwapRepeatBook(): AvwapRepeatBook {
   return { version: 1, alerts: [], lockUntil: null };
 }
 
-export function addOpenAlert(book: AvwapRepeatBook, alert: AvwapPendingAlert): AvwapRepeatBook {
+export function addOpenAlert(book: AvwapRepeatBook, alert: AvwapPendingAlert, nowMs: number = Date.now()): AvwapRepeatBook {
   const alerts = book.alerts.filter((row) => row.id !== alert.id).concat(alert);
-  const open = alerts.filter((row) => !row.acknowledged && row.stop == null);
-  const done = alerts.filter((row) => row.acknowledged || row.stop != null);
-  done.sort((a, b) => b.lastSentAt - a.lastSentAt);
-  return { ...book, alerts: open.concat(done.slice(0, 40)) };
+  return { ...book, alerts: retainAvwapAlerts(alerts, nowMs) };
+}
+
+export function avwapStopReason(stop: AvwapRepeatStop | null): string | null {
+  if (stop === "ack") return "acknowledged";
+  if (stop === "repeats") return "5 repeats sent";
+  if (stop === "closed") return "trade closed";
+  if (stop === "close") return "market closed";
+  return null;
+}
+
+/** At most 40 characters, tags stripped. Safe for a log line. */
+export function avwapLogPreview(text: string): string {
+  const plain = text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  return plain.slice(0, 40);
+}
+
+export function avwapStatusRows(book: AvwapRepeatBook, limit = 20): AvwapStatusRow[] {
+  const rows = book.alerts.slice().sort((a, b) => b.lastSentAt - a.lastSentAt);
+  const out: AvwapStatusRow[] = [];
+  for (let i = 0; i < rows.length && out.length < limit; i++) {
+    const alert = rows[i];
+    out.push({
+      id: alert.id,
+      isTest: alert.isTest,
+      firstSentAt: alert.firstSentAt,
+      repeatsSent: alert.repeatsSent,
+      lastSentAt: alert.lastSentAt,
+      acknowledged: alert.acknowledged,
+      acknowledgedAt: alert.acknowledgedAt,
+      ackVia: alert.ackVia,
+      stoppedReason: avwapStopReason(alert.stop),
+    });
+  }
+  return out;
 }
 
 export function avwapRepeatSecretSet(env: Record<string, string | undefined> = process.env): boolean {
@@ -149,7 +198,7 @@ export function planAvwapRepeats(
       claimedAt: nowMs,
     });
   }
-  return { book: { version: 1, alerts: trimAlerts(alerts), lockUntil: book.lockUntil }, claims };
+  return { book: { version: 1, alerts: retainAvwapAlerts(alerts, nowMs), lockUntil: book.lockUntil }, claims };
 }
 
 export function revertRepeatClaim(book: AvwapRepeatBook, claim: RepeatClaim): AvwapRepeatBook {
@@ -178,28 +227,38 @@ export function recordRepeatMessage(book: AvwapRepeatBook, id: string, messageId
   return { ...book, alerts };
 }
 
-export function acknowledgeAvwapAlert(book: AvwapRepeatBook, id: string): { book: AvwapRepeatBook; alert: AvwapPendingAlert | null } {
+export function acknowledgeAvwapAlert(
+  book: AvwapRepeatBook,
+  id: string,
+  nowMs: number = Date.now(),
+  via: AvwapAckVia = "button",
+): { book: AvwapRepeatBook; alert: AvwapPendingAlert | null } {
   let found: AvwapPendingAlert | null = null;
   const alerts = book.alerts.map((alert) => {
     if (alert.id !== id) return alert;
-    found = { ...alert, acknowledged: true, stop: "ack", claimToken: null };
+    found = { ...alert, acknowledged: true, acknowledgedAt: nowMs, ackVia: via, stop: "ack", claimToken: null };
     return found;
   });
   return { book: { ...book, alerts }, alert: found };
 }
 
-export function acknowledgeByMessageId(book: AvwapRepeatBook, messageId: number): { book: AvwapRepeatBook; alert: AvwapPendingAlert | null } {
+export function acknowledgeByMessageId(
+  book: AvwapRepeatBook,
+  messageId: number,
+  nowMs: number = Date.now(),
+  via: AvwapAckVia = "reply",
+): { book: AvwapRepeatBook; alert: AvwapPendingAlert | null } {
   const match = book.alerts.find((alert) => !alert.acknowledged && alert.messageIds.includes(messageId));
   if (!match) return { book, alert: null };
-  return acknowledgeAvwapAlert(book, match.id);
+  return acknowledgeAvwapAlert(book, match.id, nowMs, via);
 }
 
 /** Oldest open alert. A bare ack is specific only when one alert is open. */
-export function acknowledgeOldestOpen(book: AvwapRepeatBook): { book: AvwapRepeatBook; alert: AvwapPendingAlert | null } {
+export function acknowledgeOldestOpen(book: AvwapRepeatBook, nowMs: number = Date.now()): { book: AvwapRepeatBook; alert: AvwapPendingAlert | null } {
   const open = book.alerts.filter((alert) => !alert.acknowledged && alert.stop !== "ack");
   open.sort((a, b) => a.firstSentAt - b.firstSentAt);
   if (open.length === 0) return { book, alert: null };
-  return acknowledgeAvwapAlert(book, open[0].id);
+  return acknowledgeAvwapAlert(book, open[0].id, nowMs, "ack");
 }
 
 export function isAckWord(text: string | null | undefined): boolean {
@@ -253,11 +312,14 @@ function sameOpenSession(firstSentAt: number, now: Date): boolean {
   return newYorkDate(new Date(firstSentAt)) === newYorkDate(now);
 }
 
-function trimAlerts(alerts: AvwapPendingAlert[]): AvwapPendingAlert[] {
+export function retainAvwapAlerts(alerts: readonly AvwapPendingAlert[], nowMs: number): AvwapPendingAlert[] {
   const open = alerts.filter((alert) => !alert.acknowledged && alert.stop == null);
-  const done = alerts.filter((alert) => alert.acknowledged || alert.stop != null);
-  done.sort((a, b) => b.lastSentAt - a.lastSentAt);
-  return open.concat(done.slice(0, 40));
+  const done = alerts.filter((alert) => {
+    if (!alert.acknowledged && alert.stop == null) return false;
+    const at = alert.acknowledgedAt ?? alert.lastSentAt;
+    return nowMs - at < AVWAP_STATUS_KEEP_MS;
+  });
+  return open.concat(done);
 }
 
 function parseAlert(value: unknown): AvwapPendingAlert | null {
@@ -282,6 +344,9 @@ function parseAlert(value: unknown): AvwapPendingAlert | null {
     messageIds,
     stop,
     claimToken: typeof row.claimToken === "string" && row.claimToken.length > 0 ? row.claimToken : null,
+    isTest: row.isTest === true,
+    acknowledgedAt: typeof row.acknowledgedAt === "number" ? row.acknowledgedAt : null,
+    ackVia: row.ackVia === "button" || row.ackVia === "reply" || row.ackVia === "ack" ? row.ackVia : null,
   };
 }
 

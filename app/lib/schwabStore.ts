@@ -25,6 +25,7 @@ import {
   SCHWAB_BLOB_EOD_FLOW_PATH,
   SCHWAB_BLOB_GEX_PATH,
   SCHWAB_BLOB_AVWAP_REPEAT_PATH,
+  SCHWAB_BLOB_TELEGRAM_MUTE_PATH,
   SCHWAB_BLOB_SHADOW_BOOK_PATH,
   SCHWAB_BLOB_TRADE_LOG_PATH,
   SCHWAB_BLOB_TOKEN_ENV,
@@ -96,6 +97,7 @@ const UNUSUAL_BOOK_KEY = "oes:flow:unusual";
 const EOD_FLOW_KEY = "oes:eod:flow";
 const GEX_KEY = "oes:gex:levels";
 const AVWAP_REPEAT_KEY = "oes:avwap:repeat";
+const TELEGRAM_MUTE_KEY = "oes:telegram:mute";
 const BLOB_WRITE_ATTEMPTS = 4;
 const JSON_CONDITIONAL_ATTEMPTS = 3;
 /** Re-read the token store only inside this window before access-token expiry. */
@@ -151,6 +153,7 @@ interface MemoryBag {
   eodFlow: string | null;
   gexBook: string | null;
   avwapRepeat: string | null;
+  telegramMute: string | null;
 }
 
 interface TokenEnvelope {
@@ -272,7 +275,7 @@ export function setSchwabBlobClientForTests(next: SchwabBlobClient | null): void
 function memoryBag(): MemoryBag {
   const g = globalThis as typeof globalThis & { __oesSchwabMemory?: MemoryBag };
   if (!g.__oesSchwabMemory) {
-    g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null, avwapPaperBook: null, callsPaperBook: null, unusualBook: null, eodFlow: null, gexBook: null, avwapRepeat: null };
+    g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null, avwapPaperBook: null, callsPaperBook: null, unusualBook: null, eodFlow: null, gexBook: null, avwapRepeat: null, telegramMute: null };
   } else if (!g.__oesSchwabMemory.flowSnapshots) {
     g.__oesSchwabMemory.flowSnapshots = {};
   }
@@ -286,12 +289,13 @@ function memoryBag(): MemoryBag {
   if (g.__oesSchwabMemory.eodFlow === undefined) g.__oesSchwabMemory.eodFlow = null;
   if (g.__oesSchwabMemory.gexBook === undefined) g.__oesSchwabMemory.gexBook = null;
   if (g.__oesSchwabMemory.avwapRepeat === undefined) g.__oesSchwabMemory.avwapRepeat = null;
+  if (g.__oesSchwabMemory.telegramMute === undefined) g.__oesSchwabMemory.telegramMute = null;
   return g.__oesSchwabMemory;
 }
 
 export function clearMemoryStoreForTests(): void {
   const g = globalThis as typeof globalThis & { __oesSchwabMemory?: MemoryBag };
-  g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null, avwapPaperBook: null, callsPaperBook: null, unusualBook: null, eodFlow: null, gexBook: null, avwapRepeat: null };
+  g.__oesSchwabMemory = { tokens: null, alerts: { ...EMPTY_ALERTS }, flowSnapshots: {}, alertBook: null, tradeLog: null, shadowBook: null, jgVwapBook: null, avwapPaperBook: null, callsPaperBook: null, unusualBook: null, eodFlow: null, gexBook: null, avwapRepeat: null, telegramMute: null };
   memoryStoreStatus = null;
   tokenCache = null;
   tokenBlobBlockedUntil = 0;
@@ -1361,6 +1365,64 @@ export async function updateAvwapRepeat(change: (current: string | null) => stri
   }
 }
 
+export type TelegramMuteRead = { state: "ok"; text: string | null } | { state: "unreadable" };
+
+/** Mute setting and the short log of alerts that were not sent. Missing means the default. */
+export async function readTelegramMute(): Promise<TelegramMuteRead> {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") return { state: "unreadable" };
+  if (kind === "memory") return { state: "ok", text: memoryBag().telegramMute };
+  if (kind === "blob") {
+    const token = blobToken();
+    if (!token) return { state: "unreadable" };
+    const read = await readBlobJson(SCHWAB_BLOB_TELEGRAM_MUTE_PATH, token);
+    if (read.state === "error") return { state: "unreadable" };
+    if (read.state !== "ok") return { state: "ok", text: null };
+    return { state: "ok", text: read.text };
+  }
+  try {
+    const raw = await kvCommand(["GET", TELEGRAM_MUTE_KEY]);
+    return { state: "ok", text: typeof raw === "string" && raw.length > 0 ? raw : null };
+  } catch {
+    return { state: "unreadable" };
+  }
+}
+
+export async function updateTelegramMute(change: (current: string | null) => string | null): Promise<boolean> {
+  const kind = resolveStoreKind();
+  if (kind === "unconfigured") return false;
+  const guarded = (current: string | null): string | null => {
+    if (!hasJsonArray(current, "log")) return null;
+    const next = change(current);
+    if (next == null) return null;
+    if (!hasJsonArray(next, "log")) return null;
+    return next;
+  };
+  if (kind === "memory") {
+    const bag = memoryBag();
+    const next = guarded(bag.telegramMute);
+    if (next == null) return false;
+    bag.telegramMute = next;
+    return true;
+  }
+  if (kind === "blob") return writeBlobJson(SCHWAB_BLOB_TELEGRAM_MUTE_PATH, "telegram-mute", "Telegram mute", guarded);
+  let current: string | null;
+  try {
+    const raw = await kvCommand(["GET", TELEGRAM_MUTE_KEY]);
+    current = typeof raw === "string" && raw.length > 0 ? raw : null;
+  } catch {
+    return false;
+  }
+  const next = guarded(current);
+  if (next == null) return false;
+  try {
+    await kvCommand(["SET", TELEGRAM_MUTE_KEY, next]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function updateBlobAlertBook(change: (current: string | null) => string | null): Promise<boolean> {
   return writeBlobJson(SCHWAB_BLOB_ALERT_BOOK_PATH, "alert-book", "Alert book", change);
 }
@@ -1865,7 +1927,7 @@ async function readBlobJson(pathname: string, token: string, bypassCache = false
   }
 }
 
-type JsonStoreTarget = "alert-book" | "flow-snapshots" | "trade-log" | "shadow-book" | "jg-vwap" | "avwap-paper" | "calls-paper" | "unusual-flow" | "eod-flow" | "gex" | "avwap-repeat";
+type JsonStoreTarget = "alert-book" | "flow-snapshots" | "trade-log" | "shadow-book" | "jg-vwap" | "avwap-paper" | "calls-paper" | "unusual-flow" | "eod-flow" | "gex" | "avwap-repeat" | "telegram-mute";
 
 interface StoreFailureRecord {
   target: JsonStoreTarget;
@@ -2250,6 +2312,7 @@ function storeLabel(target: JsonStoreTarget): string {
   if (target === "eod-flow") return "EOD flow";
   if (target === "gex") return "Gamma levels";
   if (target === "avwap-repeat") return "AVWAP repeat";
+  if (target === "telegram-mute") return "Telegram mute";
   return "Flow snapshot store";
 }
 

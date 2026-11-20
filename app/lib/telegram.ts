@@ -23,6 +23,8 @@ export function telegramRetryWaitMs(body: string, retryAfterHeader: string | nul
   return Math.min(TELEGRAM_RETRY_CAP_MS, Math.round(seconds * 1000));
 }
 
+export type TelegramCategory = "avwap" | "system" | "other";
+
 export interface TelegramSendResult {
   ok: boolean;
   messageId: number | null;
@@ -111,7 +113,17 @@ export function publicAppOrigin(): string {
   return appOrigin();
 }
 
-export async function sendTelegramAlert(message: string): Promise<boolean> {
+/**
+ * category defaults to other. other is muted while the mute setting is on.
+ * avwap and system always use the HTTP send below.
+ * A muted other message returns true so callers treat it as handled.
+ */
+export async function sendTelegramAlert(message: string, category: TelegramCategory = "other"): Promise<boolean> {
+  if (category === "other" && process.env.TELEGRAM_MUTE_OTHER !== "0") {
+    const { allowOtherTelegram } = await import("@/app/lib/telegramMuteJob");
+    const allowed = await allowOtherTelegram(message);
+    if (!allowed) return true;
+  }
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
 

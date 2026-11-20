@@ -28,6 +28,8 @@ import { namedSource, providerFailureText } from "@/app/lib/providerCopy";
 import { emptyScanHealth, formatScanRunLine, normalizeSkippedTickers, SCAN_TIME_BUDGET_MS, scanLockIsStale, scanSlotDecision, skipNotifyDue, skipTelegramText, skipWarning, type ScanHealth, type ScanRunSummary } from "@/app/lib/scanHealth";
 import { probeTastytrade, tastytradeEnabled } from "@/app/lib/tastytrade";
 import { planExitsForAsk } from "@/app/lib/exits";
+import { classifyScannerWarnings, type ScannerWarningInput } from "@/app/lib/telegramMute";
+import { noteScannerFlags } from "@/app/lib/telegramMuteJob";
 import { formatRealertHtml, formatVerdictHtml, paperTradeLinkHtml, sendTelegramAlert } from "@/app/lib/telegram";
 import type { AlertVerdict } from "@/app/lib/verdict";
 import { formatVolArbSummary, type VolArbReading, type VolSignal } from "@/app/lib/volArb";
@@ -245,6 +247,8 @@ async function handleCron(request: NextRequest) {
   const log: string[] = [];
   let alertsSent = 0;
   let shadowAt: number | null = null;
+  let avwapFailed = false;
+  let storeUnsaved = false;
   const countsBefore = { ...dataSourceStatus().counts };
 
   try {
@@ -254,10 +258,12 @@ async function handleCron(request: NextRequest) {
     if (inSession || isManual) {
       try {
         const avwap = await runAvwapPaper(now);
+        if (!avwap.saved) storeUnsaved = true;
         const line = formatAvwapPaperLog(avwap);
         console.info(line);
         log.push(line);
       } catch (err) {
+        avwapFailed = true;
         const detail = err instanceof Error ? err.message.slice(0, 160) : "AVWAP paper update failed";
         const line = `AVWAP paper update failed: ${detail}`;
         console.info(line);
@@ -287,7 +293,7 @@ async function handleCron(request: NextRequest) {
       noteShadows(summary, shadow.opened, shadow.quoted, shadow.closed, shadow.saved);
       if (shadowTouched(shadow)) shadowAt = now.getTime();
       summary.outcome = "success";
-      await rememberScan("success", now, null, shadowAt);
+      await rememberScan("success", now, null, shadowAt, [], { avwapFailed, storeUnsaved });
       console.info(formatScanRunLine(summary));
       return NextResponse.json({ alertsSent: 0, followUpOnly: true, followUps, log });
     }
@@ -430,6 +436,7 @@ async function handleCron(request: NextRequest) {
       const claim = await rememberSentAlert(row, verdict, now, windowDate);
       if (!claim.send) {
         if (!claim.saved) {
+          storeUnsaved = true;
           const failure = await lastAlertBookWriteError();
           log.push(`${row.ticker}: alert book was not saved, so Telegram was not sent${saveDetail(failure)}`);
         } else {
@@ -513,7 +520,11 @@ async function handleCron(request: NextRequest) {
     const outcome = timeBudget || skippedNames.length > 0 ? "partial" : "success";
     summary.outcome = outcome;
     summary.reason = timeBudget ? "time budget" : null;
-    await rememberScan(outcome, now, timeBudget ? "time budget" : null, shadowAt, skippedNames);
+    await rememberScan(outcome, now, timeBudget ? "time budget" : null, shadowAt, skippedNames, {
+      rowsScanned: scan.rows.length,
+      avwapFailed,
+      storeUnsaved,
+    });
     await noteCronScan({
       now,
       outcome,
@@ -528,7 +539,11 @@ async function handleCron(request: NextRequest) {
       log.push(err.message);
       summary.outcome = "skipped";
       summary.reason = err.message;
-      await rememberScan("skipped", now, err.message, shadowAt);
+      await rememberScan("skipped", now, err.message, shadowAt, [], {
+        avwapFailed,
+        storeUnsaved,
+        schwabOnlyFailure: true,
+      });
       await noteCronScan({
         now,
         outcome: "skipped",
@@ -547,7 +562,11 @@ async function handleCron(request: NextRequest) {
       const skipped = normalizeSkippedTickers(err instanceof BothSourcesFailedError ? [err.label] : []);
       const outcome = skipped.length > 0 ? "partial" : "success";
       summary.outcome = outcome;
-      await rememberScan(outcome, now, null, shadowAt, skipped);
+      await rememberScan(outcome, now, null, shadowAt, skipped, {
+        avwapFailed,
+        storeUnsaved,
+        bothSourcesFailed: true,
+      });
       await noteCronScan({
         now,
         outcome,
@@ -571,7 +590,7 @@ async function handleCron(request: NextRequest) {
     } catch {
       log.push("Shadow alert update failed");
     }
-    await rememberScan("failed", now, message, shadowAt);
+    await rememberScan("failed", now, message, shadowAt, [], { avwapFailed, storeUnsaved });
     await noteCronScan({
       now,
       outcome: "failed",
@@ -714,12 +733,21 @@ async function claimScanSlot(now: number, manual: boolean): Promise<"ok" | "busy
   return "ok";
 }
 
+interface ScanWarnContext {
+  rowsScanned?: number;
+  avwapFailed?: boolean;
+  storeUnsaved?: boolean;
+  bothSourcesFailed?: boolean;
+  schwabOnlyFailure?: boolean;
+}
+
 async function rememberScan(
   outcome: "success" | "partial" | "skipped" | "failed",
   now: Date,
   reason: string | null,
   shadowAt: number | null,
   skippedTickers: readonly string[] = [],
+  warn: ScanWarnContext = {},
 ): Promise<void> {
   try {
     const current = await readScanHealth().catch(() => emptyScanHealth());
@@ -758,6 +786,21 @@ async function rememberScan(
       if (sent) next.skipNotifiedAt = now.getTime();
     }
     await writeScanHealth(next);
+    const input: ScannerWarningInput = {
+      outcome: storedOutcome,
+      reason,
+      rowsScanned: warn.rowsScanned ?? 0,
+      preferred: preferredDataSource() === "schwab" ? "schwab" : "tastytrade",
+      schwabOnlyFailure: warn.schwabOnlyFailure === true,
+      bothSourcesFailed: warn.bothSourcesFailed === true,
+      avwapFailed: warn.avwapFailed === true,
+      storeUnsaved: warn.storeUnsaved === true,
+    };
+    try {
+      await noteScannerFlags(classifyScannerWarnings(input), now.getTime());
+    } catch {
+      console.info("Scanner warning was not sent");
+    }
   } catch (err) {
     console.warn(skipWarning(err instanceof Error ? err.message : "Could not record the scan outcome"));
   }

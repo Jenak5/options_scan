@@ -86,6 +86,9 @@ export const SCHWAB_BLOB_GEX_PATH = "schwab/gex.json";
 /** Private blob for AVWAP trade-open alerts waiting on an acknowledgement. Not a token. */
 export const SCHWAB_BLOB_AVWAP_REPEAT_PATH = "schwab/avwap-repeat.json";
 
+/** Private blob for the non-AVWAP mute setting, the muted log, and warning times. Not a token. */
+export const SCHWAB_BLOB_TELEGRAM_MUTE_PATH = "schwab/telegram-mute.json";
+
 /**
  * Small private blob for the last alert-book, flow, or trade-log failure.
  * Written without ifMatch so a status line can be saved even when a
