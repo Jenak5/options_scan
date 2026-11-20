@@ -53,6 +53,22 @@
     {
       "path": "/api/cron/daily-note",
       "schedule": "5 21 * * 1-5"
+    },
+    {
+      "path": "/api/cron/eod-flow",
+      "schedule": "20 20 * * 1-5"
+    },
+    {
+      "path": "/api/cron/eod-flow",
+      "schedule": "30 20 * * 1-5"
+    },
+    {
+      "path": "/api/cron/eod-flow",
+      "schedule": "20 21 * * 1-5"
+    },
+    {
+      "path": "/api/cron/eod-flow",
+      "schedule": "30 21 * * 1-5"
     }
   ]
 }

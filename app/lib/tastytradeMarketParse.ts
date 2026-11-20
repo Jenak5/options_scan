@@ -180,6 +180,71 @@ function finitePositive(value: unknown): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+/**
+ * Trade and Summary fields for the end-of-day volume and open-interest pass.
+ * dayVolume is the session total. openInterest is the prior-close OCC figure.
+ * A zero is a real reading. A missing or non-numeric field is not.
+ */
+export const EOD_TRADE_FIELDS = ["eventSymbol", "dayVolume"] as const;
+export const EOD_SUMMARY_FIELDS = ["eventSymbol", "openInterest"] as const;
+
+export interface EodFeedReading {
+  dayVolume: number | null;
+  openInterest: number | null;
+}
+
+function nonNegativeReading(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) && value >= 0 ? value : null;
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (text === "" || text.toLowerCase() === "nan") return null;
+    const n = Number(text);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  }
+  return null;
+}
+
+function eodRow(into: Map<string, EodFeedReading>, symbol: string): EodFeedReading {
+  const existing = into.get(symbol);
+  if (existing) return existing;
+  const created: EodFeedReading = { dayVolume: null, openInterest: null };
+  into.set(symbol, created);
+  return created;
+}
+
+/**
+ * COMPACT FEED_DATA for Trade dayVolume and Summary openInterest.
+ * A later empty field does not erase a number already stored for that symbol.
+ * `seen` records that the event arrived, even when the number was missing.
+ */
+export function parseEodFeedData(
+  data: unknown,
+  into: Map<string, EodFeedReading> = new Map(),
+  seen?: { trade: Set<string>; summary: Set<string> },
+): Map<string, EodFeedReading> {
+  if (!Array.isArray(data)) return into;
+  for (let i = 0; i + 1 < data.length; i += 2) {
+    const kind = data[i];
+    const values = data[i + 1];
+    if ((kind !== "Trade" && kind !== "Summary") || !Array.isArray(values)) continue;
+    const width = 2;
+    for (let j = 0; j + width <= values.length; j += width) {
+      const symbol = typeof values[j] === "string" ? values[j].trim() : "";
+      if (!symbol) continue;
+      const row = eodRow(into, symbol);
+      const reading = nonNegativeReading(values[j + 1]);
+      if (kind === "Trade") {
+        if (reading != null) row.dayVolume = reading;
+        seen?.trade.add(symbol);
+      } else {
+        if (reading != null) row.openInterest = reading;
+        seen?.summary.add(symbol);
+      }
+    }
+  }
+  return into;
+}
+
 /** COMPACT FEED_DATA ["Trade", [sym, price, size, time, dayVolume, sym, ...]] → map by streamer symbol. */
 export function parseCompactTrades(data: unknown, into: Map<string, TtLastTrade> = new Map()): Map<string, TtLastTrade> {
   if (!Array.isArray(data)) return into;

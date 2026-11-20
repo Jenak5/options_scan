@@ -32,10 +32,15 @@ import {
   historyFromTime,
   parseEquityCandles,
   parseMarketDataItems,
+  EOD_SUMMARY_FIELDS,
+  EOD_TRADE_FIELDS,
   parseCompactTrades,
+  parseEodFeedData,
   parseNestedChain,
   streamerFromOcc,
   TRADE_FIELDS,
+  type EodFeedReading,
+  type NestedExpiration,
   type TtLastTrade,
   quoteEntriesFromItems,
   selectChainSymbols,
@@ -576,6 +581,113 @@ export async function ttLastTrades(
     return out;
   });
   return out;
+}
+
+/** Nested option chain only. No per-contract quote request. */
+export async function ttOptionExpirations(
+  symbol: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<NestedExpiration[]> {
+  const nested = await ttGet(`/option-chains/${encodeURIComponent(symbol.trim().toUpperCase())}/nested`, fetchImpl);
+  return parseNestedChain(nested);
+}
+
+const EOD_STREAM_CAP = 5_000;
+const EOD_SUB_BATCH = 100;
+
+/**
+ * One DXLink connection for Trade dayVolume and Summary openInterest.
+ * The caller chunks symbols. This refuses a list over the 5,000 symbol cap.
+ * The feed's latest event for each symbol is the session total, so a quiet
+ * socket is enough. It does not keep the connection open after the close.
+ */
+export async function ttEodStream(
+  streamers: readonly string[],
+  deps?: { fetchImpl?: typeof fetch; timeoutMs?: number; quietMs?: number },
+): Promise<Map<string, EodFeedReading>> {
+  const unique: string[] = [];
+  const seenSymbols = new Set<string>();
+  for (let i = 0; i < streamers.length; i++) {
+    const symbol = streamers[i];
+    if (!symbol || seenSymbols.has(symbol)) continue;
+    seenSymbols.add(symbol);
+    unique.push(symbol);
+  }
+  const out = new Map<string, EodFeedReading>();
+  if (unique.length === 0) return out;
+  if (unique.length > EOD_STREAM_CAP) {
+    throw new TastytradeDataError("DXLink chunk exceeds 5000 symbols");
+  }
+  const fetchImpl = deps?.fetchImpl ?? fetch;
+  const timeoutMs = deps?.timeoutMs ?? 60_000;
+  const quietMs = deps?.quietMs ?? 4_000;
+  await withFreshDxlink(fetchImpl, async (session) => {
+    const transport = await connector()(session.url);
+    const deadline = Date.now() + timeoutMs;
+    const seen = { trade: new Set<string>(), summary: new Set<string>() };
+    let streaming = false;
+    let lastDataAt = 0;
+    try {
+      const opening = dxlinkOpening(session.token);
+      for (let i = 0; i < opening.length; i++) transport.send(JSON.stringify(opening[i]));
+      while (Date.now() < deadline) {
+        if (eodFeedComplete(unique, seen)) break;
+        if (lastDataAt > 0 && Date.now() - lastDataAt >= quietMs) break;
+        const incoming = await transport.next(Math.max(1, Math.min(lastDataAt > 0 ? quietMs : 3000, deadline - Date.now())));
+        if (incoming === "timeout") continue;
+        if (incoming == null) break;
+        let msg: Record<string, unknown>;
+        try {
+          msg = JSON.parse(incoming) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        if (msg.type === "KEEPALIVE") {
+          transport.send(JSON.stringify({ type: "KEEPALIVE", channel: 0 }));
+        } else if (msg.type === "ERROR") {
+          throw dxlinkFailure(msg, [session.token]);
+        } else if (msg.type === "AUTH_STATE" && msg.state === "AUTHORIZED" && !streaming) {
+          streaming = true;
+          transport.send(JSON.stringify({ type: "CHANNEL_REQUEST", channel: 1, service: "FEED", parameters: { contract: "AUTO" } }));
+          transport.send(JSON.stringify({
+            type: "FEED_SETUP",
+            channel: 1,
+            acceptAggregationPeriod: 0.1,
+            acceptDataFormat: "COMPACT",
+            acceptEventFields: {
+              Trade: [...EOD_TRADE_FIELDS],
+              Summary: [...EOD_SUMMARY_FIELDS],
+            },
+          }));
+          for (let i = 0; i < unique.length; i += EOD_SUB_BATCH) {
+            const batch = unique.slice(i, i + EOD_SUB_BATCH);
+            const add: { type: string; symbol: string }[] = [];
+            for (let j = 0; j < batch.length; j++) {
+              add.push({ type: "Trade", symbol: batch[j] }, { type: "Summary", symbol: batch[j] });
+            }
+            transport.send(JSON.stringify({ type: "FEED_SUBSCRIPTION", channel: 1, add }));
+          }
+        } else if (msg.type === "FEED_DATA") {
+          const trades = seen.trade.size;
+          const summaries = seen.summary.size;
+          parseEodFeedData(msg.data, out, seen);
+          if (seen.trade.size > trades || seen.summary.size > summaries || lastDataAt === 0) lastDataAt = Date.now();
+        }
+      }
+      if (!streaming) throw new TastytradeDataError(DXLINK_AUTH_TIMEOUT);
+    } finally {
+      transport.close();
+    }
+    return out;
+  });
+  return out;
+}
+
+function eodFeedComplete(streamers: readonly string[], seen: { trade: Set<string>; summary: Set<string> }): boolean {
+  for (let i = 0; i < streamers.length; i++) {
+    if (!seen.trade.has(streamers[i]) || !seen.summary.has(streamers[i])) return false;
+  }
+  return true;
 }
 
 export async function ttQuoteEntries(
