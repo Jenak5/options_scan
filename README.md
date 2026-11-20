@@ -122,6 +122,7 @@ Set every secret in Vercel as a **Sensitive** variable. Do not leave them readab
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | Yes | Chat that receives alerts |
 | `TELEGRAM_WEBHOOK_SECRET` | Yes | Secret Telegram sends on AVWAP acknowledgement callbacks. If unset, AVWAP open alerts send once and do not repeat |
+| `TELEGRAM_MUTE_OTHER` | No | Set to `0` to force A/B, paper, and Schwab notices back onto Telegram. Any other value, or leaving it unset, keeps the stored mute setting. The default setting is muted |
 | `XAI_API_KEY` | Yes | Grok API key for screening and research |
 | `SCHWAB_CLIENT_ID` | Yes | Schwab Market Data app key |
 | `SCHWAB_CLIENT_SECRET` | Yes | Schwab Market Data app secret |
@@ -323,7 +324,8 @@ The checks are pure functions. `npm test` runs them against fixture chains and d
 4. Store `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` as Sensitive variables.
 5. After you are signed in, use **Send test Telegram alert** on the Alerts tab.
 6. To repeat AVWAP trade-open alerts until they are acknowledged, also store `TELEGRAM_WEBHOOK_SECRET` as a Sensitive variable. Pick any long random string and do not commit it. If that variable is unset, an AVWAP open alert is sent once and is not repeated.
-7. After the secret is saved, sign in and POST `/api/telegram/setup` once. That registers the Telegram webhook for the Got it button and for replies. POST `/api/telegram/avwap-test` sends a labeled test alert through the same path. It does not open a paper trade.
+7. After the secret is saved, sign in and POST `/api/telegram/setup` once. That registers the Telegram webhook for the Got it button and for replies. POST `/api/telegram/avwap-test` sends a labeled test alert through the same path. It does not open a paper trade. GET `/api/telegram/avwap-status` lists the last 20 pending and recent AVWAP alerts without the message text.
+8. Non-AVWAP Telegram alerts are muted by default. AVWAP trade-open alerts and a scanner-failure warning still send. Sign in and POST `/api/telegram/mute` with `{"muted": false}` to turn the other alerts back on, or `{"muted": true}` to mute them again. The Alerts tab shows the same switch. No redeploy is required.
 
 ## Deploy notes
 

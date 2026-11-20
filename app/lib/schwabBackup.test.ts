@@ -219,7 +219,8 @@ describe("Schwab backup while tastytrade is preferred", () => {
     expect(body.reason).toMatch(/Schwab is not connected/);
     const health = await readScanHealth();
     expect(health.lastOutcome).toBe("skipped");
-    expect(telegramBodies.some((text) => text.includes("Scan skipped"))).toBe(true);
+    expect(telegramBodies.some((text) => text.includes("Scan skipped"))).toBe(false);
+    expect(telegramBodies.some((text) => text.includes("Scanner warning"))).toBe(true);
     expect(await readFlowSnapshots()).toEqual({});
   });
 });

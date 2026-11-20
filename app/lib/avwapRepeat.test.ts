@@ -6,18 +6,24 @@ import { middleware } from "@/middleware";
 import {
   AVWAP_REPEAT_GAP_MS,
   AVWAP_REPEAT_MAX,
+  AVWAP_STATUS_KEEP_MS,
   acknowledgeAvwapAlert,
+  avwapStatusRows,
   emptyAvwapRepeatBook,
   planAvwapRepeats,
+  retainAvwapAlerts,
   type AvwapPendingAlert,
   type AvwapRepeatBook,
 } from "@/app/lib/avwapRepeat";
 import {
   acknowledgeFromTelegram,
   avwapRepeatsEnabled,
+  deliverAvwapOpenAlert,
   runAvwapRepeatPass,
   type AvwapRepeatIo,
 } from "@/app/lib/avwapRepeatJob";
+import { clearMemoryStoreForTests, updateAvwapRepeat } from "@/app/lib/schwabStore";
+import { GET as avwapStatusGet } from "@/app/api/telegram/avwap-status/route";
 import { isBearerPath } from "@/app/lib/bearerPaths";
 import { formatFlowAlert, sendTelegramAlert, sendTelegramAlertWithButton } from "@/app/lib/telegram";
 import { POST as webhookPost } from "@/app/api/telegram/webhook/route";
@@ -37,10 +43,13 @@ function pending(overrides: Partial<AvwapPendingAlert> = {}): AvwapPendingAlert 
     id: "alert1",
     tradeId: "trade-1",
     text: "NVDA put paper open",
+    isTest: false,
     firstSentAt: OPEN,
     repeatsSent: 0,
     lastSentAt: OPEN,
     acknowledged: false,
+    acknowledgedAt: null,
+    ackVia: null,
     messageIds: [10],
     stop: null,
     claimToken: null,
@@ -276,6 +285,119 @@ describe("other telegram alerts stay on the plain sender", () => {
       expect(source).toContain("sendTelegramAlert");
       expect(source).not.toContain("sendTelegramAlertWithButton");
     }
+  });
+});
+
+describe("AVWAP repeat status", () => {
+  it("keeps a finished alert for 7 days and drops it after that", () => {
+    const now = OPEN;
+    const recent = pending({
+      id: "recent1",
+      stop: "ack",
+      acknowledged: true,
+      acknowledgedAt: now - 6 * 24 * 60 * 60 * 1000,
+      lastSentAt: now - 6 * 24 * 60 * 60 * 1000,
+    });
+    const stale = pending({
+      id: "stale01",
+      stop: "close",
+      acknowledgedAt: now - AVWAP_STATUS_KEEP_MS - 60_000,
+      lastSentAt: now - AVWAP_STATUS_KEEP_MS - 60_000,
+    });
+    const kept = retainAvwapAlerts([recent, stale, pending()], now);
+    expect(kept.map((row) => row.id)).toEqual(["alert1", "recent1"]);
+  });
+
+  it("logs create, repeat, ack, and stop without the rest of the message", async () => {
+    vi.stubEnv("TELEGRAM_WEBHOOK_SECRET", SECRET);
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const long = `${"A".repeat(40)}TAIL-SHOULD-NOT-LOG`;
+    const harness = harnessAt(OPEN);
+    const created = await deliverAvwapOpenAlert(long, null, harness.io);
+    expect(created.saved).toBe(true);
+    const createdLine = info.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(createdLine).toContain("AVWAP pending alert");
+    expect(createdLine).toContain("test=yes");
+    expect(createdLine).toContain("A".repeat(40));
+    expect(createdLine).not.toContain("TAIL-SHOULD-NOT-LOG");
+
+    info.mockClear();
+    harness.text = JSON.stringify(book([pending({ text: long })]));
+    const repeat = harnessAt(OPEN + AVWAP_REPEAT_GAP_MS);
+    repeat.text = harness.text;
+    await runAvwapRepeatPass(repeat.io);
+    const repeatLine = info.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(repeatLine).toContain("AVWAP repeat 1 of 5");
+    expect(repeatLine).not.toContain("TAIL-SHOULD-NOT-LOG");
+
+    info.mockClear();
+    const acked = await acknowledgeFromTelegram(callbackUpdate("alert1", Number(CHAT)), CHAT, repeat.io);
+    expect(acked).toBe("ack");
+    const ackLine = info.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(ackLine).toContain("AVWAP ack alert1 via button");
+    expect(ackLine).toContain("reason acknowledged");
+    expect(ackLine).not.toContain(CHAT);
+
+    info.mockClear();
+    const reply = harnessAt(OPEN);
+    reply.text = JSON.stringify(book([pending({ id: "alert8", messageIds: [11] })]));
+    const replied = await acknowledgeFromTelegram({
+      message: { message_id: 31, text: "seen", chat: { id: Number(CHAT) }, reply_to_message: { message_id: 11 } },
+    }, CHAT, reply.io);
+    expect(replied).toBe("ack");
+    expect(info.mock.calls.map((call) => String(call[0])).join("\n")).toContain("AVWAP ack alert8 via reply");
+
+    info.mockClear();
+    const word = harnessAt(OPEN);
+    word.text = JSON.stringify(book([pending({ id: "alert9" })]));
+    const worded = await acknowledgeFromTelegram({
+      message: { message_id: 30, text: "ack", chat: { id: Number(CHAT) } },
+    }, CHAT, word.io);
+    expect(worded).toBe("ack");
+    const wordLine = info.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(wordLine).toContain("AVWAP ack alert9 via ack");
+    expect(wordLine).not.toContain(CHAT);
+
+    info.mockClear();
+    const closing = harnessAt(OPEN + AVWAP_REPEAT_GAP_MS);
+    closing.text = JSON.stringify(book([pending()]));
+    closing.io.closedTradeIds = async () => new Set(["trade-1"]);
+    await runAvwapRepeatPass(closing.io);
+    const stopLine = info.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(stopLine).toContain("AVWAP repeats stopped alert1 reason trade closed");
+  });
+
+  it("serves the last alerts without message text, and rejects a missing session", async () => {
+    clearMemoryStoreForTests();
+    vi.stubEnv("CRON_SECRET", "cron-token");
+    const phrase = "PHRASE-NOT-IN-STATUS";
+    await updateAvwapRepeat(() => JSON.stringify(book([pending({ text: `NVDA ${phrase} put` })])));
+    const denied = await avwapStatusGet(new NextRequest("https://options-scan.vercel.app/api/telegram/avwap-status"));
+    expect(denied.status).toBe(401);
+    const allowed = await avwapStatusGet(new NextRequest("https://options-scan.vercel.app/api/telegram/avwap-status", {
+      headers: { authorization: "Bearer cron-token" },
+    }));
+    expect(allowed.status).toBe(200);
+    const body = await allowed.json();
+    const encoded = JSON.stringify(body);
+    expect(encoded).not.toContain(phrase);
+    expect(encoded).not.toContain("messageIds");
+    expect(body.alerts).toHaveLength(1);
+    expect(body.alerts[0]).toMatchObject({
+      id: "alert1",
+      isTest: false,
+      repeatsSent: 0,
+      acknowledged: false,
+      acknowledgedAt: null,
+      ackVia: null,
+      stoppedReason: null,
+    });
+    const rows = avwapStatusRows(book([pending({ text: phrase, isTest: true, stop: "ack", acknowledged: true, ackVia: "reply" })]));
+    expect(JSON.stringify(rows)).not.toContain(phrase);
+    expect(rows[0].isTest).toBe(true);
+    expect(rows[0].stoppedReason).toBe("acknowledged");
+    expect(rows[0].ackVia).toBe("reply");
+    clearMemoryStoreForTests();
   });
 });
 

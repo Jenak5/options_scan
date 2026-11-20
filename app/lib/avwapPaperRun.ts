@@ -167,7 +167,7 @@ function defaultDeps(): AvwapPaperDeps {
     quotes: loadQuotes,
     readBook: readAvwapPaperBookText,
     writeBook: updateAvwapPaperBook,
-    send: sendTelegramAlert,
+    send: (message) => sendTelegramAlert(message, "avwap"),
   };
 }
 

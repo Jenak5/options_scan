@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { FlowTab } from "@/app/components/FlowTab";
 import { PaperTradeButton } from "@/app/components/PaperTradeButton";
 import { StoreStatusLine } from "@/app/components/StoreStatusLine";
+import { TelegramMuteLine } from "@/app/components/TelegramMuteLine";
 import { formatContractPriceLine, formatFlowPremium } from "@/app/lib/alertConfig";
 import type { AlertSummary, StoredAlert } from "@/app/lib/alertBook";
 import { notionalPremium } from "@/app/lib/flow";
@@ -194,6 +195,7 @@ function AlertsTab() {
 
   return (
     <div style={{ maxWidth: 640 }}>
+      <TelegramMuteLine />
       <div style={{ fontSize: 17, fontWeight: 700, color: "#e2e8f0", marginBottom: 4 }}>🔔 Automated Alert System</div>
       <div style={{ fontSize: 14, color: "#64748b", marginBottom: 24 }}>
         Scheduled scan every 5 min, weekdays, 8:30am–3:00pm Central. Vercel fires 13:30–21:00 UTC so both CST and CDT are covered. Grok screens for red flags before a Telegram alert is sent.
@@ -501,6 +503,7 @@ function AlertReportTab() {
   return (
     <div>
       <div style={{ fontSize: 17, fontWeight: 700, color: "#e2e8f0", marginBottom: 6 }}>Alert Report</div>
+      <TelegramMuteLine />
       <StoreStatusLine />
       <div style={{ fontSize: 14, color: "#94a3b8", lineHeight: 1.5, marginBottom: 8, maxWidth: 760 }}>
         Each saved alert is an A or a B from the moment Telegram accepted it. C and D are not stored. Later rows are a midpoint check at about 15 minutes, 1 hour, and the same-day close.

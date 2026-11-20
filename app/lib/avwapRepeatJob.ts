@@ -4,7 +4,9 @@ import {
   acknowledgeOldestOpen,
   acknowledgedText,
   addOpenAlert,
+  avwapLogPreview,
   avwapRepeatSecretSet,
+  avwapStopReason,
   avwapRepeatSessionOpen,
   callbackDataFor,
   emptyAvwapRepeatBook,
@@ -16,7 +18,9 @@ import {
   revertRepeatClaim,
   telegramAckIntent,
   updateChatId,
+  type AvwapAckVia,
   type AvwapRepeatBook,
+  type AvwapRepeatStop,
   type RepeatClaim,
 } from "@/app/lib/avwapRepeat";
 import { parseAvwapPaperBook } from "@/app/lib/avwapPaper";
@@ -65,17 +69,21 @@ export async function deliverAvwapOpenAlert(
     const next = addOpenAlert(book, {
       id,
       tradeId,
+      isTest: tradeId == null,
       text,
       firstSentAt: now,
       repeatsSent: 0,
       lastSentAt: now,
       acknowledged: false,
+      acknowledgedAt: null,
+      ackVia: null,
       messageIds: sent.messageId == null ? [] : [sent.messageId],
       stop: null,
       claimToken: null,
-    });
+    }, now);
     return JSON.stringify(next);
   });
+  if (saved) console.info(`AVWAP pending alert ${id} test=${tradeId == null ? "yes" : "no"} "${avwapLogPreview(text)}"`);
   return { sent: true, saved };
 }
 
@@ -84,10 +92,12 @@ export async function runAvwapRepeatPass(io: AvwapRepeatIo = defaultIo()): Promi
   const nowMs = io.now();
   const token = newAvwapAlertId(nowMs);
   let claims: RepeatClaim[] = [];
+  let stopLogs: Array<{ id: string; reason: string }> = [];
   const closed = await io.closedTradeIds();
   const saved = await io.write((current) => {
     const book = parseAvwapRepeatBook(current);
     if (!book) return null;
+    stopLogs = [];
     if (book.lockUntil != null && book.lockUntil > nowMs) {
       claims = claimsOwnedBy(book, token);
       return current ?? JSON.stringify(book);
@@ -95,9 +105,13 @@ export async function runAvwapRepeatPass(io: AvwapRepeatIo = defaultIo()): Promi
     const planned = planAvwapRepeats(book, nowMs, closed, token);
     planned.book.lockUntil = planned.claims.length > 0 ? nowMs + LOCK_MS : null;
     claims = planned.claims;
+    stopLogs = freshStops(book, planned.book);
     return JSON.stringify(planned.book);
   });
   if (!saved) return { sent: 0, stopped: 0 };
+  for (let i = 0; i < stopLogs.length; i++) {
+    console.info(`AVWAP repeats stopped ${stopLogs[i].id} reason ${stopLogs[i].reason}`);
+  }
   const storedText = await io.read();
   const stored = parseAvwapRepeatBook(storedText) ?? emptyAvwapRepeatBook();
   const mine = claims.filter((claim) => ownsClaim(stored, claim, token));
@@ -115,6 +129,8 @@ export async function runAvwapRepeatPass(io: AvwapRepeatIo = defaultIo()): Promi
       continue;
     }
     sent += 1;
+    console.info(`AVWAP repeat ${claim.repeatNumber} of 5 for ${claim.id} "${avwapLogPreview(claim.text)}"`);
+    if (claim.repeatNumber >= 5) console.info(`AVWAP repeats stopped ${claim.id} reason 5 repeats sent`);
     await io.write((current) => {
       const book = parseAvwapRepeatBook(current);
       if (!book) return null;
@@ -139,28 +155,49 @@ export async function acknowledgeFromTelegram(update: unknown, chatId: string, i
   const intent = telegramAckIntent(update);
   if (intent.type === "ignore") return "ignore";
   if (intent.type === "callback") await io.answer(intent.callbackId);
-  let edited: { text: string; messageIds: number[] } | null = null;
+  let edited: { text: string; messageIds: number[]; id: string; via: AvwapAckVia } | null = null;
+  const nowMs = io.now();
   await io.write((current) => {
     const book = parseAvwapRepeatBook(current);
     if (!book) return null;
-    const result = applyIntent(book, intent);
+    const result = applyIntent(book, intent, nowMs);
     if (!result.alert) return current ?? JSON.stringify(book);
-    edited = { text: acknowledgedText(result.alert.text), messageIds: result.alert.messageIds.slice() };
+    edited = {
+      text: acknowledgedText(result.alert.text),
+      messageIds: result.alert.messageIds.slice(),
+      id: result.alert.id,
+      via: result.alert.ackVia ?? "button",
+    };
     return JSON.stringify(result.book);
   });
   if (!edited) return "ignore";
-  const note = edited as { text: string; messageIds: number[] };
+  const note = edited as { text: string; messageIds: number[]; id: string; via: AvwapAckVia };
+  console.info(`AVWAP ack ${note.id} via ${note.via}`);
+  console.info(`AVWAP repeats stopped ${note.id} reason acknowledged`);
   for (let i = 0; i < note.messageIds.length; i++) {
     await io.edit(note.messageIds[i], note.text);
   }
   return "ack";
 }
 
-function applyIntent(book: AvwapRepeatBook, intent: ReturnType<typeof telegramAckIntent>) {
-  if (intent.type === "callback") return acknowledgeAvwapAlert(book, intent.alertId);
-  if (intent.type === "reply") return acknowledgeByMessageId(book, intent.messageId);
-  if (intent.type === "word") return acknowledgeOldestOpen(book);
+function applyIntent(book: AvwapRepeatBook, intent: ReturnType<typeof telegramAckIntent>, nowMs: number) {
+  if (intent.type === "callback") return acknowledgeAvwapAlert(book, intent.alertId, nowMs, "button");
+  if (intent.type === "reply") return acknowledgeByMessageId(book, intent.messageId, nowMs, "reply");
+  if (intent.type === "word") return acknowledgeOldestOpen(book, nowMs);
   return { book, alert: null };
+}
+
+function freshStops(before: AvwapRepeatBook, after: AvwapRepeatBook): Array<{ id: string; reason: string }> {
+  const logs: Array<{ id: string; reason: string }> = [];
+  for (let i = 0; i < after.alerts.length; i++) {
+    const alert = after.alerts[i];
+    if (alert.stop !== "closed" && alert.stop !== "close") continue;
+    const prior = before.alerts.find((row) => row.id === alert.id);
+    if (prior?.stop === alert.stop) continue;
+    const reason = avwapStopReason(alert.stop as AvwapRepeatStop);
+    if (reason) logs.push({ id: alert.id, reason });
+  }
+  return logs;
 }
 
 function claimsOwnedBy(book: AvwapRepeatBook, token: string): RepeatClaim[] {
