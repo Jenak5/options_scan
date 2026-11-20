@@ -325,7 +325,9 @@ The checks are pure functions. `npm test` runs them against fixture chains and d
 5. After you are signed in, use **Send test Telegram alert** on the Alerts tab.
 6. To repeat AVWAP trade-open alerts until they are acknowledged, also store `TELEGRAM_WEBHOOK_SECRET` as a Sensitive variable. Pick any long random string and do not commit it. If that variable is unset, an AVWAP open alert is sent once and is not repeated.
 7. After the secret is saved, sign in and POST `/api/telegram/setup` once. That registers the Telegram webhook for the Got it button and for replies. POST `/api/telegram/avwap-test` sends a labeled test alert through the same path. It does not open a paper trade. GET `/api/telegram/avwap-status` lists the last 20 pending and recent AVWAP alerts without the message text.
-8. Non-AVWAP Telegram alerts are muted by default. AVWAP trade-open alerts and a scanner-failure warning still send. Sign in and POST `/api/telegram/mute` with `{"muted": false}` to turn the other alerts back on, or `{"muted": true}` to mute them again. The Alerts tab shows the same switch. No redeploy is required.
+8. Non-AVWAP Telegram alerts are muted by default. AVWAP trade-open alerts, including the AMD, MSFT, and AMZN paper trial opens, and a scanner-failure warning still send. Sign in and POST `/api/telegram/mute` with `{"muted": false}` to turn the other alerts back on, or `{"muted": true}` to mute them again. The Alerts tab shows the same switch. No redeploy is required.
+
+The AMD, MSFT, and AMZN trial is a separate paper book on the AVWAP page and at `GET /api/avwap-trial`. It does not change the seven-name AVWAP book. It runs in the existing 5-minute scan after that book is saved. No extra cron. Trial exits are not sent to Telegram.
 
 ## Deploy notes
 
