@@ -63,6 +63,12 @@ export const SCHWAB_BLOB_JG_VWAP_PATH = "schwab/jg-vwap-book.json";
 export const SCHWAB_BLOB_AVWAP_PAPER_PATH = "schwab/avwap-paper-book.json";
 
 /**
+ * Private blob for the two AVWAP shadow paper books and the signal log.
+ * Not a token, not an order, and not the live AVWAP book.
+ */
+export const SCHWAB_BLOB_AVWAP_SHADOW_PATH = "schwab/avwap-shadow-book.json";
+
+/**
  * Private blob for the flush-then-reclaim call paper log.
  * Not a token, not an order, and not the A/B shadow scorecard.
  */

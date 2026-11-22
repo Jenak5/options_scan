@@ -264,6 +264,10 @@ async function handleCron(request: NextRequest) {
         const line = formatAvwapPaperLog(avwap);
         console.info(line);
         log.push(line);
+        if (avwap.shadowLog) {
+          console.info(avwap.shadowLog);
+          log.push(avwap.shadowLog);
+        }
       } catch (err) {
         avwapFailed = true;
         const detail = err instanceof Error ? err.message.slice(0, 160) : "AVWAP paper update failed";

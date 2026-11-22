@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
+import { AvwapShadowPanel } from "@/app/components/AvwapShadowPanel";
 import { AvwapTrialPanel } from "@/app/components/AvwapTrialPanel";
 import { PageLinks } from "@/app/components/PageLinks";
 
@@ -194,6 +195,7 @@ export default function AvwapPage() {
             <TradeTable rows={page.closed} empty="No closed AVWAP paper trade yet." showRunning />
           </>
         )}
+        <AvwapShadowPanel />
         <AvwapTrialPanel />
       </div>
     </main>

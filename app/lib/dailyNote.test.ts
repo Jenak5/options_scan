@@ -208,19 +208,25 @@ describe("daily note delivery", () => {
   });
 
   it("requires the cron bearer and does not send on an unauthorized call", async () => {
-    useTastytrade();
-    process.env.CRON_SECRET = "cron-token";
-    const denied = await GET(new NextRequest("https://options-scan.vercel.app/api/cron/daily-note"));
-    expect(denied.status).toBe(401);
-    expect(send).not.toHaveBeenCalled();
-    const allowed = await GET(new NextRequest("https://options-scan.vercel.app/api/cron/daily-note?manual=true", {
-      headers: { authorization: "Bearer cron-token" },
-    }));
-    expect(allowed.status).toBe(200);
-    const body = await allowed.json();
-    expect(body.sent).toBe(true);
-    expect(body.note).toContain("Options scanner today:");
-    expect(body.note).not.toContain("Reconnect Schwab");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(CST_NOTE);
+    try {
+      useTastytrade();
+      process.env.CRON_SECRET = "cron-token";
+      const denied = await GET(new NextRequest("https://options-scan.vercel.app/api/cron/daily-note"));
+      expect(denied.status).toBe(401);
+      expect(send).not.toHaveBeenCalled();
+      const allowed = await GET(new NextRequest("https://options-scan.vercel.app/api/cron/daily-note?manual=true", {
+        headers: { authorization: "Bearer cron-token" },
+      }));
+      expect(allowed.status).toBe(200);
+      const body = await allowed.json();
+      expect(body.sent).toBe(true);
+      expect(body.note).toContain("Options scanner today:");
+      expect(body.note).not.toContain("Reconnect Schwab");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

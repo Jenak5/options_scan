@@ -19,7 +19,9 @@ import { newYorkDate } from "@/app/lib/flow";
 import { getPriceHistory, getQuoteEntries } from "@/app/lib/marketData";
 import type { PriceCandle } from "@/app/lib/schwabParse";
 import { normalizeOptionSymbol } from "@/app/lib/optionSymbol";
-import { readAvwapPaperBookText, resolveStoreKind, updateAvwapPaperBook } from "@/app/lib/schwabStore";
+import { readAvwapPaperBookText, readAvwapShadowText, resolveStoreKind, updateAvwapPaperBook } from "@/app/lib/schwabStore";
+import { mergeQuoteRequests, parseAvwapShadowBook, shadowQuoteRequests } from "@/app/lib/avwapShadow";
+import { recordAvwapShadows } from "@/app/lib/avwapShadowRun";
 import { avwapRepeatsEnabled, deliverAvwapOpenAlert } from "@/app/lib/avwapRepeatJob";
 import { sendTelegramAlert } from "@/app/lib/telegram";
 import { preferredDataSource as avwapPreferredSource } from "@/app/lib/marketData";
@@ -61,6 +63,8 @@ export interface AvwapRunResult {
   skipped: "holiday" | "closed" | null;
   drawdownFlag: boolean;
   logNote: string;
+  /** Separate shadow-book line. Empty when this pass did not check the session. */
+  shadowLog?: string;
 }
 
 /** One runtime-log line. The cron prints this with console.info so it shows up in Vercel logs. */
@@ -80,7 +84,7 @@ export async function loadAvwapPaperSection(now: Date = new Date()): Promise<Avw
 export async function runAvwapPaper(now: Date, deps: AvwapPaperDeps = defaultDeps()): Promise<AvwapRunResult> {
   const skip = avwapSkipReason(now);
   if (skip) {
-    return { opened: 0, closed: 0, saved: true, skipped: skip, drawdownFlag: false, logNote: skip === "holiday" ? "market holiday" : "outside market hours" };
+    return { opened: 0, closed: 0, saved: true, skipped: skip, drawdownFlag: false, logNote: skip === "holiday" ? "market holiday" : "outside market hours", shadowLog: "" };
   }
 
   const today = newYorkDate(now);
@@ -97,7 +101,13 @@ export async function runAvwapPaper(now: Date, deps: AvwapPaperDeps = defaultDep
   }));
 
   const current = parseAvwapPaperBook(await deps.readBook());
-  const plan = quotePlan(current, markets, now);
+  let shadowCurrent = parseAvwapShadowBook(null);
+  try {
+    shadowCurrent = parseAvwapShadowBook(await readAvwapShadowText());
+  } catch {
+    shadowCurrent = parseAvwapShadowBook(null);
+  }
+  const plan = mergeQuoteRequests(quotePlan(current, markets, now), shadowQuoteRequests(shadowCurrent, markets, now));
   let quoteMap = new Map<string, AvwapQuote>();
   if (plan.length > 0) {
     try {
@@ -118,9 +128,11 @@ export async function runAvwapPaper(now: Date, deps: AvwapPaperDeps = defaultDep
     return serializeAvwapPaperBook(advanced.book);
   });
   if (!saved) {
-    return { opened: 0, closed: 0, saved: false, skipped: null, drawdownFlag: false, logNote: "paper log was not saved" };
+    const shadowLog = await recordAvwapShadows(now, snapshots, current);
+    return { opened: 0, closed: 0, saved: false, skipped: null, drawdownFlag: false, logNote: "paper log was not saved", shadowLog };
   }
   const stored = parseAvwapPaperBook(await deps.readBook());
+  const shadowLog = await recordAvwapShadows(now, snapshots, stored);
   const opened = stored.trades.filter((trade) => openedIds.includes(trade.id));
   for (let i = 0; i < opened.length; i++) {
     const text = formatAvwapPaperAlert(opened[i]);
@@ -136,6 +148,7 @@ export async function runAvwapPaper(now: Date, deps: AvwapPaperDeps = defaultDep
     skipped: null,
     drawdownFlag: drawdownFlag || flag.length > 0,
     logNote: `${notes}.${flag}`,
+    shadowLog,
   };
 }
 
