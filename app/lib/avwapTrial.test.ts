@@ -20,7 +20,7 @@ import {
 import { closedAvwapTradeIds } from "@/app/lib/avwapRepeatJob";
 import { clearMemoryStoreForTests, updateAvwapTrial } from "@/app/lib/schwabStore";
 import { normalizeOptionSymbol } from "@/app/lib/optionSymbol";
-import { runAvwapTrial, type AvwapTrialDeps } from "@/app/lib/avwapTrialRun";
+import { formatAvwapTrialLog, formatAvwapTrialLogNote, runAvwapTrial, type AvwapTrialDeps } from "@/app/lib/avwapTrialRun";
 import {
   AVWAP_TRIAL_SYMBOLS,
   advanceAvwapTrial,
@@ -89,6 +89,8 @@ describe("AVWAP trial signals", () => {
     expect(ran.opened).toBe(0);
     expect(deliver).not.toHaveBeenCalled();
     expect(sendPlain).not.toHaveBeenCalled();
+    expect(ran.logNote).toContain("call closed AMD 110C 2026-11-04 @ bid 3.00");
+    expect(formatAvwapTrialLog(ran)).toContain("call closed AMD 110C 2026-11-04 @ bid 3.00");
   });
 
   it("exits on the expiry-day final scan and does not send Telegram", async () => {
@@ -103,6 +105,7 @@ describe("AVWAP trial signals", () => {
     expect(ran.closed).toBe(1);
     expect(deliver).not.toHaveBeenCalled();
     expect(sendPlain).not.toHaveBeenCalled();
+    expect(ran.logNote).toContain("put closed AMD 90P 2026-11-04 @ bid 1.00");
   });
 
   it("blocks new trial entries after two losing closes and does not block the live book", () => {
@@ -135,9 +138,54 @@ describe("AVWAP trial Telegram", () => {
     expect(deliver).toHaveBeenCalledTimes(1);
     const text = String(deliver.mock.calls[0][0]);
     expect(text.startsWith("<b>PAPER TRIAL: AMD CALL</b>")).toBe(true);
+    expect(text.split("\n")[1]).toBe("AMD <b>CALL</b> $110.00 exp 2026-11-04");
+    expect(text).toContain("exp 2026-11-04");
     expect(text).not.toContain("<b>PAPER ONLY</b>");
     expect(deliver.mock.calls[0][1]).toContain("avwap-trial-AMD-call-");
     expect(sendPlain).not.toHaveBeenCalled();
+    expect(ran.logNote).toContain("call entered AMD 110C 2026-11-04 @ ask 2.20");
+    expect(formatAvwapTrialLog(ran)).toContain("AVWAP trial: 1 new entry");
+    expect(formatAvwapTrialLog(ran)).toContain("call entered AMD 110C 2026-11-04 @ ask 2.20");
+  });
+
+  it("names the strike and expiration under the paper trial header", () => {
+    const trade = {
+      ...openTrade("call", 8.5),
+      symbol: "MSFT" as const,
+      strike: 480,
+      expiration: "2026-12-18",
+      entryAsk: 8.5,
+      entryBid: 7.95,
+      contracts: 1,
+    };
+    const text = formatAvwapTrialAlert(trade);
+    const lines = text.split("\n");
+    expect(lines[0]).toBe("<b>PAPER TRIAL: MSFT CALL</b>");
+    expect(lines[1]).toBe("MSFT <b>CALL</b> $480.00 exp 2026-12-18");
+    expect(text).toContain("$480.00");
+    expect(text).toContain("exp 2026-12-18");
+    expect(text).toContain("Paper only. No order is placed. This is not a live AVWAP book alert.");
+    expect(text).toContain("Buy <b>1</b> at the ask $8.50 (bid $7.95)");
+    expect(text).toContain("Gap-day anchored VWAP.");
+    expect(text).toContain("Sell at the bid when the bid is at least $12.75 (+50%).");
+    const put = formatAvwapTrialAlert({ ...openTrade("put", 2), expiration: "2026-11-04&<>" });
+    expect(put.split("\n")[1]).toBe("AMD <b>PUT</b> $90.00 exp 2026-11-04&amp;&lt;&gt;");
+    expect(put).not.toContain("2026-11-04&<>");
+    const note = formatAvwapTrialLogNote(
+      {
+        MSFT: {
+          at: trade.openedAt,
+          put: { outcome: "no-signal", reason: "no cross" },
+          call: { outcome: "entered", reason: "paper entry, 1 call contract" },
+        },
+      },
+      [trade],
+      [],
+    );
+    expect(note).toContain("MSFT: put no-signal, call entered MSFT 480C 2026-12-18 @ ask 8.50");
+    const closed = formatAvwapTrialLogNote({}, [], [{ ...trade, status: "closed", exitBid: 12.75, exitReason: "target50" }]);
+    expect(closed).toContain("call closed MSFT 480C 2026-12-18 @ bid 12.75");
+    expect(closed).not.toMatch(/token|secret|bearer/i);
   });
 
   it("stops repeats on ack and when the trial trade is closed", async () => {
@@ -163,6 +211,8 @@ describe("AVWAP trial Telegram", () => {
     expect(due.claims).toHaveLength(1);
     expect(due.claims[0].text).toContain("REPEAT 1 of 5");
     expect(due.claims[0].text).toContain("PAPER TRIAL: AMD CALL");
+    expect(due.claims[0].text).toContain("AMD <b>CALL</b> $110.00 exp 2026-11-04");
+    expect(due.claims[0].text).toContain("exp 2026-11-04");
     const acked = acknowledgeAvwapAlert(due.book, "trialalert1", first + AVWAP_REPEAT_GAP_MS, "button");
     expect(planAvwapRepeats(acked.book, first + 2 * AVWAP_REPEAT_GAP_MS, new Set(), "next").claims).toHaveLength(0);
     const closed = planAvwapRepeats(

@@ -337,6 +337,7 @@ export function formatAvwapTrialAlert(trade: AvwapTrialTrade): string {
   const prior = trade.putCall === "call" ? "at or below" : "at or above";
   return [
     `<b>PAPER TRIAL: ${trade.symbol} ${side}</b>`,
+    `${escapeHtml(trade.symbol)} <b>${side}</b> $${money(trade.strike)} exp ${escapeHtml(trade.expiration)}`,
     "Paper only. No order is placed. This is not a live AVWAP book alert.",
     "",
     `Gap-day anchored VWAP. Anchor ${trade.anchorDate} (${(trade.gap * 100).toFixed(2)}% vs the prior close). 5-minute close $${money(trade.signalClose)} ${word} AVWAP $${money(trade.signalVwap)} after a prior close ${prior} it.`,
@@ -777,6 +778,10 @@ function roundCents(value: number): number {
 
 function money(value: number): string {
   return value.toFixed(2);
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 export const AVWAP_TRIAL_GAP = AVWAP_GAP_FRACTION;
