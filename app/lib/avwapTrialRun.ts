@@ -15,10 +15,12 @@ import {
   parseAvwapTrialBook,
   serializeAvwapTrialBook,
   trialQuotePlan,
+  type AvwapTrialBook,
   type AvwapTrialMark,
   type AvwapTrialMarket,
   type AvwapTrialSection,
   type AvwapTrialSymbol,
+  type AvwapTrialTrade,
 } from "@/app/lib/avwapTrial";
 
 /**
@@ -73,11 +75,11 @@ export async function runAvwapTrial(now: Date, deps: AvwapTrialDeps = defaultDep
   }
   const quoted = markets.map((market) => attachQuotes(market, plan, quoteMap));
   let openedIds: string[] = [];
-  let closedCount = 0;
+  let closedIds: string[] = [];
   const saved = await deps.writeBook((text) => {
     const advanced = advanceAvwapTrial(parseAvwapTrialBook(text), quoted, now);
     openedIds = advanced.opened.map((trade) => trade.id);
-    closedCount = advanced.closed.length;
+    closedIds = advanced.closed.map((trade) => trade.id);
     return serializeAvwapTrialBook(advanced.book);
   });
   if (!saved) {
@@ -85,23 +87,93 @@ export async function runAvwapTrial(now: Date, deps: AvwapTrialDeps = defaultDep
   }
   const stored = parseAvwapTrialBook(await deps.readBook());
   const opened = stored.trades.filter((trade) => openedIds.includes(trade.id));
+  const closed: AvwapTrialTrade[] = [];
+  for (let i = 0; i < closedIds.length; i++) {
+    const trade = stored.trades.find((row) => row.id === closedIds[i]);
+    if (trade) closed.push(trade);
+  }
   for (let i = 0; i < opened.length; i++) {
     const text = formatAvwapTrialAlert(opened[i]);
     if (deps.repeatsOn()) await deps.deliver(text, opened[i].id);
     else await deps.sendPlain(text);
   }
+  return {
+    opened: opened.length,
+    closed: closedIds.length,
+    saved: true,
+    skipped: null,
+    logNote: formatAvwapTrialLogNote(stored.checks, opened, closed),
+  };
+}
+
+export function formatAvwapTrialLogNote(
+  checks: AvwapTrialBook["checks"],
+  opened: readonly AvwapTrialTrade[],
+  closed: readonly AvwapTrialTrade[],
+): string {
   const notes = AVWAP_TRIAL_SYMBOLS.map((symbol) => {
-    const check = stored.checks[symbol];
+    const check = checks[symbol];
     if (!check) return `${symbol}: not checked`;
-    return `${symbol}: put ${check.put.outcome}, call ${check.call.outcome}`;
+    const put = sideLog(check.put.outcome, "put", symbol, opened);
+    const call = sideLog(check.call.outcome, "call", symbol, opened);
+    return `${symbol}: put ${put}, call ${call}`;
   }).join("; ");
-  return { opened: opened.length, closed: closedCount, saved: true, skipped: null, logNote: notes };
+  if (closed.length === 0) return notes;
+  const exits: string[] = [];
+  for (let i = 0; i < closed.length; i++) exits.push(closedLog(closed[i]));
+  return `${notes}. ${exits.join("; ")}`;
 }
 
 export function formatAvwapTrialLog(result: AvwapTrialRunResult): string {
   const noun = result.opened === 1 ? "entry" : "entries";
   const skip = result.skipped === "holiday" ? " Market holiday." : result.skipped === "closed" ? " Outside market hours." : "";
   return `AVWAP trial: ${result.opened} new ${noun}, ${result.closed} closed (${result.saved ? "saved" : "not saved"}, PAPER ONLY).${skip} ${result.logNote}`.replace(/[ \t]+/g, " ").trim();
+}
+
+function sideLog(
+  outcome: string,
+  putCall: "put" | "call",
+  symbol: AvwapTrialSymbol,
+  opened: readonly AvwapTrialTrade[],
+): string {
+  if (outcome !== "entered") return outcome;
+  const trade = findOpened(opened, symbol, putCall);
+  if (!trade) return outcome;
+  return `entered ${contractStamp(trade)} @ ask ${priceText(trade.entryAsk)}`;
+}
+
+function closedLog(trade: AvwapTrialTrade): string {
+  return `${trade.putCall} closed ${contractStamp(trade)} @ bid ${priceText(trade.exitBid)}`;
+}
+
+function findOpened(
+  opened: readonly AvwapTrialTrade[],
+  symbol: AvwapTrialSymbol,
+  putCall: "put" | "call",
+): AvwapTrialTrade | null {
+  for (let i = 0; i < opened.length; i++) {
+    if (opened[i].symbol === symbol && opened[i].putCall === putCall) return opened[i];
+  }
+  return null;
+}
+
+function contractStamp(trade: AvwapTrialTrade): string {
+  const right = trade.putCall === "call" ? "C" : "P";
+  const expiration = /^\d{4}-\d{2}-\d{2}$/.test(trade.expiration) ? trade.expiration : "unknown-expiry";
+  return `${trade.symbol} ${logStrike(trade.strike)}${right} ${expiration}`;
+}
+
+function logStrike(strike: number): string {
+  if (!Number.isFinite(strike)) return "0";
+  const fixed = strike.toFixed(2);
+  if (fixed.endsWith(".00")) return fixed.slice(0, -3);
+  if (fixed.endsWith("0")) return fixed.slice(0, -1);
+  return fixed;
+}
+
+function priceText(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "no quote";
+  return value.toFixed(2);
 }
 
 export async function loadAvwapTrialSection(): Promise<AvwapTrialSection> {
