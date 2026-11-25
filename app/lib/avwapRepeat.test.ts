@@ -222,6 +222,30 @@ describe("AVWAP repeat job", () => {
   });
 });
 
+describe("telegram webhook no-op logging", () => {
+  it("logs a wrong secret, another chat, and an unknown alert id without printing secrets", async () => {
+    vi.stubEnv("TELEGRAM_WEBHOOK_SECRET", SECRET);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const wrong = await webhookPost(new NextRequest("https://options-scan.vercel.app/api/telegram/webhook", {
+      method: "POST",
+      body: "{}",
+      headers: { "x-telegram-bot-api-secret-token": "not-the-secret" },
+    }));
+    expect(wrong.status).toBe(401);
+    expect(warn).toHaveBeenCalledWith("Telegram webhook rejected: secret header does not match");
+
+    const harness = harnessAt(OPEN);
+    harness.text = JSON.stringify(book([pending()]));
+    expect(await acknowledgeFromTelegram(callbackUpdate("alert1", 999), CHAT, harness.io)).toBe("reject");
+    expect(warn).toHaveBeenCalledWith("AVWAP ack rejected: chat id does not match TELEGRAM_CHAT_ID");
+
+    expect(await acknowledgeFromTelegram(callbackUpdate("gone1", Number(CHAT)), CHAT, harness.io)).toBe("ignore");
+    expect(harness.answers).toEqual(["cb-1"]);
+    expect(warn).toHaveBeenCalledWith("AVWAP ack ignored: no matching alert in the repeat book (gone1)");
+    for (const call of warn.mock.calls) expect(String(call[0])).not.toContain(SECRET);
+  });
+});
+
 describe("telegram webhook auth", () => {
   it("rejects a missing or wrong secret and lets the public path through middleware", async () => {
     vi.stubEnv("TELEGRAM_WEBHOOK_SECRET", SECRET);
