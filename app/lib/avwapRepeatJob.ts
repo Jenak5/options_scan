@@ -152,17 +152,30 @@ export async function runAvwapRepeatPass(io: AvwapRepeatIo = defaultIo()): Promi
 
 export async function acknowledgeFromTelegram(update: unknown, chatId: string, io: AvwapRepeatIo = defaultIo()): Promise<"ack" | "ignore" | "reject"> {
   const incoming = updateChatId(update);
-  if (!incoming || !(await timingSafeEqual(incoming, chatId))) return "reject";
+  if (!incoming || !(await timingSafeEqual(incoming, chatId))) {
+    console.warn(`AVWAP ack rejected: ${incoming ? "chat id does not match TELEGRAM_CHAT_ID" : "update has no chat id"}`);
+    return "reject";
+  }
   const intent = telegramAckIntent(update);
-  if (intent.type === "ignore") return "ignore";
-  if (intent.type === "callback") await io.answer(intent.callbackId);
+  if (intent.type === "ignore") {
+    console.info("AVWAP ack ignored: update is not a Got it tap, a reply, or the word ack");
+    return "ignore";
+  }
+  if (intent.type === "callback") {
+    const answered = await io.answer(intent.callbackId);
+    if (!answered) console.warn(`AVWAP ack: answerCallbackQuery failed for ${intent.alertId}`);
+  }
   let edited: { text: string; messageIds: number[]; id: string; via: AvwapAckVia } | null = null;
+  let missing = false;
   const nowMs = io.now();
-  await io.write((current) => {
+  const wrote = await io.write((current) => {
     const book = parseAvwapRepeatBook(current);
     if (!book) return null;
     const result = applyIntent(book, intent, nowMs);
-    if (!result.alert) return current ?? JSON.stringify(book);
+    if (!result.alert) {
+      missing = true;
+      return current ?? JSON.stringify(book);
+    }
     edited = {
       text: acknowledgedText(result.alert.text),
       messageIds: result.alert.messageIds.slice(),
@@ -171,12 +184,18 @@ export async function acknowledgeFromTelegram(update: unknown, chatId: string, i
     };
     return JSON.stringify(result.book);
   });
-  if (!edited) return "ignore";
+  if (!edited) {
+    const target = intent.type === "callback" ? intent.alertId : intent.type;
+    if (!wrote) console.warn(`AVWAP ack ignored: repeat book could not be read or saved (${target})`);
+    else if (missing) console.warn(`AVWAP ack ignored: no matching alert in the repeat book (${target})`);
+    return "ignore";
+  }
   const note = edited as { text: string; messageIds: number[]; id: string; via: AvwapAckVia };
   console.info(`AVWAP ack ${note.id} via ${note.via}`);
   console.info(`AVWAP repeats stopped ${note.id} reason acknowledged`);
   for (let i = 0; i < note.messageIds.length; i++) {
-    await io.edit(note.messageIds[i], note.text);
+    const ok = await io.edit(note.messageIds[i], note.text);
+    if (!ok) console.warn(`AVWAP ack ${note.id}: editMessageText failed for one message`);
   }
   return "ack";
 }
