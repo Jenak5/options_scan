@@ -109,6 +109,44 @@ export async function setTelegramWebhook(url: string, secret: string): Promise<{
   }
 }
 
+export interface TelegramWebhookSummary {
+  ok: boolean;
+  url: string | null;
+  pending_update_count: number | null;
+  last_error_date: number | null;
+  last_error_message: string | null;
+  allowed_updates: string[] | null;
+  description: string | null;
+}
+
+/** getWebhookInfo with only safe fields. The URL loses its query string. No token in the result. */
+export async function getTelegramWebhookSummary(): Promise<TelegramWebhookSummary> {
+  const empty: TelegramWebhookSummary = {
+    ok: false, url: null, pending_update_count: null, last_error_date: null, last_error_message: null, allowed_updates: null, description: null,
+  };
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token || token.trim() === "") return { ...empty, description: "Telegram is not configured" };
+  const secret = process.env.TELEGRAM_WEBHOOK_SECRET ?? "";
+  const clean = (text: string) => redactTelegram(secret ? redactTelegram(text, secret) : text, token).slice(0, 300);
+  try {
+    const res = await fetch(`${TG_API}${token}/getWebhookInfo`, { method: "GET" });
+    const body = (await res.json().catch(() => null)) as { ok?: boolean; description?: unknown; result?: Record<string, unknown> } | null;
+    const result = body?.result ?? {};
+    const rawUrl = typeof result.url === "string" ? result.url : null;
+    return {
+      ok: res.ok && body?.ok === true,
+      url: rawUrl == null ? null : clean(rawUrl.split("?")[0]),
+      pending_update_count: typeof result.pending_update_count === "number" ? result.pending_update_count : null,
+      last_error_date: typeof result.last_error_date === "number" ? result.last_error_date : null,
+      last_error_message: typeof result.last_error_message === "string" ? clean(result.last_error_message) : null,
+      allowed_updates: Array.isArray(result.allowed_updates) ? result.allowed_updates.filter((v): v is string => typeof v === "string") : null,
+      description: typeof body?.description === "string" ? clean(body.description) : null,
+    };
+  } catch (err) {
+    return { ...empty, description: clean(err instanceof Error ? err.message : "unknown") };
+  }
+}
+
 export function publicAppOrigin(): string {
   return appOrigin();
 }

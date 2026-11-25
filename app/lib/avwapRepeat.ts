@@ -13,7 +13,8 @@ export const AVWAP_REPEAT_CLOSE_MINUTE = 16 * 60;
 /** Finished alerts stay in the book this long so a past ack can be checked. */
 export const AVWAP_STATUS_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 
-export type AvwapRepeatStop = "ack" | "repeats" | "closed" | "close";
+/** "probe" marks a TEST ONLY alert from /api/telegram/test. It never repeats. */
+export type AvwapRepeatStop = "ack" | "repeats" | "closed" | "close" | "probe";
 export type AvwapAckVia = "button" | "reply" | "ack";
 
 export interface AvwapPendingAlert {
@@ -73,6 +74,7 @@ export function avwapStopReason(stop: AvwapRepeatStop | null): string | null {
   if (stop === "repeats") return "5 repeats sent";
   if (stop === "closed") return "trade closed";
   if (stop === "close") return "market closed";
+  if (stop === "probe") return "test only, no repeats";
   return null;
 }
 
@@ -332,7 +334,7 @@ function parseAlert(value: unknown): AvwapPendingAlert | null {
   const messageIds = Array.isArray(row.messageIds)
     ? row.messageIds.filter((id): id is number => typeof id === "number" && Number.isInteger(id))
     : [];
-  const stop = row.stop === "ack" || row.stop === "repeats" || row.stop === "closed" || row.stop === "close" ? row.stop : null;
+  const stop = row.stop === "ack" || row.stop === "repeats" || row.stop === "closed" || row.stop === "close" || row.stop === "probe" ? row.stop : null;
   return {
     id: row.id,
     tradeId: typeof row.tradeId === "string" && row.tradeId.length > 0 ? row.tradeId : null,

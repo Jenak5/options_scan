@@ -14,6 +14,7 @@ export const BEARER_PATHS: ReadonlySet<string> = new Set([
   "/api/features/backfill",
   "/api/health",
   "/api/brief",
+  "/api/telegram/test",
 ]);
 
 export function isBearerPath(pathname: string): boolean {

@@ -88,6 +88,45 @@ export async function deliverAvwapOpenAlert(
   return { sent: true, saved };
 }
 
+export const TELEGRAM_PROBE_PREFIX = "TEST ONLY, tap Got it, no trade";
+
+/**
+ * One TEST ONLY alert through the real sender and button, saved in the ack store
+ * with stop "probe" so the repeat pass skips it. No trade, book, or Scorecard write.
+ */
+export async function deliverTelegramProbe(
+  io: AvwapRepeatIo = defaultIo(),
+): Promise<{ sent: boolean; saved: boolean; id: string | null; sentAt: number | null }> {
+  const id = newAvwapAlertId(io.now());
+  const callback = callbackDataFor(id);
+  if (!callback) return { sent: false, saved: false, id: null, sentAt: null };
+  const text = `${TELEGRAM_PROBE_PREFIX}\nThis checks where a Got it tap goes. Alert id ${id}.`;
+  const sent = await io.send(text, callback);
+  if (!sent.ok) return { sent: false, saved: false, id, sentAt: null };
+  const now = io.now();
+  const saved = await io.write((current) => {
+    const book = parseAvwapRepeatBook(current);
+    if (!book) return null;
+    return JSON.stringify(addOpenAlert(book, {
+      id,
+      tradeId: null,
+      isTest: true,
+      text,
+      firstSentAt: now,
+      repeatsSent: 0,
+      lastSentAt: now,
+      acknowledged: false,
+      acknowledgedAt: null,
+      ackVia: null,
+      messageIds: sent.messageId == null ? [] : [sent.messageId],
+      stop: "probe",
+      claimToken: null,
+    }, now));
+  });
+  console.info(`Telegram test alert ${id} sent, saved=${saved ? "yes" : "no"}, no repeats`);
+  return { sent: true, saved, id, sentAt: now };
+}
+
 export async function runAvwapRepeatPass(io: AvwapRepeatIo = defaultIo()): Promise<{ sent: number; stopped: number }> {
   if (!avwapRepeatsEnabled()) return { sent: 0, stopped: 0 };
   const nowMs = io.now();
